@@ -4,4 +4,4 @@ app = FastAPI()
 
 @app.get("/")
 def root():
-    return {"message": "Hello World"}
+    return {"message": "이어주개 backend running"}
