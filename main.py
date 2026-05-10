@@ -1,8 +1,11 @@
 from fastapi import FastAPI
-from app.routers import dogs
+from app.routers import dogs, surveys
 
 app = FastAPI()
+
 app.include_router(dogs.router)
+app.include_router(surveys.router)
+
 
 @app.get("/")
 def root():
