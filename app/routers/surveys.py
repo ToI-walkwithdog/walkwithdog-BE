@@ -1,33 +1,51 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
-router = APIRouter(prefix="/surveys", tags=["surveys"])
+from database import SessionLocal
+from models import Survey, User
+from schemas import SurveyCreate, SurveyResponse
 
-
-class SurveyCreate(BaseModel):
-    user_id: int
-    housing_type: str
-    walk_frequency: int
-    alone_time: int
-    experience_level: int
-    activity_preference: int
+router = APIRouter(
+    prefix="/surveys",
+    tags=["surveys"]
+)
 
 
-surveys = []
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
-@router.post("/")
-def create_survey(survey: SurveyCreate):
-    new_survey = survey.model_dump()
-    new_survey["id"] = len(surveys) + 1
-    surveys.append(new_survey)
+@router.post("/", response_model=SurveyResponse)
+def create_survey(survey: SurveyCreate, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == survey.user_id).first()
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    new_survey = Survey(
+        user_id=survey.user_id,
+        housing_type=survey.housing_type,
+        family_type=survey.family_type,
+        outing_frequency=survey.outing_frequency,
+        daily_walk_time=survey.daily_walk_time,
+        life_pattern=survey.life_pattern,
+        walk_frequency=survey.walk_frequency,
+        walk_duration=survey.walk_duration,
+        dog_experience=survey.dog_experience,
+        mbti=survey.mbti
+    )
+
+    db.add(new_survey)
+    db.commit()
+    db.refresh(new_survey)
+
     return new_survey
 
 
-@router.get("/{user_id}")
-def get_survey(user_id: int):
-    for survey in surveys:
-        if survey["user_id"] == user_id:
-            return survey
-
-    raise HTTPException(status_code=404, detail="Survey not found")
+@router.get("/{user_id}", response_model=list[SurveyResponse])
+def get_surveys_by_user(user_id: int, db: Session = Depends(get_db)):
+    return db.query(Survey).filter(Survey.user_id == user_id).all()
