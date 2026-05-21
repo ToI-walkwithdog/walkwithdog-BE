@@ -33,6 +33,7 @@ class Dog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     shelter_id = Column(Integer, ForeignKey("shelters.id"), nullable=True)
+    desertion_no = Column(String(20), unique=True, nullable=True)  # ← 추가
 
     name = Column(String(50), nullable=False)
     breed = Column(String(50), nullable=True)

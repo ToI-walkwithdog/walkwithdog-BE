@@ -207,6 +207,7 @@ def fetch_dogs_from_public_api(db: Session = Depends(get_db)):
         shelter = get_or_create_shelter(db, item)
 
         dog = Dog(
+            desertion_no=desertion_no,
             shelter_id=shelter.id if shelter else None,
             name=generate_dog_name(item),           # 예) 말티즈-718
             breed=clean_breed(item),                # 예) 말티즈
