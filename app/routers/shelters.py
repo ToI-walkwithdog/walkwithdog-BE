@@ -2,9 +2,9 @@ from fastapi import APIRouter, Depends
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from database import SessionLocal
-from models import Shelter
-from schemas import ShelterCreate, ShelterResponse
+from app.database import SessionLocal
+from app.models import Shelter
+from app.schemas import ShelterCreate, ShelterResponse
 
 router = APIRouter(
     prefix="/shelters",

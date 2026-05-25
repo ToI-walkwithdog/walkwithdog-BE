@@ -1,23 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from database import SessionLocal
-from models import Survey, User
-from schemas import SurveyCreate, SurveyResponse
+from app.database import get_db
+from app.models import Survey, User
+from app.schemas import SurveyCreate, SurveyResponse
 
 router = APIRouter(
     prefix="/surveys",
     tags=["surveys"]
 )
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 
 @router.post("/", response_model=SurveyResponse)
 def create_survey(survey: SurveyCreate, db: Session = Depends(get_db)):

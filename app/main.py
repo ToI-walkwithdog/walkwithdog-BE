@@ -2,9 +2,9 @@ from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from database import Base, engine, SessionLocal
-from models import Dog
-from app.routers import users, shelters, dogs, surveys, matching, public_api
+from app.database import Base, engine, SessionLocal
+from app.models import Dog
+from app.routers import users, shelters, dogs, surveys, matching, public_api, breed_traits
 
 # 서버 실행 시 데이터베이스 테이블 생성
 Base.metadata.create_all(bind=engine)
@@ -16,6 +16,7 @@ app.include_router(dogs.router)
 app.include_router(surveys.router)
 app.include_router(matching.router)
 app.include_router(public_api.router)
+app.include_router(breed_traits.router)
 # CORS 설정
 app.add_middleware(
     CORSMiddleware,

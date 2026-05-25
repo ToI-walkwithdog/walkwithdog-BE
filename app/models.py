@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
 from sqlalchemy.sql import func
-from database import Base
+from app.database import Base
 from sqlalchemy.orm import relationship
 
 
@@ -49,6 +49,12 @@ class Dog(Base):
     independence_level = Column(Integer, nullable=True)
     sociability_level = Column(Integer, nullable=True)
     walk_need = Column(Integer, nullable=True)
+    weight = Column(String(50), nullable=True)
+    special_note = Column(Text, nullable=True)
+    separation_anxiety_level = Column(Integer, nullable=True)
+    training_level = Column(Integer, nullable=True)
+
+    trait_source = Column(String(30), nullable=True, default="breed_default")
 
     good_with_children = Column(String(20), nullable=True)
     good_with_other_dogs = Column(String(20), nullable=True)
@@ -94,3 +100,22 @@ class MatchingResult(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     dog = relationship("Dog", back_populates="matching_results")
+
+class BreedTrait(Base):
+    __tablename__ = "breed_traits"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    breed_name = Column(String(100), unique=True, nullable=False)
+
+    energy_level = Column(Integer, nullable=True)
+    barking_level = Column(Integer, nullable=True)
+    independence_level = Column(Integer, nullable=True)
+    sociability_level = Column(Integer, nullable=True)
+    walk_need = Column(Integer, nullable=True)
+
+    good_with_children = Column(String(20), nullable=True)
+    good_with_other_dogs = Column(String(20), nullable=True)
+    separation_anxiety = Column(String(20), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

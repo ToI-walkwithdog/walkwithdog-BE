@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from database import SessionLocal
-from models import User, Dog, Survey, MatchingResult
-from schemas import MatchingCreate, MatchingResponse, MatchingDetailResponse
+from app.database import get_db
+from app.models import Survey, Dog, MatchingResult
+from app.schemas import MatchingDetailResponse
 
 router = APIRouter(
     prefix="/matching",
@@ -11,131 +11,291 @@ router = APIRouter(
 )
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-def calculate_score(survey: Survey, dog: Dog):
+def calculate_score(survey: Survey, dog: Dog) -> int:
     score = 50
+
+    # 1. 주거 형태 ↔ 활동량
+    if survey.housing_type == "원룸/오피스텔":
+        if dog.energy_level is not None and dog.energy_level <= 2:
+            score += 10
+        elif dog.energy_level is not None and dog.energy_level >= 4:
+            score -= 10
+
+    elif survey.housing_type == "아파트/빌라":
+        if dog.energy_level is not None and dog.energy_level <= 3:
+            score += 8
+        elif dog.energy_level is not None and dog.energy_level >= 5:
+            score -= 8
+
+    elif survey.housing_type == "마당 있는 주택":
+        if dog.energy_level is not None and dog.energy_level >= 4:
+            score += 12
+        if dog.independence_level is not None and dog.independence_level >= 3:
+            score += 5
+
+    elif survey.housing_type == "마당 없는 주택":
+        if dog.energy_level is not None and dog.energy_level <= 3:
+            score += 8
+
+    # 2. 가구 구성 ↔ 친화력/활동량
+    if survey.family_type in ["영유아 자녀 가구(0-6세)", "학령기 자녀 가구(7-18세)"]:
+        if dog.sociability_level is not None and dog.sociability_level >= 4:
+            score += 12
+        if dog.energy_level is not None and dog.energy_level >= 5:
+            score -= 5
+
+    elif survey.family_type == "노년 가구(60세 이상)":
+        if dog.energy_level is not None and dog.energy_level <= 2:
+            score += 12
+        if dog.training_level is not None and dog.training_level >= 3:
+            score += 5
+
+    elif survey.family_type in ["1인 가구", "부부/커플 (자녀없음)"]:
+        if dog.independence_level is not None and dog.independence_level >= 3:
+            score += 8
+
+    elif survey.family_type == "다세대 가구(조부모+부모+자녀)":
+        if dog.sociability_level is not None and dog.sociability_level >= 4:
+            score += 10
+        if dog.training_level is not None and dog.training_level >= 3:
+            score += 5
+
+    # 3. 외출 빈도 ↔ 분리불안/독립성
+    if survey.outing_frequency == "거의 항상 집에 있어요":
+        if dog.separation_anxiety_level is not None and dog.separation_anxiety_level >= 4:
+            score += 6
+        if dog.sociability_level is not None and dog.sociability_level >= 3:
+            score += 5
+
+    elif survey.outing_frequency == "주 1~2일 외출해요":
+        if dog.independence_level is not None and dog.independence_level >= 2:
+            score += 6
+
+    elif survey.outing_frequency == "주 3~4일 외출해요":
+        if dog.independence_level is not None and dog.independence_level >= 3:
+            score += 8
+        if dog.separation_anxiety_level is not None and dog.separation_anxiety_level >= 4:
+            score -= 8
+
+    elif survey.outing_frequency == "거의 매일 집을 비워요":
+        if dog.independence_level is not None and dog.independence_level >= 4:
+            score += 12
+        if dog.separation_anxiety_level is not None and dog.separation_anxiety_level >= 4:
+            score -= 15
+
+    # 4. 하루 평균 산책 가능 시간 ↔ 활동량
+    if survey.daily_walk_time:
+        if "2" in survey.daily_walk_time or "3" in survey.daily_walk_time:
+            if dog.energy_level is not None and dog.energy_level >= 4:
+                score += 10
+        elif "1" in survey.daily_walk_time:
+            if dog.energy_level is not None and 3 <= dog.energy_level <= 4:
+                score += 8
+        elif "30" in survey.daily_walk_time or "0.5" in survey.daily_walk_time:
+            if dog.energy_level is not None and dog.energy_level <= 3:
+                score += 6
+
+    # 5. 생활 유형 ↔ 독립성/분리불안
+    if survey.life_pattern == "재택/프리랜서":
+        if dog.separation_anxiety_level is not None and dog.separation_anxiety_level >= 4:
+            score += 6
+        if dog.sociability_level is not None and dog.sociability_level >= 3:
+            score += 4
+
+    elif survey.life_pattern == "출퇴근 직장인":
+        if dog.independence_level is not None and dog.independence_level >= 3:
+            score += 8
+
+    elif survey.life_pattern == "교대근무/출장 잦음":
+        if dog.independence_level is not None and dog.independence_level >= 4:
+            score += 10
+        if dog.separation_anxiety_level is not None and dog.separation_anxiety_level >= 4:
+            score -= 12
+
+    # 6. 산책 빈도 ↔ 활동량
+    if survey.walk_frequency == "거의 매일 가능해요":
+        if dog.energy_level is not None and dog.energy_level >= 4:
+            score += 10
+        elif dog.energy_level is not None and dog.energy_level <= 3:
+            score += 5
+
+    elif survey.walk_frequency == "주 3~4회 가능해요":
+        if dog.energy_level is not None and 2 <= dog.energy_level <= 4:
+            score += 8
+
+    elif survey.walk_frequency == "주 1~2회 가능해요":
+        if dog.energy_level is not None and dog.energy_level <= 2:
+            score += 10
+        elif dog.energy_level is not None and dog.energy_level >= 4:
+            score -= 8
+
+    # 7. 1회 산책 시간 ↔ 활동량
+    if survey.walk_duration == "20분 미만":
+        if dog.energy_level is not None and dog.energy_level <= 2:
+            score += 10
+        elif dog.energy_level is not None and dog.energy_level >= 4:
+            score -= 8
+
+    elif survey.walk_duration == "20~40분":
+        if dog.energy_level is not None and dog.energy_level <= 3:
+            score += 8
+
+    elif survey.walk_duration == "40~1시간":
+        if dog.energy_level is not None and 3 <= dog.energy_level <= 4:
+            score += 8
+
+    elif survey.walk_duration == "1시간 이상":
+        if dog.energy_level is not None and dog.energy_level >= 4:
+            score += 10
+
+    # 8. 반려견 경험 ↔ 훈련성/활동량
+    if survey.dog_experience == "처음 키워봐요":
+        if dog.training_level is not None and dog.training_level >= 3:
+            score += 8
+        if dog.energy_level is not None and dog.energy_level <= 3:
+            score += 6
+        elif dog.energy_level is not None and dog.energy_level >= 5:
+            score -= 8
+
+    elif survey.dog_experience == "예전에 키워본 적 있어요":
+        if dog.training_level is not None and dog.training_level >= 2:
+            score += 6
+
+    elif survey.dog_experience == "현재 키우고 있어요":
+        if dog.training_level is not None and dog.training_level >= 3:
+            score += 8
+        if dog.sociability_level is not None and dog.sociability_level >= 4:
+            score += 6
+
+    # 9. MBTI는 보조 점수
+    if survey.mbti:
+        mbti = survey.mbti.upper()
+
+        if mbti.startswith("E"):
+            if dog.sociability_level is not None and dog.sociability_level >= 4:
+                score += 4
+        elif mbti.startswith("I"):
+            if dog.energy_level is not None and dog.energy_level <= 3:
+                score += 4
+
+        if "J" in mbti:
+            if dog.training_level is not None and dog.training_level >= 3:
+                score += 3
+
+        if "P" in mbti:
+            if dog.sociability_level is not None and dog.sociability_level >= 3:
+                score += 3
+
+    return max(0, min(score, 100))
+
+
+def make_reason(survey: Survey, dog: Dog, score: int) -> str:
     reasons = []
 
-    # 산책 빈도와 강아지 산책 필요도
-    if survey.walk_frequency in ["매일", "자주"]:
-        if dog.walk_need and dog.walk_need >= 4:
-            score += 15
-            reasons.append("사용자의 산책 빈도와 강아지의 산책 필요도가 잘 맞아요.")
-        elif dog.walk_need and dog.walk_need <= 2:
-            score += 8
-            reasons.append("산책 부담이 크지 않아 생활 패턴에 잘 맞을 수 있어요.")
+    if dog.energy_level is not None:
+        reasons.append(f"활동량 {dog.energy_level}점")
+    if dog.separation_anxiety_level is not None:
+        reasons.append(f"분리불안 {dog.separation_anxiety_level}점")
+    if dog.sociability_level is not None:
+        reasons.append(f"친화력 {dog.sociability_level}점")
+    if dog.training_level is not None:
+        reasons.append(f"훈련성 {dog.training_level}점")
+    if dog.independence_level is not None:
+        reasons.append(f"독립성 {dog.independence_level}점")
 
-    # 반려견 경험
-    if survey.dog_experience == "있음":
-        score += 10
-        reasons.append("반려견 경험이 있어 적응 가능성이 높아요.")
-    else:
-        if dog.energy_level and dog.energy_level <= 3:
-            score += 8
-            reasons.append("초보 보호자도 비교적 돌보기 쉬운 성향이에요.")
+    trait_summary = ", ".join(reasons)
 
-    # 주거 형태
-    if survey.housing_type in ["아파트", "빌라"]:
-        if dog.barking_level and dog.barking_level <= 2:
-            score += 10
-            reasons.append("짖음 정도가 낮아 공동주택 환경에 적합해요.")
-        if dog.energy_level and dog.energy_level <= 3:
-            score += 5
-            reasons.append("실내 생활에 무리가 적은 에너지 수준이에요.")
-
-    # 가구 구성
-    if survey.family_type and "아이" in survey.family_type:
-        if dog.good_with_children == "yes":
-            score += 10
-            reasons.append("아이와 함께 지내기 좋은 성향이에요.")
-
-    # 사회성
-    if dog.sociability_level and dog.sociability_level >= 4:
-        score += 5
-        reasons.append("사회성이 좋아 가족과 친해지기 쉬워요.")
-
-    # 분리불안
-    if survey.outing_frequency in ["많음", "자주"]:
-        if dog.separation_anxiety == "no":
-            score += 10
-            reasons.append("외출이 잦은 생활에도 비교적 잘 적응할 수 있어요.")
-        elif dog.separation_anxiety == "yes":
-            score -= 10
-            reasons.append("외출이 잦다면 분리불안 관리가 필요할 수 있어요.")
-
-    score = max(0, min(score, 100))
-
-    if not reasons:
-        reasons.append("기본 생활 패턴과 강아지 성향 정보를 기준으로 추천되었어요.")
-
-    detail_analysis = (
-        f"사용자의 주거 형태는 {survey.housing_type}, "
-        f"가구 구성은 {survey.family_type}, "
-        f"외출 빈도는 {survey.outing_frequency}, "
-        f"산책 빈도는 {survey.walk_frequency}, "
-        f"반려견 경험은 {survey.dog_experience}입니다. "
-        f"{dog.name}의 에너지 수준은 {dog.energy_level}, "
-        f"짖음 정도는 {dog.barking_level}, "
-        f"산책 필요도는 {dog.walk_need}, "
-        f"사회성은 {dog.sociability_level}입니다."
+    return (
+        f"{dog.name}는 {trait_summary}을 가진 반려견입니다. "
+        f"사용자의 주거 형태({survey.housing_type}), 외출 빈도({survey.outing_frequency}), "
+        f"산책 가능 시간({survey.walk_duration}), 반려견 경험({survey.dog_experience})을 기준으로 "
+        f"매칭 점수 {score}%가 계산되었습니다."
     )
 
-    return score, " ".join(reasons), detail_analysis
 
-@router.post("/", response_model=MatchingResponse)
-def create_matching(
-    matching: MatchingCreate,
-    db: Session = Depends(get_db)
-):
-    user = db.query(User).filter(User.id == matching.user_id).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    dog = db.query(Dog).filter(Dog.id == matching.dog_id).first()
-    if dog is None:
-        raise HTTPException(status_code=404, detail="Dog not found")
-
-    survey = (
-        db.query(Survey)
-        .filter(Survey.user_id == matching.user_id)
-        .order_by(Survey.id.desc())
-        .first()
+def make_detail_analysis(survey: Survey, dog: Dog, score: int) -> str:
+    return (
+        f"[사용자 생활 정보]\n"
+        f"- 주거 형태: {survey.housing_type}\n"
+        f"- 가구 구성: {survey.family_type}\n"
+        f"- 외출 빈도: {survey.outing_frequency}\n"
+        f"- 하루 평균 산책 가능 시간: {survey.daily_walk_time}\n"
+        f"- 생활 유형: {survey.life_pattern}\n"
+        f"- 산책 빈도: {survey.walk_frequency}\n"
+        f"- 1회 산책 시간: {survey.walk_duration}\n"
+        f"- 반려견 경험: {survey.dog_experience}\n"
+        f"- MBTI: {survey.mbti}\n\n"
+        f"[반려견 성향 정보]\n"
+        f"- 활동량: {dog.energy_level}\n"
+        f"- 분리불안: {dog.separation_anxiety_level}\n"
+        f"- 친화력: {dog.sociability_level}\n"
+        f"- 훈련성: {dog.training_level}\n"
+        f"- 독립성: {dog.independence_level}\n"
+        f"- 성향 출처: {dog.trait_source}\n\n"
+        f"[매칭 결과]\n"
+        f"최종 매칭 점수는 {score}%입니다."
     )
+
+
+@router.post("/{survey_id}", response_model=list[MatchingDetailResponse])
+def create_matching_results(survey_id: int, db: Session = Depends(get_db)):
+    survey = db.query(Survey).filter(Survey.id == survey_id).first()
 
     if survey is None:
         raise HTTPException(status_code=404, detail="Survey not found")
 
-    score, reason, detail_analysis = calculate_score(survey, dog)
+    dogs = db.query(Dog).all()
 
-    new_matching = MatchingResult(
-        user_id=matching.user_id,
-        dog_id=matching.dog_id,
-        score=score,
-        reason=reason,
-        detail_analysis=detail_analysis
-    )
+    if not dogs:
+        raise HTTPException(status_code=404, detail="Dog data not found")
 
-    db.add(new_matching)
+    calculated_results = []
+
+    for dog in dogs:
+        score = calculate_score(survey, dog)
+        reason = make_reason(survey, dog, score)
+        detail_analysis = make_detail_analysis(survey, dog, score)
+
+        calculated_results.append({
+            "dog": dog,
+            "score": score,
+            "reason": reason,
+            "detail_analysis": detail_analysis
+        })
+
+    top_results = sorted(
+        calculated_results,
+        key=lambda x: x["score"],
+        reverse=True
+    )[:5]
+
+    saved_results = []
+
+    for result in top_results:
+        matching_result = MatchingResult(
+            user_id=survey.user_id,
+            dog_id=result["dog"].id,
+            score=result["score"],
+            reason=result["reason"],
+            detail_analysis=result["detail_analysis"]
+        )
+
+        db.add(matching_result)
+        saved_results.append(matching_result)
+
     db.commit()
-    db.refresh(new_matching)
 
-    return new_matching
+    for result in saved_results:
+        db.refresh(result)
+
+    return saved_results
 
 
-@router.get("/{user_id}", response_model=list[MatchingDetailResponse])
-def get_matching_results(
-    user_id: int,
-    db: Session = Depends(get_db)
-):
+@router.get("/history/{user_id}", response_model=list[MatchingDetailResponse])
+def get_matching_history(user_id: int, db: Session = Depends(get_db)):
     return (
         db.query(MatchingResult)
         .filter(MatchingResult.user_id == user_id)
+        .order_by(MatchingResult.created_at.desc())
         .all()
     )
