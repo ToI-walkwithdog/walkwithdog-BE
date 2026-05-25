@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Survey, Dog, MatchingResult
-from app.schemas import MatchingDetailResponse
+from app.schemas import MatchingDetailResponse, MatchingScoreRequest, MatchingScoreResponse
 
 router = APIRouter(
     prefix="/matching",
@@ -236,6 +236,117 @@ def make_detail_analysis(survey: Survey, dog: Dog, score: int) -> str:
         f"최종 매칭 점수는 {score}%입니다."
     )
 
+def get_score_label(score: int) -> str:
+    if score >= 85:
+        return "매우 잘 맞아요"
+    elif score >= 70:
+        return "잘 맞는 편이에요"
+    elif score >= 50:
+        return "조금 주의가 필요해요"
+    else:
+        return "신중한 고민이 필요해요"
+
+
+def make_warnings(survey: Survey, dog: Dog) -> list[str]:
+    warnings = []
+
+    if dog.separation_anxiety_level is not None and dog.separation_anxiety_level >= 4:
+        if survey.outing_frequency in ["주 3~4일 외출해요", "거의 매일 집을 비워요"]:
+            warnings.append("혼자 있는 시간이 길어지면 분리불안이 나타날 수 있어요.")
+
+    if dog.energy_level is not None and dog.energy_level >= 4:
+        if survey.walk_duration in ["20분 미만", "20~40분"]:
+            warnings.append("강아지의 활동량에 비해 산책 시간이 부족할 수 있어요.")
+
+    if dog.barking_level is not None and dog.barking_level >= 4:
+        if survey.housing_type in ["원룸/오피스텔", "아파트/빌라"]:
+            warnings.append("짖음 수준이 높아 공동주택에서는 적응 훈련이 필요할 수 있어요.")
+
+    return warnings
+
+
+def make_care_points(survey: Survey, dog: Dog) -> list[str]:
+    care_points = []
+
+    if dog.energy_level is not None and dog.energy_level >= 4:
+        care_points.append("하루 1회 이상 충분한 산책과 놀이 시간이 필요해요.")
+
+    if dog.separation_anxiety_level is not None and dog.separation_anxiety_level >= 4:
+        care_points.append("입양 초기에는 짧은 외출부터 시작하는 분리불안 완화 훈련이 필요해요.")
+
+    if dog.sociability_level is not None and dog.sociability_level >= 4:
+        care_points.append("사람과의 상호작용을 좋아하므로 꾸준한 관심과 교감이 중요해요.")
+
+    if dog.training_level is not None and dog.training_level <= 2:
+        care_points.append("기본 배변 훈련과 생활 규칙 훈련이 필요할 수 있어요.")
+
+    if not care_points:
+        care_points.append("기본적인 산책, 식사, 휴식 루틴을 일정하게 유지해 주세요.")
+
+    return care_points
+
+
+def make_score_breakdown(survey: Survey, dog: Dog) -> dict[str, int]:
+    breakdown = {
+        "housing_match": 0,
+        "family_match": 0,
+        "outing_match": 0,
+        "walk_match": 0,
+        "experience_match": 0,
+        "personality_match": 0
+    }
+
+    if survey.housing_type and dog.energy_level is not None:
+        breakdown["housing_match"] = 15
+
+    if survey.family_type and dog.sociability_level is not None:
+        breakdown["family_match"] = 15
+
+    if survey.outing_frequency and dog.independence_level is not None:
+        breakdown["outing_match"] = 15
+
+    if survey.walk_duration and dog.energy_level is not None:
+        breakdown["walk_match"] = 20
+
+    if survey.dog_experience and dog.training_level is not None:
+        breakdown["experience_match"] = 15
+
+    if dog.energy_level is not None and dog.sociability_level is not None:
+        breakdown["personality_match"] = 20
+
+    return breakdown
+
+
+@router.post("/score", response_model=MatchingScoreResponse)
+def get_matching_score(
+    request: MatchingScoreRequest,
+    db: Session = Depends(get_db)
+):
+    survey = (
+        db.query(Survey)
+        .filter(Survey.user_id == request.user_id)
+        .order_by(Survey.created_at.desc())
+        .first()
+    )
+
+    if survey is None:
+        raise HTTPException(status_code=404, detail="Survey not found")
+
+    dog = db.query(Dog).filter(Dog.id == request.dog_id).first()
+
+    if dog is None:
+        raise HTTPException(status_code=404, detail="Dog not found")
+
+    score = calculate_score(survey, dog)
+
+    return {
+        "score": score,
+        "label": get_score_label(score),
+        "reason": make_reason(survey, dog, score),
+        "warnings": make_warnings(survey, dog),
+        "care_points": make_care_points(survey, dog),
+        "score_breakdown": make_score_breakdown(survey, dog)
+    }
 
 @router.post("/{survey_id}", response_model=list[MatchingDetailResponse])
 def create_matching_results(survey_id: int, db: Session = Depends(get_db)):

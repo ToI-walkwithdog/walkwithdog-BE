@@ -222,3 +222,28 @@ class DogTraitUpdate(BaseModel):
 
     special_note: str | None = None
     description: str | None = None
+
+class DogCardResponse(BaseModel):
+    id: int
+    name: str
+    breed: str | None = None
+    age: int | None = None
+    gender: str | None = None
+    image_url: str | None = None
+    personality_keywords: str | None = None
+
+    class Config:
+        from_attributes = True
+
+class MatchingScoreRequest(BaseModel):
+    user_id: int
+    dog_id: int
+
+
+class MatchingScoreResponse(BaseModel):
+    score: int
+    label: str
+    reason: str
+    warnings: list[str]
+    care_points: list[str]
+    score_breakdown: dict[str, int]

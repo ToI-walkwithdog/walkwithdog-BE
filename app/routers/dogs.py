@@ -7,7 +7,8 @@ from app.schemas import (
     DogCreate,
     DogResponse,
     DogDetailResponse,
-    DogTraitUpdate
+    DogTraitUpdate,
+    DogCardResponse
 )
 
 router = APIRouter(
@@ -139,7 +140,7 @@ def create_dog(
 # --------------------------------------------------
 # 전체 강아지 조회
 # --------------------------------------------------
-@router.get("/", response_model=list[DogResponse])
+@router.get("/", response_model=list[DogCardResponse])
 def get_dogs(db: Session = Depends(get_db)):
     return db.query(Dog).all()
 
