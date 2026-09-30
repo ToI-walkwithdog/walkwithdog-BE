@@ -10,6 +10,9 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import Dog, Shelter, BreedTrait
 
+from app.dependencies import require_admin
+from app.models import User
+
 load_dotenv()
 
 router = APIRouter(
@@ -119,7 +122,9 @@ def get_breed_trait(db: Session, breed_name: str) -> BreedTrait | None:
 
 
 @router.post("/fetch-dogs")
-def fetch_dogs_from_public_api(db: Session = Depends(get_db)):
+def fetch_dogs_from_public_api(
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)):
     if not PUBLIC_API_KEY:
         raise HTTPException(status_code=500, detail="PUBLIC_API_KEY가 .env에 없습니다.")
 

@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from app.dependencies import require_login, require_shelter, require_admin
+from app.models import User
 
 from app.database import SessionLocal
 from app.models import Dog, Shelter
@@ -76,6 +78,7 @@ def calculate_traits_from_text(
 @router.post("/", response_model=DogResponse)
 def create_dog(
     dog: DogCreate,
+    current_user: User = Depends(require_shelter),
     db: Session = Depends(get_db)
 ):
     if dog.shelter_id is not None:
@@ -175,6 +178,7 @@ def get_dog(
 def update_dog_traits(
     dog_id: int,
     trait_data: DogTraitUpdate,
+    current_user: User = Depends(require_shelter),
     db: Session = Depends(get_db)
 ):
     dog = (

@@ -5,6 +5,9 @@ from app.database import get_db
 from app.models import BreedTrait
 from app.schemas import BreedTraitCreate, BreedTraitResponse
 
+from app.dependencies import require_admin
+from app.models import User
+
 router = APIRouter(
     prefix="/breed-traits",
     tags=["breed-traits"]
@@ -14,6 +17,7 @@ router = APIRouter(
 @router.post("/", response_model=BreedTraitResponse)
 def create_breed_trait(
     breed_trait: BreedTraitCreate,
+    current_user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     new_trait = BreedTrait(**breed_trait.model_dump())

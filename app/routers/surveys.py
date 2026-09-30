@@ -5,13 +5,19 @@ from app.database import get_db
 from app.models import Survey, User
 from app.schemas import SurveyCreate, SurveyResponse
 
+from app.dependencies import require_login
+from app.models import User
+
 router = APIRouter(
     prefix="/surveys",
     tags=["surveys"]
 )
 
 @router.post("/", response_model=SurveyResponse)
-def create_survey(survey: SurveyCreate, db: Session = Depends(get_db)):
+def create_survey(
+    survey: SurveyCreate, 
+    current_user: User = Depends(require_login), 
+    db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == survey.user_id).first()
 
     if user is None:

@@ -5,6 +5,9 @@ from app.database import get_db
 from app.models import Survey, Dog, MatchingResult
 from app.schemas import MatchingDetailResponse, MatchingScoreRequest, MatchingScoreResponse
 
+from app.dependencies import require_login
+from app.models import User
+
 router = APIRouter(
     prefix="/matching",
     tags=["matching"]
@@ -349,7 +352,10 @@ def get_matching_score(
     }
 
 @router.post("/{survey_id}", response_model=list[MatchingDetailResponse])
-def create_matching_results(survey_id: int, db: Session = Depends(get_db)):
+def create_matching_results(
+    survey_id: int, 
+    current_user: User = Depends(require_login),
+    db: Session = Depends(get_db)):
     survey = db.query(Survey).filter(Survey.id == survey_id).first()
 
     if survey is None:

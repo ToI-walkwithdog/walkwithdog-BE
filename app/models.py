@@ -4,6 +4,11 @@ from app.database import Base
 from sqlalchemy.orm import relationship
 
 
+class UserRole(str, enum.Enum):
+    USER = "user"
+    SHELTER = "shelter"
+    ADMIN = "admin"
+
 class User(Base):
     __tablename__ = "users"
 
@@ -11,10 +16,21 @@ class User(Base):
     email = Column(String(100), unique=True, nullable=False)
     nickname = Column(String(50), nullable=False)
     password = Column(String(255), nullable=True)
+    role = Column(Enum(UserRole), default=UserRole.USER, nullable=False)  # ← 추가
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+class SessionToken(Base):
+    __tablename__ = "session_tokens"
 
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token = Column(String(255), unique=True, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
 class Shelter(Base):
     __tablename__ = "shelters"
 
