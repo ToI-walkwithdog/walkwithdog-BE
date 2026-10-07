@@ -5,6 +5,7 @@
 !.env.*.example
 .aws/
 .codex/
+docs/
 
 # Python environments, caches, and build output
 venv/
