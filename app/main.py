@@ -1,18 +1,24 @@
+import os
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.database import Base, engine, SessionLocal
 from app.models import Dog
-from app.routers import users, shelters, dogs, surveys, matching, public_api, breed_traits, simulation
+from app.routers import auth, users, shelters, dogs, surveys, matching, public_api, breed_traits, simulation, personality, chat
 
-# 서버 실행 시 데이터베이스 테이블 생성
-Base.metadata.create_all(bind=engine)
+# Existing DB changes must go through explicit, backed-up migrations.
+# Opt-in only for a fresh/isolated development database.
+if os.getenv("AUTO_CREATE_SCHEMA", "false").lower() == "true":
+    Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(shelters.router)
 app.include_router(dogs.router)
+app.include_router(personality.router)
+app.include_router(chat.router)
 app.include_router(surveys.router)
 app.include_router(matching.router)
 app.include_router(public_api.router)
@@ -22,8 +28,8 @@ app.include_router(simulation.router)
 # CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"]
 )

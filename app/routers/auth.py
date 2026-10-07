@@ -1,72 +1,43 @@
-# app/routers/auth.py
-import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.auth import get_current_session, get_current_user, hash_password, token_digest, verify_password
 from app.database import get_db
-from app.models import User, SessionToken
-from app.schemas import LoginRequest, LoginResponse, UserResponse
-from app.dependencies import get_current_user
+from app.models import AuthSession, User
+from app.schemas import LoginRequest, TokenResponse, UserResponse
 
-router = APIRouter(
-    prefix="/auth",
-    tags=["auth"]
-)
+router = APIRouter(prefix="/auth", tags=["auth"])
+SESSION_SECONDS = 3600
+DUMMY_HASH = hash_password(secrets.token_urlsafe(32))
 
 
-def hash_password(password: str) -> str:
-    return hashlib.scrypt(
-        password.encode(),
-        salt=b"ieojugae_salt",
-        n=16384, r=8, p=1
-    ).hex()
-
-
-@router.post("/login", response_model=LoginResponse)
-def login(request: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == request.email).first()
-
-    if not user or user.password != hash_password(request.password):
-        raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.")
-
-    # 기존 세션 비활성화
-    db.query(SessionToken).filter(
-        SessionToken.user_id == user.id,
-        SessionToken.is_active == True
-    ).update({"is_active": False})
-
-    # 새 토큰 발급
-    token = secrets.token_hex(32)
-    session = SessionToken(
-        user_id=user.id,
-        token=token,
-        is_active=True,
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1)
-    )
-    db.add(session)
+@router.post("/login", response_model=TokenResponse)
+def login(request: LoginRequest, response: Response, db: Session = Depends(get_db)):
+    users = db.query(User).filter(func.lower(User.email) == str(request.email).lower()).all()
+    user = users[0] if len(users) == 1 else None
+    stored = user.password if user and (user.password or "").startswith("scrypt$") else DUMMY_HASH
+    valid = verify_password(request.password, stored)
+    if not user or stored == DUMMY_HASH or not valid:
+        raise HTTPException(401, "이메일 또는 비밀번호를 확인해주세요.",
+                            headers={"WWW-Authenticate": "Bearer"})
+    token = secrets.token_urlsafe(32)
+    db.add(AuthSession(token_hash=token_digest(token), user_id=user.id,
+                       expires_at=datetime.now(timezone.utc) + timedelta(seconds=SESSION_SECONDS)))
     db.commit()
-
-    return {
-        "token": token,
-        "user": UserResponse(id=user.id, email=user.email, nickname=user.nickname)
-    }
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return TokenResponse(access_token=token, expires_in=SESSION_SECONDS)
 
 
-@router.post("/logout")
-def logout(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    db.query(SessionToken).filter(
-        SessionToken.user_id == current_user.id,
-        SessionToken.is_active == True
-    ).update({"is_active": False})
+@router.post("/logout", status_code=204)
+def logout(session=Depends(get_current_session), db: Session = Depends(get_db)):
+    db.delete(session)
     db.commit()
-
-    return {"message": "로그아웃 되었습니다."}
+    return Response(status_code=204)
 
 
 @router.get("/me", response_model=UserResponse)

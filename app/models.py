@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
+import enum
+
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, UniqueConstraint, Boolean, Enum
 from sqlalchemy.sql import func
 from app.database import Base
 from sqlalchemy.orm import relationship
@@ -16,11 +18,12 @@ class User(Base):
     email = Column(String(100), unique=True, nullable=False)
     nickname = Column(String(50), nullable=False)
     password = Column(String(255), nullable=True)
-    role = Column(Enum(UserRole), default=UserRole.USER, nullable=False)  # ← 추가
+    role = Column(Enum(UserRole), default=UserRole.USER, server_default="USER", nullable=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class SessionToken(Base):
+    # Legacy schema retained for compatibility; new login tokens use AuthSession.
     __tablename__ = "session_tokens"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -31,6 +34,13 @@ class SessionToken(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+    token_hash = Column(String(64), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class Shelter(Base):
     __tablename__ = "shelters"
 
@@ -40,6 +50,7 @@ class Shelter(Base):
     phone = Column(String(50), nullable=True)
     address = Column(String(255), nullable=True)
     website_url = Column(String(255), nullable=True)
+    external_code = Column(String(50), nullable=True, unique=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     dogs = relationship("Dog", back_populates="shelter")
@@ -71,6 +82,10 @@ class Dog(Base):
     training_level = Column(Integer, nullable=True)
 
     trait_source = Column(String(30), nullable=True, default="breed_default")
+    external_data = Column(JSON, nullable=True)
+    synced_at = Column(DateTime(timezone=True), nullable=True)
+    process_state = Column(String(50), nullable=True)
+    neuter_status = Column(String(10), nullable=True)
 
     good_with_children = Column(String(20), nullable=True)
     good_with_other_dogs = Column(String(20), nullable=True)
@@ -104,11 +119,15 @@ class Survey(Base):
 
 class MatchingResult(Base):
     __tablename__ = "matching_results"
+    __table_args__ = (UniqueConstraint("survey_id", "dog_id", name="uq_matching_survey_dog"),)
 
     id = Column(Integer, primary_key=True, index=True)
 
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     dog_id = Column(Integer, ForeignKey("dogs.id"), nullable=False)
+    survey_id = Column(Integer, ForeignKey("surveys.id"), nullable=True)
+    # Preserve explanations even after the user submits another survey.
+    analysis_snapshot = Column(JSON, nullable=True)
 
     score = Column(Integer, nullable=False)
     reason = Column(Text, nullable=True)
@@ -116,6 +135,26 @@ class MatchingResult(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     dog = relationship("Dog", back_populates="matching_results")
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    dog_id = Column(Integer, ForeignKey("dogs.id"), nullable=False)
+    survey_id = Column(Integer, ForeignKey("surveys.id"), nullable=False)
+    context_snapshot = Column(JSON, nullable=False)
+    consent_to_external_ai = Column(Boolean, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer, ForeignKey("chat_sessions.id"), nullable=False, index=True)
+    role = Column(String(10), nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
 
 class BreedTrait(Base):
     __tablename__ = "breed_traits"

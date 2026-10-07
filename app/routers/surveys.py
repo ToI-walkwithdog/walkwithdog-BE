@@ -4,20 +4,25 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Survey, User
 from app.schemas import SurveyCreate, SurveyResponse
-
-from app.dependencies import require_login
-from app.models import User
+from app.survey_codes import SURVEY_FIELDS, MBTI
+from app.auth import get_current_user, require_owner
 
 router = APIRouter(
     prefix="/surveys",
     tags=["surveys"]
 )
 
+@router.get("/options")
+def get_survey_options():
+    return {
+        **{field: [{"code": member.value, "label": member.label} for member in enum]
+           for field, enum in SURVEY_FIELDS.items()},
+        "mbti": [{"code": member.value, "label": member.value} for member in MBTI],
+    }
+
 @router.post("/", response_model=SurveyResponse)
-def create_survey(
-    survey: SurveyCreate, 
-    current_user: User = Depends(require_login), 
-    db: Session = Depends(get_db)):
+def create_survey(survey: SurveyCreate, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    require_owner(survey.user_id, current_user)
     user = db.query(User).filter(User.id == survey.user_id).first()
 
     if user is None:
@@ -25,15 +30,10 @@ def create_survey(
 
     new_survey = Survey(
         user_id=survey.user_id,
-        housing_type=survey.housing_type,
-        family_type=survey.family_type,
-        outing_frequency=survey.outing_frequency,
-        daily_walk_time=survey.daily_walk_time,
-        life_pattern=survey.life_pattern,
-        walk_frequency=survey.walk_frequency,
-        walk_duration=survey.walk_duration,
-        dog_experience=survey.dog_experience,
-        mbti=survey.mbti
+        **{
+            key: (None if value is None else str(value))
+            for key, value in survey.model_dump(mode="json", exclude={"user_id"}).items()
+        },
     )
 
     db.add(new_survey)
@@ -44,5 +44,6 @@ def create_survey(
 
 
 @router.get("/{user_id}", response_model=list[SurveyResponse])
-def get_surveys_by_user(user_id: int, db: Session = Depends(get_db)):
+def get_surveys_by_user(user_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    require_owner(user_id, current_user)
     return db.query(Survey).filter(Survey.user_id == user_id).all()
