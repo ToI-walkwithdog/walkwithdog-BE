@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.dependencies import require_login, require_shelter, require_admin
+from app.dependencies import require_shelter, require_shelter_access
 from app.models import User
 
 from app.database import SessionLocal
@@ -81,6 +81,7 @@ def create_dog(
     current_user: User = Depends(require_shelter),
     db: Session = Depends(get_db)
 ):
+    require_shelter_access(current_user, dog.shelter_id)
     if dog.shelter_id is not None:
         shelter = (
             db.query(Shelter)
@@ -193,6 +194,7 @@ def update_dog_traits(
             detail="Dog not found"
         )
 
+    require_shelter_access(current_user, dog.shelter_id)
     update_data = trait_data.model_dump(exclude_unset=True)
 
     # 입력값 업데이트

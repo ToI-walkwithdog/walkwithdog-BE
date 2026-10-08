@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.database import Base, get_db
-    from app.models import User, UserRole, Dog, Survey, AuthSession, SessionToken, MatchingResult
+    from app.models import User, UserRole, Dog, Shelter, Survey, AuthSession, SessionToken, MatchingResult
     from app.routers import auth, users, surveys, matching, simulation, dogs, breed_traits, public_api
     from app.auth import hash_password, verify_password, token_digest
 
@@ -177,11 +177,15 @@ class AuthTests(unittest.TestCase):
 
     def test_one_session_authenticates_personal_and_role_protected_routes(self):
         with self.Session.begin() as db:
+            db.add(Shelter(id=1, name="담당 보호소"))
+            db.flush()
             db.get(User, 1).role = UserRole.SHELTER
+            db.get(User, 1).shelter_id = 1
+            db.get(Dog, 1).shelter_id = 1
         self.login()
         self.assertEqual(self.client.get("/users/me").json(), self.client.get("/auth/me").json())
         self.assertEqual(self.client.get("/auth/me").json()["role"], "shelter")
-        self.assertEqual(self.client.post("/dogs/", json={"name": "권한 검증"}).status_code, 200)
+        self.assertEqual(self.client.post("/dogs/", json={"name": "권한 검증", "shelter_id": 1}).status_code, 200)
         self.assertEqual(self.client.put("/dogs/1/traits", json={"description": "관찰"}).status_code, 200)
         self.assertEqual(self.client.post("/breed-traits/", json={"breed_name": "권한 검증"}).status_code, 403)
         self.client.post("/auth/logout")

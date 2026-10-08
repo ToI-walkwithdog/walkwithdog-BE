@@ -37,9 +37,17 @@ class UserResponse(BaseModel):
     email: str
     nickname: str
     role: UserRole = UserRole.USER
+    shelter_id: int | None = None
 
     class Config:
         from_attributes = True
+
+
+class UserShelterUpdate(BaseModel):
+    # Explicit null clears the assignment; an omitted field must not clear it.
+    shelter_id: int | None = Field(..., gt=0)
+
+    model_config = {"extra": "forbid"}
 
 
 class ShelterCreate(BaseModel):

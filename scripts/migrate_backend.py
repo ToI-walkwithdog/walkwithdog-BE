@@ -90,6 +90,8 @@ def check_version(connection, version):
         return check_table(connection, ChatSession) + check_table(connection, ChatMessage)
     if version == "005":
         return check_user_role(connection)
+    if version == "006":
+        return check_user_shelter(connection)
     raise PreparationError("지원하지 않는 버전")
 
 
@@ -114,9 +116,44 @@ def check_user_role(connection):
     return missing
 
 
+def check_user_shelter(connection):
+    from app.models import User
+    inspector = inspect(connection)
+    columns = {column["name"]: column for column in inspector.get_columns("users")}
+    missing = []
+    if "shelter_id" not in columns:
+        missing.append("users.shelter_id")
+    else:
+        column = columns["shelter_id"]
+        expected = User.__table__.columns.shelter_id.type.compile(dialect=connection.dialect)
+        if (column["type"].compile(dialect=connection.dialect) != expected
+                or not column["nullable"] or column.get("default") is not None):
+            raise PreparationError("users.shelter_id 타입/NULL/default 구조가 다릅니다. 자동 수정하지 않습니다.")
+
+    foreign = [f for f in inspector.get_foreign_keys("users") if "shelter_id" in f["constrained_columns"]]
+    if not foreign:
+        missing.append("fk_users_shelter_id")
+    elif (len(foreign) != 1 or foreign[0]["constrained_columns"] != ["shelter_id"]
+          or foreign[0]["referred_table"] != "shelters" or foreign[0]["referred_columns"] != ["id"]
+          or foreign[0].get("referred_schema") not in (None, inspector.default_schema_name)
+          or foreign[0].get("options", {}).get("ondelete", "NO ACTION") != "NO ACTION"
+          or foreign[0].get("options", {}).get("onupdate", "NO ACTION") != "NO ACTION"):
+        raise PreparationError("users.shelter_id 외래키 구조가 다릅니다. 자동 수정하지 않습니다.")
+
+    indexes = {i["name"]: i for i in inspector.get_indexes("users")}
+    index = indexes.get("ix_users_shelter_id")
+    if index is None:
+        missing.append("ix_users_shelter_id")
+    elif (index["column_names"] != ["shelter_id"] or index["unique"]
+          or any(index.get("dialect_options", {}).get(key) for key in
+                 ("postgresql_where", "postgresql_include", "postgresql_nulls_not_distinct"))):
+        raise PreparationError("ix_users_shelter_id 인덱스 구조가 다릅니다. 자동 수정하지 않습니다.")
+    return missing
+
+
 def migrate(engine, version, apply=False):
     validate_local_engine(engine)
-    if version not in ("002", "003", "004", "005"):
+    if version not in ("002", "003", "004", "005", "006"):
         raise PreparationError("지원하지 않는 마이그레이션입니다.")
     with engine.connect() as connection:
         missing = check_version(connection, version)
@@ -127,13 +164,13 @@ def migrate(engine, version, apply=False):
         return result
     result["backup"] = backup_database(engine, ROOT / ".demo-backups")
     filenames = {"002": "002_auth_sessions.sql", "003": "003_public_data.sql",
-                 "004": "004_chat.sql", "005": "005_user_roles.sql"}
+                 "004": "004_chat.sql", "005": "005_user_roles.sql", "006": "006_user_shelters.sql"}
     source = (ROOT / "migrations" / filenames[version]).read_text()
     with engine.begin() as connection:
         connection.execute(text("SELECT pg_advisory_xact_lock(782451)"))
         check_version(connection, version)
         statements = "\n".join(l for l in source.splitlines() if not l.lstrip().startswith("--"))
-        if version == "005":
+        if version in ("005", "006"):
             # The PostgreSQL DO block contains semicolons; do not split its body.
             connection.exec_driver_sql(statements)
         else:
@@ -152,7 +189,7 @@ def migrate(engine, version, apply=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("version", choices=["002", "003", "004", "005"])
+    parser.add_argument("version", choices=["002", "003", "004", "005", "006"])
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     from app.database import engine

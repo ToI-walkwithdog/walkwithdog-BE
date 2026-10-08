@@ -3,7 +3,8 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models import Shelter
+from app.dependencies import require_admin
+from app.models import Shelter, User
 from app.schemas import ShelterCreate, ShelterResponse
 
 router = APIRouter(
@@ -23,6 +24,7 @@ def get_db():
 @router.post("/", response_model=ShelterResponse)
 def create_shelter(
     shelter: ShelterCreate,
+    current_user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     new_shelter = Shelter(

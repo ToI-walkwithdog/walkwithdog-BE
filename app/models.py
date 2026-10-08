@@ -19,6 +19,8 @@ class User(Base):
     nickname = Column(String(50), nullable=False)
     password = Column(String(255), nullable=True)
     role = Column(Enum(UserRole), default=UserRole.USER, server_default="USER", nullable=False)
+    # Existing accounts remain unassigned until an administrator chooses a shelter.
+    shelter_id = Column(Integer, ForeignKey("shelters.id", name="fk_users_shelter_id"), nullable=True, index=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

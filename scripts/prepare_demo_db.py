@@ -86,7 +86,7 @@ def validate_base_tables(connection):
         if model is Shelter:
             expected -= {"external_code"}
         if model is User:
-            expected -= {"role"}  # Added separately by migration 005.
+            expected -= {"role", "shelter_id"}  # Added separately by migrations 005/006.
         missing = expected - {c["name"] for c in inspector.get_columns(name)}
         if missing:
             raise PreparationError(f"{name}에 필수 컬럼이 없습니다: {sorted(missing)}")
