@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from app.dependencies import require_shelter, require_shelter_access
 from app.models import User
 
 from app.database import SessionLocal
-from app.models import Dog, Shelter
+from app.models import Dog, DogWalkSetting, Shelter
+from app.dog_walk_settings import apply_walk_settings, dog_list_query
+from app.walk_schemas import WalkSettingsPatch, WalkSettingsResponse
 from app.schemas import (
     DogCreate,
     DogResponse,
@@ -103,6 +106,7 @@ def create_dog(
 
     new_dog = Dog(
         shelter_id=dog.shelter_id,
+        desertion_no=dog.desertion_no,
 
         name=dog.name,
         breed=dog.breed,
@@ -135,7 +139,11 @@ def create_dog(
     )
 
     db.add(new_dog)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "이미 등록된 강아지 식별번호이거나 데이터가 충돌합니다.") from None
     db.refresh(new_dog)
 
     return new_dog
@@ -145,8 +153,9 @@ def create_dog(
 # 전체 강아지 조회
 # --------------------------------------------------
 @router.get("/", response_model=list[DogCardResponse])
-def get_dogs(db: Session = Depends(get_db)):
-    return db.query(Dog).all()
+def get_dogs(walkable: bool | None = None, shelter_id: int | None = None,
+             db: Session = Depends(get_db)):
+    return dog_list_query(db, walkable=walkable, shelter_id=shelter_id).all()
 
 
 # --------------------------------------------------
@@ -159,6 +168,7 @@ def get_dog(
 ):
     dog = (
         db.query(Dog)
+        .options(joinedload(Dog.shelter), joinedload(Dog.walk_setting).selectinload(DogWalkSetting.slots))
         .filter(Dog.id == dog_id)
         .first()
     )
@@ -170,6 +180,41 @@ def get_dog(
         )
 
     return dog
+
+
+@router.patch("/{dog_id}/walk-settings", response_model=WalkSettingsResponse)
+def update_walk_settings(
+    dog_id: int,
+    payload: WalkSettingsPatch,
+    current_user: User = Depends(require_shelter),
+    db: Session = Depends(get_db),
+):
+    try:
+        # Lock the existing parent even if its one-to-one setting does not exist.
+        # Concurrent writers fail promptly with 409 and may retry the PATCH.
+        dog = db.query(Dog).filter(Dog.id == dog_id).with_for_update(nowait=True).first()
+        if dog is None:
+            raise HTTPException(404, "Dog not found")
+        require_shelter_access(current_user, dog.shelter_id)
+        setting = apply_walk_settings(db, dog, payload)
+        # Snapshot under the lock, before commit expires ORM state.
+        response = WalkSettingsResponse.model_validate(setting)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "산책 설정 데이터가 충돌합니다. 다시 시도하세요.") from None
+    except DBAPIError as exc:
+        db.rollback()
+        if getattr(exc.orig, "pgcode", None) in ("40001", "40P01", "55P03"):
+            raise HTTPException(409, "다른 작업이 산책 정보를 수정 중입니다. 다시 시도하세요.") from None
+        raise HTTPException(500, "산책 설정을 저장하지 못했습니다.") from None
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(500, "산책 설정을 저장하지 못했습니다.") from None
+    return response
 
 
 # --------------------------------------------------

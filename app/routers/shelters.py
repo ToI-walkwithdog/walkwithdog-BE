@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.dependencies import require_admin
 from app.models import Shelter, User
-from app.schemas import ShelterCreate, ShelterResponse
+from app.schemas import DogCardResponse, ShelterCreate, ShelterResponse
+from app.dog_walk_settings import dog_list_query
 
 router = APIRouter(
     prefix="/shelters",
@@ -49,3 +50,11 @@ def get_shelter(shelter_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Shelter not found")
 
     return shelter
+
+
+@router.get("/{shelter_id}/dogs", response_model=list[DogCardResponse])
+def get_shelter_dogs(shelter_id: int, walkable: bool | None = None,
+                     db: Session = Depends(get_db)):
+    if db.get(Shelter, shelter_id) is None:
+        raise HTTPException(404, "Shelter not found")
+    return dog_list_query(db, walkable=walkable, shelter_id=shelter_id).all()

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 
 from app.database import get_db
-from app.models import Survey, Dog, MatchingResult
+from app.models import Survey, Dog, DogWalkSetting, MatchingResult
 from app.schemas import MatchingDetailResponse, MatchingScoreRequest, MatchingScoreResponse
 from app.matching_service import build_analysis, get_score_label
 from app.auth import get_current_user, require_owner
@@ -14,7 +14,8 @@ router = APIRouter(prefix="/matching", tags=["matching"])
 
 def result_query(db):
     return db.query(MatchingResult).options(
-        joinedload(MatchingResult.dog).joinedload(Dog.shelter)
+        joinedload(MatchingResult.dog).joinedload(Dog.shelter),
+        joinedload(MatchingResult.dog).joinedload(Dog.walk_setting).selectinload(DogWalkSetting.slots),
     )
 
 
