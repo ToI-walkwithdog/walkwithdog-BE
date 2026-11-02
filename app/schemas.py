@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field, field_validator, EmailStr
+from pydantic import AliasChoices, BaseModel, Field, field_validator, EmailStr
 from typing import Optional
 from app.models import UserRole
+from app.walk_schemas import WalkSettingsResponse
 from app.survey_codes import (
     HousingType, FamilyType, OutingFrequency, LifePattern,
     WalkFrequency, WalkDuration, DogExperience, MBTI, parse_walk_hours, SURVEY_FIELDS,
@@ -65,7 +66,7 @@ class ShelterResponse(ShelterCreate):
 
 
 class DogCreate(BaseModel):
-    desertion_no: str | None = None
+    desertion_no: str | None = Field(default=None, max_length=20)
     shelter_id: int | None = None
 
     name: str
@@ -172,6 +173,9 @@ class DogDetailResponse(BaseModel):
     process_state: str | None = None
     neuter_status: str | None = None
     shelter: ShelterSimpleResponse | None = None
+    walk_settings: WalkSettingsResponse | None = Field(
+        default=None, validation_alias=AliasChoices("walk_settings", "walk_setting")
+    )
 
     class Config:
         from_attributes = True
