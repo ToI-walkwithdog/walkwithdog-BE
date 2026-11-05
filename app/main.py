@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.database import Base, engine, SessionLocal
 from app.models import Dog
 from app.routers import auth, users, shelters, dogs, surveys, matching, public_api, breed_traits, simulation, personality, chat
+from app.routers import walk_requests
 
 # Existing DB changes must go through explicit, backed-up migrations.
 # Opt-in only for a fresh/isolated development database.
@@ -24,6 +25,7 @@ app.include_router(matching.router)
 app.include_router(public_api.router)
 app.include_router(breed_traits.router)
 app.include_router(simulation.router)
+app.include_router(walk_requests.router)
 
 # CORS 설정
 app.add_middleware(
