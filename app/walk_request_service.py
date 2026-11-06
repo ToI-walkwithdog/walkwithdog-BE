@@ -57,7 +57,7 @@ def locked_profile(db, user_id, create=False):
     return profile
 
 
-def validate_eligibility(db, dog, volunteer, profile, start, end, shelter_id=None):
+def validate_eligibility(db, dog, volunteer, profile, start, end, shelter_id=None, *, require_future=True):
     if volunteer.role != UserRole.USER:
         raise HTTPException(409, "현재 신청자가 봉사자 계정이 아닙니다.")
     if dog.shelter_id is None:
@@ -71,7 +71,7 @@ def validate_eligibility(db, dog, volunteer, profile, start, end, shelter_id=Non
     if not can_walk_difficulty(profile.level if profile else 1, setting.difficulty):
         raise HTTPException(409, "봉사자 레벨이 산책 난이도를 충족하지 않습니다.")
     start, end = as_utc(start), as_utc(end)
-    if start <= utc_now():
+    if require_future and start <= utc_now():
         raise HTTPException(409, "산책 시작 시각은 현재보다 미래여야 합니다.")
     local_start, local_end = start.astimezone(SEOUL), end.astimezone(SEOUL)
     if local_start.date() != local_end.date():
