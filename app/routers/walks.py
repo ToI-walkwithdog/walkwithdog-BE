@@ -59,10 +59,19 @@ def incident(walk_id: int, payload: WalkIncidentCreate, actor: User = Depends(ge
 
 @router.patch("/{walk_id}/end", response_model=WalkResponse)
 def end(walk_id: int, payload: WalkEnd, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """기존 종료 권한·잠금·상태 전이를 유지하며 GPS V1 이동·정지·UNKNOWN 시간을 저장합니다.
+    average_pace는 실제 이동 초 / 유효 이동 거리 × 1000(초/km)로 계산합니다.
+    total_distance_m은 기존 거리이며 moving_distance_m은 정지 흔들림·불명확 구간을 제외합니다.
+    GPS 부족 시 UNKNOWN이며 이동 근거가 없으면 페이스는 NULL입니다. 기존 미분석 기록의
+    새 필드는 NULL이며 기존 average_pace는 전체 시간 기준 값으로 보존됩니다.
+    """
     return persist(db, lambda: end_walk(db, walk_id, actor, payload), WalkResponse)
 
 
 @router.get("/{walk_id}", response_model=WalkDetailResponse)
 def detail(walk_id: int, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
            actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """기존 권한과 페이지 형식으로 조회합니다. Walk의 신규 시간·이동 거리 NULL은 레거시
+    미분석 기록입니다. 새 분석의 average_pace는 전체 시간이 아닌 이동 시간 기준입니다.
+    """
     return walk_detail(db, walk_id, actor, limit, offset)

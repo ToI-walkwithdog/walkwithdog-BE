@@ -95,6 +95,9 @@ def check_version(connection, version):
     if version == "007":
         from scripts.walk_schema import check_walk_schema
         return check_walk_schema(connection)
+    if version == "008":
+        from scripts.walk_schema import check_motion_schema
+        return check_motion_schema(connection)
     raise PreparationError("지원하지 않는 버전")
 
 
@@ -156,29 +159,29 @@ def check_user_shelter(connection):
 
 def migrate(engine, version, apply=False):
     validate_local_engine(engine)
-    if version not in ("002", "003", "004", "005", "006", "007"):
+    if version not in ("002", "003", "004", "005", "006", "007", "008"):
         raise PreparationError("지원하지 않는 마이그레이션입니다.")
     with engine.connect() as connection:
         missing = check_version(connection, version)
         before = table_counts(connection)
     result = {"target": {"host": engine.url.host, "database": engine.url.database},
               "version": version, "missing": missing, "applied": False, "backup": None}
-    if version == "007":
+    if version in ("007", "008"):
         result.update(counts_before=before, counts_after=None)
     if not apply or not missing:
-        if version == "007" and not missing:
+        if version in ("007", "008") and not missing:
             result["counts_after"] = before
         return result
     result["backup"] = backup_database(engine, ROOT / ".demo-backups")
     filenames = {"002": "002_auth_sessions.sql", "003": "003_public_data.sql",
                  "004": "004_chat.sql", "005": "005_user_roles.sql", "006": "006_user_shelters.sql",
-                 "007": "007_walk_domain.sql"}
+                 "007": "007_walk_domain.sql", "008": "008_gps_motion_analysis.sql"}
     source = (ROOT / "migrations" / filenames[version]).read_text()
     with engine.begin() as connection:
-        if version == "007":
+        if version in ("007", "008"):
             connection.execute(text("SET LOCAL lock_timeout = '5s'"))
         connection.execute(text("SELECT pg_advisory_xact_lock(782451)"))
-        if version == "007":
+        if version in ("007", "008"):
             # Freeze all existing tables while checking the backed-up row counts.
             quote = connection.dialect.identifier_preparer.quote
             names = inspect(connection).get_table_names()
@@ -188,7 +191,7 @@ def migrate(engine, version, apply=False):
                 raise PreparationError("백업 중 데이터가 변경됐습니다. 쓰기를 멈추고 재실행하세요.")
         check_version(connection, version)
         statements = "\n".join(l for l in source.splitlines() if not l.lstrip().startswith("--"))
-        if version in ("005", "006"):
+        if version in ("005", "006", "008"):
             # The PostgreSQL DO block contains semicolons; do not split its body.
             connection.exec_driver_sql(statements)
         else:
@@ -201,7 +204,7 @@ def migrate(engine, version, apply=False):
         after = table_counts(connection)
         if any(after[name] != count for name, count in before.items()):
             raise PreparationError("기존 행 수가 달라졌습니다. 롤백합니다.")
-        if version == "007":
+        if version in ("007", "008"):
             result["counts_after"] = after
     result["applied"] = True
     return result
@@ -209,7 +212,7 @@ def migrate(engine, version, apply=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("version", choices=["002", "003", "004", "005", "006", "007"])
+    parser.add_argument("version", choices=["002", "003", "004", "005", "006", "007", "008"])
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     from app.database import engine
