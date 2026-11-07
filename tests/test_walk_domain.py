@@ -21,7 +21,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 
 from scripts.migrate_backend import check_version, migrate
 from scripts.prepare_demo_db import PreparationError, ROOT
-from scripts.walk_schema import CONTRACT, compare_table
+from scripts.walk_schema import CONTRACT, MOTION_CONTRACT, compare_table
 
 
 class WalkMetadataTests(unittest.TestCase):
@@ -40,9 +40,15 @@ class WalkMetadataTests(unittest.TestCase):
         names = {m.__tablename__ for m in WALK_MODELS}
         source = (ROOT / "migrations/007_walk_domain.sql").read_text()
         statements = []
+        motion = json.loads(MOTION_CONTRACT.read_text())
+        additions = {c["name"] for c in motion["columns"]} | {"CONSTRAINT " + n for n in motion["constraints"]}
         for table in Base.metadata.sorted_tables:
             if table.name in names:
-                statements.append(str(CreateTable(table, if_not_exists=True).compile(dialect=postgresql.dialect())).strip() + ";")
+                ddl = str(CreateTable(table, if_not_exists=True).compile(dialect=postgresql.dialect())).strip()
+                if table.name == "walks":
+                    # Compare the immutable 007 projection, excluding reviewed 008 additions.
+                    ddl = "\n".join(l for l in ddl.splitlines() if not any(l.strip().startswith(n + " ") for n in additions))
+                statements.append(ddl + ";")
                 statements.extend(str(CreateIndex(i, if_not_exists=True).compile(dialect=postgresql.dialect())) + ";"
                                   for i in sorted(table.indexes, key=lambda i: i.name))
         actual = "\n".join(line for line in source.splitlines() if not line.startswith("--"))
@@ -56,8 +62,14 @@ class WalkMetadataTests(unittest.TestCase):
         for model in WALK_MODELS:
             table = model.__table__
             snapshot = contract[table.name]
-            self.assertEqual([c["name"] for c in snapshot["columns"]], list(table.columns.keys()))
-            for column, expected in zip(table.columns, snapshot["columns"]):
+            if table.name == "walks":
+                motion = json.loads(MOTION_CONTRACT.read_text())
+                snapshot["columns"].extend(motion["columns"])
+                snapshot["constraints"].update(motion["constraints"])
+            expected_columns = {c["name"]: c for c in snapshot["columns"]}
+            self.assertEqual(set(expected_columns), set(table.columns.keys()))
+            for column in table.columns:
+                expected = expected_columns[column.name]
                 self.assertEqual(column.nullable, not expected["not_null"])
                 if column.type.__class__.__name__ == "Numeric":
                     self.assertEqual(expected["type"], f"numeric({column.type.precision},{column.type.scale})")

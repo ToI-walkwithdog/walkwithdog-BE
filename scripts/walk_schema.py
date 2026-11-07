@@ -4,12 +4,50 @@ The reviewed catalog contract preserves expression grouping and index predicates
 it never guesses equivalence by removing parentheses or rewriting expressions.
 """
 import json
+from copy import deepcopy
 
 from sqlalchemy import inspect, text
 
 from scripts.prepare_demo_db import ROOT, PreparationError, validate_base_tables
 
 CONTRACT = ROOT / "migrations/007_walk_domain.schema.json"
+MOTION_CONTRACT = ROOT / "migrations/008_gps_motion_analysis.schema.json"
+
+
+def motion_extension(actual):
+    """Validate known 008 additions, then project them out for the 007 check.
+
+    Partial additions may be completed by 008; unexpected or incompatible
+    objects still fail closed. The historical 007 contract stays immutable.
+    """
+    if actual is None:
+        return None, []
+    expected = json.loads(MOTION_CONTRACT.read_text())
+    projected = deepcopy(actual)
+    missing = []
+    columns = {c["name"]: c for c in actual["columns"]}
+    for column in expected["columns"]:
+        name = column["name"]
+        if name not in columns:
+            missing.append("walks." + name)
+        elif columns[name] != column:
+            raise PreparationError(f"walks.{name} 008 컬럼 구조가 다릅니다.")
+        else:
+            projected["columns"].remove(column)
+    for name, constraint in expected["constraints"].items():
+        if name not in actual["constraints"]:
+            missing.append(name)
+        elif actual["constraints"][name] != constraint:
+            raise PreparationError(f"walks.{name} 008 제약조건이 다릅니다.")
+        else:
+            del projected["constraints"][name]
+    return projected, missing
+
+
+def check_motion_schema(connection):
+    if check_walk_schema(connection):
+        raise PreparationError("008 적용 전에 007 마이그레이션을 완료하세요.")
+    return motion_extension(catalog_table(connection, "walks"))[1]
 
 
 def catalog_table(connection, name):
@@ -95,6 +133,8 @@ def check_walk_schema(connection):
         expected = contract[name]
         standalone = {i.name for i in model.__table__.indexes}
         actual = catalog_table(connection, name)
+        if name == "walks":
+            actual, _ = motion_extension(actual)
         pending.extend(compare_table(name, actual, expected, standalone))
         # IF NOT EXISTS must not hide an index/sequence owned by another object.
         reserved = {name, *expected["indexes"]}

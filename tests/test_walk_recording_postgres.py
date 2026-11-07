@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+from walk_motion_test_support import MotionRecordingAssertions
 from walk_record_test_support import WalkFixture, START
 from walk_request_test_support import END
 from app.models import DogWalkSetting, Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest
@@ -15,7 +16,7 @@ TEST_URL = os.getenv("WALK_RECORDS_TEST_DATABASE_URL")
 
 
 @unittest.skipUnless(TEST_URL, "WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다")
-class WalkRecordingPostgresTests(WalkFixture, unittest.TestCase):
+class WalkRecordingPostgresTests(MotionRecordingAssertions, WalkFixture, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.admin = create_engine(TEST_URL)
@@ -201,7 +202,7 @@ class WalkRecordingPostgresTests(WalkFixture, unittest.TestCase):
         self.assertEqual(self.upload(walk["id"], [self.point(), self.point(1, 10, longitude="0.0001"), self.point(2, 20, longitude="0.0002")]).status_code, 200)
         result = self.end(walk["id"])
         self.assertEqual(result.status_code, 200, result.text)
-        self.assertEqual((result.json()["total_distance_m"], result.json()["duration_seconds"], result.json()["average_pace"]), ("22.24", 120, "5395.68"))
+        self.assertEqual((result.json()["total_distance_m"], result.json()["duration_seconds"], result.json()["average_pace"]), ("22.24", 120, "899.28"))
         with self.Session() as db:
             self.assertIsNotNone(db.get(Walk, walk["id"]).started_at.tzinfo)
             self.assertEqual(db.query(WalkPoint).count(), 3)

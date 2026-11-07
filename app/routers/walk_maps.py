@@ -26,6 +26,9 @@ require_volunteer = require_role(UserRole.USER)
 @router.get("/users/{user_id}/map", response_model=UserMapResponse)
 def my_map(user_id: int, limit: int = Query(10, ge=1, le=30), offset: int = Query(0, ge=0),
            actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
+    """본인 완료 산책의 개인 지도. 실제 시작·끝 좌표는 보존하고 중간 좌표만 간소화합니다.
+    새 이동 지표가 null이면 레거시 미분석 기록이며, 신규 페이스는 이동 초/km입니다.
+    """
     require_owner(user_id, actor)
     return user_map(db, user_id, limit, offset)
 
@@ -52,6 +55,9 @@ def my_walks(user_id: int,
 @router.get("/dogs/{dog_id}/map", response_model=DogMapResponse)
 def public_dog_map(dog_id: int, limit: int = Query(10, ge=1, le=30), offset: int = Query(0, ge=0),
                    _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """로그인 사용자용 비식별 지도. 봉사자 식별정보·실제 시각·GPS 시작/끝을 노출하지 않습니다.
+    공개 보호소 마커는 추가하지 않습니다. 보호 반경을 재통과하는 경로는 숨길 수 있습니다.
+    """
     if db.get(Dog, dog_id) is None:
         raise HTTPException(404, "Dog not found")
     return dog_map(db, dog_id, limit, offset)

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
 
+from walk_motion_test_support import MotionRecordingAssertions
 from walk_record_test_support import WalkFixture, START
 from walk_request_test_support import NOW, END
 from app.database import get_db
@@ -14,7 +15,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.pool import StaticPool
 
 
-class WalkRecordingTests(WalkFixture, unittest.TestCase):
+class WalkRecordingTests(MotionRecordingAssertions, WalkFixture, unittest.TestCase):
     def setUp(self):
         engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         event.listen(engine, "connect", lambda conn, _: conn.execute("PRAGMA foreign_keys=ON"))
@@ -47,7 +48,7 @@ class WalkRecordingTests(WalkFixture, unittest.TestCase):
             self.advance(seconds)
             self.assertEqual(self.start(identifier).status_code, 409)
         self.advance(0)
-        for changes in ({"walkable": False}, {"difficulty": "EXPERIENCED"}, {"slots": []}):
+        for changes in ({"walkable": False}, {"slots": []}):
             self.assertEqual(self.client.patch("/dogs/1/walk-settings", headers=self.auth(3), json=changes).status_code, 200)
             self.assertEqual(self.start(identifier).status_code, 409)
             self.client.patch("/dogs/1/walk-settings", headers=self.auth(3), json={
@@ -156,9 +157,9 @@ class WalkRecordingTests(WalkFixture, unittest.TestCase):
         ended = self.end(walk["id"])
         self.assertEqual(ended.status_code, 200, ended.text)
         self.assertEqual((ended.json()["status"], ended.json()["total_distance_m"], ended.json()["duration_seconds"], ended.json()["average_pace"]),
-                         ("COMPLETED", "22.24", 120, "5395.68"))
+                         ("COMPLETED", "22.24", 120, "899.28"))
         self.assertEqual(self.rows(WalkRequest), before)
-        # Issue #6: a COMPLETED walk is now counted in the volunteer statistics, exactly once.
+        # Both motion metrics and volunteer totals are persisted by the same end.
         with self.Session() as db:
             profile = db.get(VolunteerProfile, 1)
             self.assertEqual((profile.total_walk_count, profile.total_distance_m, profile.total_duration_seconds),

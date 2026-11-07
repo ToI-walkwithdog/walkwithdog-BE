@@ -185,15 +185,15 @@ class WalkRequestPostgresTests(RequestFixture, unittest.TestCase):
         self.assertEqual(self.setting_off().status_code, 200)
         self.assert_states({request["id"]: "APPROVED"})
 
-    def test_profile_row_lock_protects_concurrent_level_change(self):
+    def test_profile_row_lock_serializes_but_level_no_longer_blocks_approval(self):
         request = self.create(user=6, dog=2)
         with self.Session.begin() as change:
             profile = change.query(VolunteerProfile).filter_by(user_id=6).with_for_update().one()
             profile.level = 1
             change.flush()
             self.assertEqual(self.act(request["id"], "APPROVE").status_code, 409)
-        self.assertEqual(self.act(request["id"], "APPROVE").status_code, 409)
-        self.assert_states({request["id"]: "PENDING"})
+        self.assertEqual(self.act(request["id"], "APPROVE").status_code, 200)
+        self.assert_states({request["id"]: "APPROVED"})
 
     def test_request_row_is_locked_not_just_parent_resources(self):
         request = self.create()

@@ -5,18 +5,21 @@ from datetime import timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+from walk_map_integration_support import MapIntegrationAssertions
 from walk_map_test_support import WalkMapFixture
 from app.models import VolunteerProfile
 from app.volunteer_stats import refresh_volunteer_profile
 from app.walk_map_service import OWNER_MAX_ROUTE_POINTS
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import DBAPIError
+from scripts.backfill_volunteer_stats import rebuild_profiles
 from scripts.prepare_demo_db import PreparationError, validate_local_engine
 
 TEST_URL = os.getenv("WALK_MAPS_TEST_DATABASE_URL")
 
 
 @unittest.skipUnless(TEST_URL, "WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다")
-class WalkMapPostgresTests(WalkMapFixture, unittest.TestCase):
+class WalkMapPostgresTests(MapIntegrationAssertions, WalkMapFixture, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.admin = create_engine(TEST_URL)
@@ -83,7 +86,7 @@ class WalkMapPostgresTests(WalkMapFixture, unittest.TestCase):
         self.assertEqual((winner.status_code, loser.status_code), (200, 409))
         self.assertIsNone(self.profile_row(1))
 
-    def test_refresh_on_postgresql_is_idempotent_and_promotes_only_when_rule_is_met(self):
+    def test_refresh_on_postgresql_is_idempotent_without_changing_level(self):
         for day, dog in enumerate((1, 1, 9, 8, 1), start=1):
             self.seed_walk(dog=dog, day=day)
         with self.Session.begin() as db:
@@ -92,7 +95,44 @@ class WalkMapPostgresTests(WalkMapFixture, unittest.TestCase):
         with self.Session.begin() as db:
             again = refresh_volunteer_profile(db, 1)
             self.assertEqual((again.level, again.total_walk_count, again.total_distance_m, again.unique_dog_count), snapshot)
-        self.assertEqual(snapshot, (2, 5, Decimal("500.00"), 3))
+        self.assertEqual(snapshot, (1, 5, Decimal("500.00"), 3))
+
+    def test_backfill_wins_concurrent_end_then_retry_includes_both_walks(self):
+        self.seed_walk(day=1)
+        walk = self.begin()
+        self.advance(120)
+        winner, loser = self.recording_race(
+            lambda: rebuild_profiles(self.Session, apply=True, user_id=1),
+            lambda: self.end(walk['id']),
+            hook='scripts.backfill_volunteer_stats.refresh_volunteer_profile')
+        self.assertTrue(winner['applied'])
+        self.assertEqual(loser.status_code, 409)
+        self.assertEqual(self.profile_row(1)[1], 1)
+        self.assertEqual(self.end(walk['id']).status_code, 200)
+        self.assertEqual(self.profile_row(1), (1, 2, Decimal('100.00'), 720, 1))
+
+    def test_end_wins_concurrent_backfill_and_backfill_retry_is_idempotent(self):
+        self.seed_walk(day=1)
+        walk = self.begin()
+        self.advance(120)
+        def conflicting_backfill():
+            with self.assertRaises(DBAPIError) as error:
+                rebuild_profiles(self.Session, apply=True, user_id=1)
+            self.assertEqual(error.exception.orig.pgcode, '55P03')
+        winner, _ = self.recording_race(lambda: self.end(walk['id']), conflicting_backfill)
+        self.assertEqual(winner.status_code, 200)
+        before = self.profile_row(1)
+        rebuild_profiles(self.Session, apply=True, user_id=1)
+        self.assertEqual(self.profile_row(1), before)
+        self.assertEqual(before, (1, 2, Decimal('100.00'), 720, 1))
+
+    def test_two_distinct_walk_ends_for_same_user_are_serialized(self):
+        first = self.seed_walk(day=1, dog=1, status='IN_PROGRESS')
+        second = self.seed_walk(day=2, dog=9, status='IN_PROGRESS')
+        winner, loser = self.recording_race(lambda: self.end(first), lambda: self.end(second))
+        self.assertEqual((winner.status_code, loser.status_code), (200, 409))
+        self.assertEqual(self.end(second).status_code, 200)
+        self.assertEqual(self.profile_row(1), (1, 2, Decimal('0.00'), 3 * 86400, 2))
 
 
 if __name__ == "__main__":

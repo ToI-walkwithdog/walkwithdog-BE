@@ -115,7 +115,11 @@ class WalkResponse(UTCResponse):
     ended_at: datetime | None
     total_distance_m: Decimal | None
     duration_seconds: int | None
-    average_pace: Decimal | None
+    average_pace: Decimal | None = Field(description="초/km. 신규 분석은 moving_duration_seconds × 1000 / moving_distance_m. 새 시간 필드가 NULL인 기존 기록은 전체 경과 시간 기준의 레거시 값입니다.")
+    moving_duration_seconds: int | None = Field(default=None, description="GPS로 이동이 확인된 정수 초; 기존 미분석 기록은 NULL")
+    stopped_duration_seconds: int | None = Field(default=None, description="60초 이상 안정 정지로 확정된 정수 초; 기존 미분석 기록은 NULL")
+    unknown_duration_seconds: int | None = Field(default=None, description="GPS 근거 부족·공백·미확정 및 초 미만 절삭 잔여 시간; 기존 미분석 기록은 NULL")
+    moving_distance_m: Decimal | None = Field(default=None, description="실제 이동으로 분류된 구간의 거리(m). 정지 흔들림은 제외하며 기존 미분석 기록은 NULL")
     created_at: datetime
     updated_at: datetime
 

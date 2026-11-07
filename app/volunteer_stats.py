@@ -9,19 +9,8 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import distinct, func
 
-from app.models import Walk, WalkRequest
-from app.walk_request_service import locked_profile
-
-# PROVISIONAL policy: the Level 1/2 promotion criteria of Issue #6 still need a product
-# decision. Keep them here, in one place, so changing them touches no other code.
-LEVEL_2_MIN_COMPLETED_WALKS = 5
-LEVEL_2_MIN_UNIQUE_DOGS = 2
-
-
-def level_for(total_walk_count, unique_dog_count):
-    if total_walk_count >= LEVEL_2_MIN_COMPLETED_WALKS and unique_dog_count >= LEVEL_2_MIN_UNIQUE_DOGS:
-        return 2
-    return 1
+from app.models import User, Walk, WalkRequest
+from app.walk_request_service import lock_row, locked_profile
 
 
 def completed_totals(db, user_id):
@@ -47,11 +36,16 @@ def completed_totals(db, user_id):
 
 
 def refresh_volunteer_profile(db, user_id):
-    """Recompute totals from walk rows; the level never goes down automatically."""
+    """Recompute totals without changing the legacy level.
+
+    Backfills acquire User -> Profile; end_walk already holds User, so re-locking
+    that same row is safe. NOWAIT conflicts roll back instead of mixing snapshots.
+    """
+    if lock_row(db, User, user_id) is None:
+        raise ValueError("User not found")
     profile = locked_profile(db, user_id, create=True)
     totals = completed_totals(db, user_id)
     for name, value in totals.items():
         setattr(profile, name, value)
-    profile.level = max(profile.level, level_for(totals["total_walk_count"], totals["unique_dog_count"]))
     db.flush()
     return profile

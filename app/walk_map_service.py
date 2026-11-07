@@ -12,7 +12,7 @@ from sqlalchemy import and_, distinct, func, or_
 from sqlalchemy.orm import contains_eager
 
 from app.models import Walk, WalkPoint, WalkRequest
-from app.walk_service import distance_m
+from app.gps_geometry import distance_m
 
 OWNER_MAX_ROUTE_POINTS = 200   # route holds at most this +1 (the final point is always kept)
 PUBLIC_MAX_ROUTE_POINTS = 100
@@ -93,8 +93,35 @@ def coarsen(points, decimals):
 
 
 def public_route(points):
+    if len(points) < 2:
+        return []
     route = coarsen(trim_ends(points, PUBLIC_TRIM_M), PUBLIC_COORD_DECIMALS)
-    return route if len(route) >= 2 else []
+    anchors = (points[0], points[-1])
+    safe = [all(distance_m(p, anchor) > PUBLIC_TRIM_M for anchor in anchors) for p in route]
+    indices = [i for i, valid in enumerate(safe) if valid]
+    if len(indices) < 2:
+        return []
+    start, end = indices[0], indices[-1]
+    # Trim rounding spill at the edges. A revisit inside the remaining route
+    # withholds the whole route, rather than joining disconnected fragments.
+    if not all(safe[start:end + 1]):
+        return []
+    route = route[start:end + 1]
+    for first, second in zip(route, route[1:]):
+        length = distance_m(first, second)
+        for anchor in anchors:
+            # Triangle inequality gives a conservative lower bound for distance
+            # from the anchor to ANY point on the connecting geodesic segment.
+            clearance = (distance_m(anchor, first) + distance_m(anchor, second) - length) / 2
+            if clearance <= PUBLIC_TRIM_M:
+                return []
+    return route
+
+
+def motion_metrics(walk):
+    return {name: getattr(walk, name) for name in (
+        "moving_duration_seconds", "stopped_duration_seconds", "unknown_duration_seconds",
+        "moving_distance_m", "average_pace")}
 
 
 def user_map(db, user_id, limit, offset):
@@ -106,6 +133,7 @@ def user_map(db, user_id, limit, offset):
             "walk_id": walk.id, "dog": walk.walk_request.dog, "started_at": walk.started_at,
             "ended_at": walk.ended_at, "total_distance_m": walk.total_distance_m,
             "duration_seconds": walk.duration_seconds, "point_count": routes[walk.id][0],
+            **motion_metrics(walk),
             "route": [{"latitude": p.latitude, "longitude": p.longitude} for p in routes[walk.id][1]],
         } for walk in walks],
     }
@@ -145,6 +173,6 @@ def user_walks(db, user_id, status, limit, offset):
             "walk_id": walk.id, "walk_request_id": walk.walk_request_id, "dog": walk.walk_request.dog,
             "status": walk.status, "started_at": walk.started_at, "ended_at": walk.ended_at,
             "total_distance_m": walk.total_distance_m, "duration_seconds": walk.duration_seconds,
-            "average_pace": walk.average_pace, "counted_as_volunteer_record": walk.status == "COMPLETED",
+            **motion_metrics(walk), "counted_as_volunteer_record": walk.status == "COMPLETED",
         } for walk in walks],
     }

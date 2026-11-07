@@ -1,14 +1,13 @@
-"""Issue #6: owner map, public dog map privacy, history, statistics and level refresh."""
+"""Issue #6: owner map, public dog map privacy, history, statistics without automatic level changes."""
 from decimal import Decimal
 import unittest
 
+from walk_map_integration_support import MapIntegrationAssertions
 from walk_map_test_support import PRIVATE_KEYS, WalkMapFixture, all_keys
 from walk_record_test_support import START
 from walk_request_test_support import END
 from app.models import VolunteerProfile
-from app.volunteer_stats import (
-    LEVEL_2_MIN_COMPLETED_WALKS, LEVEL_2_MIN_UNIQUE_DOGS, level_for, refresh_volunteer_profile,
-)
+from app.volunteer_stats import refresh_volunteer_profile
 from app.walk_map_service import OWNER_MAX_ROUTE_POINTS
 from datetime import timedelta
 
@@ -176,7 +175,7 @@ class HistoryAndProfileTests(WalkMapFixture, unittest.TestCase):
                           me["unique_dog_count"]), (1, "22.24", 120, 1))
 
 
-class StatisticsAndLevelTests(WalkMapFixture, unittest.TestCase):
+class StatisticsTests(MapIntegrationAssertions, WalkMapFixture, unittest.TestCase):
     def setUp(self):
         self.setup_maps()
 
@@ -226,21 +225,18 @@ class StatisticsAndLevelTests(WalkMapFixture, unittest.TestCase):
         with self.Session.begin() as db:
             self.assertEqual(refresh_volunteer_profile(db, 1).total_walk_count, 3)
 
-    def test_level_rule(self):
-        self.assertEqual(level_for(LEVEL_2_MIN_COMPLETED_WALKS - 1, LEVEL_2_MIN_UNIQUE_DOGS), 1)
-        self.assertEqual(level_for(LEVEL_2_MIN_COMPLETED_WALKS, LEVEL_2_MIN_UNIQUE_DOGS - 1), 1)
-        self.assertEqual(level_for(LEVEL_2_MIN_COMPLETED_WALKS, LEVEL_2_MIN_UNIQUE_DOGS), 2)
-
-    def test_promotion_happens_on_completion_and_unlocks_experienced_dogs(self):
+    def test_completions_never_promote_and_experienced_dogs_do_not_need_level_two(self):
         for day, dog in enumerate((1, 1, 9, 8), start=1):
             self.seed_walk(dog=dog, day=day)
         later = dict(start=START + timedelta(days=7), end=START + timedelta(days=7, hours=1))
-        self.assertEqual(self.post(user=2, dog=2, **later).status_code, 409)  # level 1 volunteer
+        self.assertEqual(self.post(user=2, dog=2, **later).status_code, 201)
         self.complete_via_api(dog=1)
-        self.assertEqual(self.profile_row(1)[:2], (2, 5))
-        self.assertEqual(self.get("/volunteers/me").json()["level"], 2)
-        created = self.post(user=1, dog=2, **later)  # EXPERIENCED dog now allowed
+        self.assertEqual(self.profile_row(1)[:2], (1, 5))
+        self.assertEqual(self.get('/volunteers/me').json()['level'], 1)
+        created = self.post(user=1, dog=2, **later)
         self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()['status'], 'PENDING')
+        self.assertEqual(self.start(created.json()['id']).status_code, 409)
 
     def test_level_is_never_lowered_automatically(self):
         self.complete_via_api(user=6, dog=1)  # seeded level-2 profile with no walk rows
