@@ -5,7 +5,6 @@ bridge over sampling gaps >300s. Rejected batches never partially persist.
 """
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from math import asin, cos, radians, sin, sqrt
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_
@@ -13,26 +12,19 @@ from sqlalchemy.orm import joinedload
 
 from app.dependencies import require_shelter_access
 from app.models import Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest
+from app.gps_geometry import EARTH_RADIUS_M, distance_m
+from app.gps_motion_analysis import analyze_motion
+from app.gps_motion_config import MAX_SPEED_M_S
 from app.walk_request_service import (
     as_utc, locked_profile, locked_request, lock_row, validate_eligibility, validate_walk_start,
 )
 
-EARTH_RADIUS_M = 6371000.0  # Spherical approximation, not a surveyed/geodesic distance.
 MAX_ACCURACY_M = Decimal("50")
-MAX_SPEED_M_S = 5.0
 MAX_DISTANCE_GAP_SECONDS = 300
 
 
 def utc_now():
     return datetime.now(timezone.utc)
-
-
-def distance_m(first, second):
-    lat1, lat2 = radians(float(first.latitude)), radians(float(second.latitude))
-    dlat = lat2 - lat1
-    dlon = radians(float(second.longitude) - float(first.longitude))
-    hav = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
-    return 2 * EARTH_RADIUS_M * asin(sqrt(min(1.0, max(0.0, hav))))
 
 
 def start_walk(db, actor, payload):
@@ -170,13 +162,17 @@ def end_walk(db, walk_id, actor, payload):
         if latest and as_utc(latest) > now:
             raise HTTPException(409, "마지막 관찰 시각보다 빠르게 종료할 수 없습니다.")
     points = db.query(WalkPoint).filter_by(walk_id=walk.id).order_by(WalkPoint.sequence_no).yield_per(1000)
-    walk.total_distance_m = total_distance(points)
-    walk.duration_seconds = int((now - as_utc(walk.started_at)).total_seconds())
-    walk.average_pace = ((Decimal(walk.duration_seconds) * 1000 / walk.total_distance_m).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if walk.total_distance_m > 0 and walk.duration_seconds > 0 else None)
-    if walk.average_pace is not None and walk.average_pace > Decimal("9999999999.99"):
-        walk.average_pace = None  # Unrepresentable pace is unknown, never truncated.
+    legacy_distance = total_distance(points)
+    motion_points = (db.query(WalkPoint).filter_by(walk_id=walk.id)
+                     .order_by(WalkPoint.recorded_at, WalkPoint.sequence_no).yield_per(1000))
+    motion = analyze_motion(motion_points, walk.started_at, now, distance_fn=distance_m, already_ordered=True)
+    walk.total_distance_m = legacy_distance
+    walk.duration_seconds = motion.duration_seconds
+    walk.moving_duration_seconds = motion.moving_duration_seconds
+    walk.stopped_duration_seconds = motion.stopped_duration_seconds
+    walk.unknown_duration_seconds = motion.unknown_duration_seconds
+    walk.moving_distance_m = motion.moving_distance_m
+    walk.average_pace = motion.average_pace
     walk.status, walk.ended_at = payload.status, now
     db.flush()
     return walk

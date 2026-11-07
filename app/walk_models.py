@@ -128,6 +128,8 @@ class Walk(Timestamps, Base):
         CheckConstraint("total_distance_m >= 0", name="ck_walk_distance"),
         CheckConstraint("duration_seconds >= 0", name="ck_walk_duration"),
         CheckConstraint("average_pace IS NULL OR (average_pace > 0 AND total_distance_m IS NOT NULL AND total_distance_m > 0 AND duration_seconds IS NOT NULL AND duration_seconds > 0)", name="ck_walk_pace"),
+        CheckConstraint("(moving_duration_seconds IS NULL AND stopped_duration_seconds IS NULL AND unknown_duration_seconds IS NULL AND moving_distance_m IS NULL) OR (moving_duration_seconds IS NOT NULL AND stopped_duration_seconds IS NOT NULL AND unknown_duration_seconds IS NOT NULL AND moving_distance_m IS NOT NULL AND duration_seconds IS NOT NULL AND total_distance_m IS NOT NULL AND ended_at IS NOT NULL AND status <> 'IN_PROGRESS' AND moving_duration_seconds >= 0 AND stopped_duration_seconds >= 0 AND unknown_duration_seconds >= 0 AND moving_distance_m >= 0 AND moving_distance_m <= total_distance_m AND CAST(moving_duration_seconds AS BIGINT) + CAST(stopped_duration_seconds AS BIGINT) + CAST(unknown_duration_seconds AS BIGINT) = duration_seconds)", name="ck_walk_motion_partition"),
+        CheckConstraint("moving_duration_seconds IS NULL OR average_pace IS NULL OR (moving_duration_seconds > 0 AND moving_distance_m > 0)", name="ck_walk_motion_pace"),
         Index("ix_walks_status_started", "status", "started_at"),
     )
 
@@ -139,6 +141,10 @@ class Walk(Timestamps, Base):
     total_distance_m = Column(Numeric(12, 2), nullable=True)
     duration_seconds = Column(Integer, nullable=True)
     average_pace = Column(Numeric(12, 2), nullable=True)  # seconds / kilometre
+    moving_duration_seconds = Column(Integer, nullable=True)
+    stopped_duration_seconds = Column(Integer, nullable=True)
+    unknown_duration_seconds = Column(Integer, nullable=True)
+    moving_distance_m = Column(Numeric(12, 2), nullable=True)
 
     walk_request = relationship("WalkRequest", back_populates="walk")
     points = relationship("WalkPoint", back_populates="walk", passive_deletes="all", order_by="WalkPoint.sequence_no")

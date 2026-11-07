@@ -1,0 +1,50 @@
+{
+  "columns": [
+    {
+      "name": "moving_duration_seconds",
+      "type": "integer",
+      "not_null": false,
+      "identity": "",
+      "generated": "",
+      "default": null,
+      "sequence": null
+    },
+    {
+      "name": "stopped_duration_seconds",
+      "type": "integer",
+      "not_null": false,
+      "identity": "",
+      "generated": "",
+      "default": null,
+      "sequence": null
+    },
+    {
+      "name": "unknown_duration_seconds",
+      "type": "integer",
+      "not_null": false,
+      "identity": "",
+      "generated": "",
+      "default": null,
+      "sequence": null
+    },
+    {
+      "name": "moving_distance_m",
+      "type": "numeric(12,2)",
+      "not_null": false,
+      "identity": "",
+      "generated": "",
+      "default": null,
+      "sequence": null
+    }
+  ],
+  "constraints": {
+    "ck_walk_motion_pace": {
+      "definition": "CHECK (((moving_duration_seconds IS NULL) OR (average_pace IS NULL) OR ((moving_duration_seconds > 0) AND (moving_distance_m > (0)::numeric))))",
+      "validated": true
+    },
+    "ck_walk_motion_partition": {
+      "definition": "CHECK ((((moving_duration_seconds IS NULL) AND (stopped_duration_seconds IS NULL) AND (unknown_duration_seconds IS NULL) AND (moving_distance_m IS NULL)) OR ((moving_duration_seconds IS NOT NULL) AND (stopped_duration_seconds IS NOT NULL) AND (unknown_duration_seconds IS NOT NULL) AND (moving_distance_m IS NOT NULL) AND (duration_seconds IS NOT NULL) AND (total_distance_m IS NOT NULL) AND (ended_at IS NOT NULL) AND ((status)::text <> 'IN_PROGRESS'::text) AND (moving_duration_seconds >= 0) AND (stopped_duration_seconds >= 0) AND (unknown_duration_seconds >= 0) AND (moving_distance_m >= (0)::numeric) AND (moving_distance_m <= total_distance_m) AND ((((moving_duration_seconds)::bigint + (stopped_duration_seconds)::bigint) + (unknown_duration_seconds)::bigint) = duration_seconds))))",
+      "validated": true
+    }
+  }
+}
