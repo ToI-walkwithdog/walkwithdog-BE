@@ -6,7 +6,7 @@ import unittest
 
 from walk_request_test_support import RequestFixture, NOW, START, END
 from app.models import Dog, DogWalkSetting, User, UserRole, VolunteerProfile, Walk, WalkRequest
-from app.walk_request_service import can_walk_difficulty, validate_walk_start
+from app.walk_request_service import validate_walk_start
 from app.database import get_db
 from fastapi import HTTPException
 from sqlalchemy import create_engine, event
@@ -21,10 +21,6 @@ class WalkRequestTests(RequestFixture, unittest.TestCase):
         self.setup_api(engine)
 
     def test_level_policy_initial_profile_and_no_automatic_promotion(self):
-        self.assertTrue(can_walk_difficulty(1, "BEGINNER"))
-        self.assertFalse(can_walk_difficulty(1, "EXPERIENCED"))
-        self.assertTrue(can_walk_difficulty(2, "EXPERIENCED"))
-        self.assertFalse(can_walk_difficulty(100, "UNKNOWN"))
         result = self.create()
         self.assertEqual(result["status"], "PENDING")
         self.assertEqual((result["user_id"], result["shelter_id"]), (1, 1))
@@ -44,11 +40,15 @@ class WalkRequestTests(RequestFixture, unittest.TestCase):
         self.create(user=6, dog=2)
         self.assertEqual(self.rows(VolunteerProfile), before)
 
-    def test_insufficient_level_rolls_back_new_profile_and_request(self):
-        before = self.rows(VolunteerProfile)
-        self.assertEqual(self.post(dog=2).status_code, 409)
-        self.assertEqual(self.rows(VolunteerProfile), before)
-        self.assertEqual(self.rows(WalkRequest), [])
+    def test_level_one_can_apply_for_experienced_dog_but_still_needs_approval(self):
+        result = self.create(dog=2)
+        self.assertEqual(result['status'], 'PENDING')
+        with self.Session() as db:
+            with self.assertRaises(HTTPException) as error:
+                validate_walk_start(db, result['id'], db.get(User, 1))
+            self.assertEqual(error.exception.status_code, 409)
+            self.assertEqual(db.get(VolunteerProfile, 1).level, 1)
+        self.assertEqual(self.act(result['id'], 'APPROVE').status_code, 200)
 
     def test_profile_and_history_reads_never_create_records(self):
         before = self.rows(VolunteerProfile)
@@ -205,10 +205,10 @@ class WalkRequestTests(RequestFixture, unittest.TestCase):
             db.add(Walk(walk_request_id=identifier, started_at=NOW))
         self.assertEqual(self.act(identifier, "CANCEL", user=1).status_code, 409)
 
-    def test_approval_revalidates_walkability_slots_difficulty_and_future(self):
+    def test_approval_revalidates_walkability_slots_and_future(self):
         request = self.create()
         endpoint = "/dogs/1/walk-settings"
-        for change in ({"walkable": False}, {"slots": []}, {"difficulty": "EXPERIENCED"},
+        for change in ({"walkable": False}, {"slots": []},
                        {"slots": [{"day_of_week": 1, "start_time": "09:00", "end_time": "12:00"}]}):
             self.assertEqual(self.client.patch(endpoint, headers=self.auth(3), json=change).status_code, 200)
             self.assertEqual(self.act(request["id"], "APPROVE").status_code, 409)
@@ -219,21 +219,19 @@ class WalkRequestTests(RequestFixture, unittest.TestCase):
             self.assertEqual(self.act(request["id"], "APPROVE").status_code, 409)
         self.assertEqual(self.act(request["id"], "APPROVE").status_code, 200)
 
-    def test_approval_revalidates_current_volunteer_level_and_role(self):
+    def test_approval_revalidates_role_but_ignores_legacy_level(self):
         request = self.create(user=6, dog=2)
         with self.Session.begin() as db:
             db.get(VolunteerProfile, 6).level = 1
-        self.assertEqual(self.act(request["id"], "APPROVE").status_code, 409)
-        with self.Session.begin() as db:
-            db.get(VolunteerProfile, 6).level = 2
             db.get(User, 6).role = UserRole.SHELTER
-        self.assertEqual(self.act(request["id"], "APPROVE").status_code, 409)
+        self.assertEqual(self.act(request['id'], 'APPROVE').status_code, 409)
+        with self.Session.begin() as db:
+            db.get(User, 6).role = UserRole.USER
+        self.assertEqual(self.act(request['id'], 'APPROVE').status_code, 200)
 
-    def test_legacy_request_without_profile_uses_level_one_without_creating_profile(self):
+    def test_legacy_request_without_profile_can_be_approved_without_creating_profile(self):
         advanced = self.seed_request(dog=2)
-        self.assertEqual(self.act(advanced, "APPROVE").status_code, 409)
-        beginner = self.seed_request(dog=1)
-        self.assertEqual(self.act(beginner, "APPROVE").status_code, 200)
+        self.assertEqual(self.act(advanced, 'APPROVE').status_code, 200)
         with self.Session() as db:
             self.assertIsNone(db.get(VolunteerProfile, 1))
 

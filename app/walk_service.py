@@ -12,6 +12,7 @@ from sqlalchemy.orm import joinedload
 
 from app.dependencies import require_shelter_access
 from app.models import Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest
+from app.volunteer_stats import refresh_volunteer_profile
 from app.gps_geometry import EARTH_RADIUS_M, distance_m
 from app.gps_motion_analysis import analyze_motion
 from app.gps_motion_config import MAX_SPEED_M_S
@@ -32,8 +33,8 @@ def start_walk(db, actor, payload):
     now = utc_now()
     if not as_utc(request.requested_start_at) <= now < as_utc(request.requested_end_at):
         raise HTTPException(409, "승인된 예약 시간 안에서만 산책을 시작할 수 있습니다.")
-    profile = locked_profile(db, request.user_id)
-    validate_eligibility(db, request.dog, request.user, profile, request.requested_start_at,
+    locked_profile(db, request.user_id)
+    validate_eligibility(db, request.dog, request.user, request.requested_start_at,
                          request.requested_end_at, shelter_id=request.shelter_id, require_future=False)
     active = db.query(Walk.id).join(WalkRequest).filter(
         Walk.status == "IN_PROGRESS",
@@ -175,6 +176,9 @@ def end_walk(db, walk_id, actor, payload):
     walk.average_pace = motion.average_pace
     walk.status, walk.ended_at = payload.status, now
     db.flush()
+    if walk.status == "COMPLETED":
+        # Issue #6: same transaction, so a failed refresh also rolls the walk end back.
+        refresh_volunteer_profile(db, request.user_id)
     return walk
 
 

@@ -27,11 +27,6 @@ def as_utc(value):
     return value.astimezone(timezone.utc)
 
 
-def can_walk_difficulty(volunteer_level, dog_difficulty):
-    minimum = {"BEGINNER": 1, "EXPERIENCED": 2}.get(dog_difficulty)
-    return minimum is not None and volunteer_level >= minimum
-
-
 def lock_row(db, model, identifier):
     return (db.query(model).filter(model.id == identifier).populate_existing()
             .with_for_update(nowait=True).first())
@@ -57,7 +52,7 @@ def locked_profile(db, user_id, create=False):
     return profile
 
 
-def validate_eligibility(db, dog, volunteer, profile, start, end, shelter_id=None, *, require_future=True):
+def validate_eligibility(db, dog, volunteer, start, end, shelter_id=None, *, require_future=True):
     if volunteer.role != UserRole.USER:
         raise HTTPException(409, "현재 신청자가 봉사자 계정이 아닙니다.")
     if dog.shelter_id is None:
@@ -67,9 +62,6 @@ def validate_eligibility(db, dog, volunteer, profile, start, end, shelter_id=Non
     setting = db.query(DogWalkSetting).filter_by(dog_id=dog.id).populate_existing().first()
     if setting is None or not setting.walkable:
         raise HTTPException(409, "현재 산책 가능한 강아지가 아닙니다.")
-    # Legacy requests without a profile receive only the safe initial-level policy.
-    if not can_walk_difficulty(profile.level if profile else 1, setting.difficulty):
-        raise HTTPException(409, "봉사자 레벨이 산책 난이도를 충족하지 않습니다.")
     start, end = as_utc(start), as_utc(end)
     if require_future and start <= utc_now():
         raise HTTPException(409, "산책 시작 시각은 현재보다 미래여야 합니다.")
@@ -112,9 +104,9 @@ def create_request(db, actor, payload):
     dog, volunteer = lock_resources(db, payload.dog_id, actor.id)
     if volunteer.role != UserRole.USER:
         raise HTTPException(403, "일반 사용자만 산책을 신청할 수 있습니다.")
-    profile = locked_profile(db, volunteer.id, create=True)
+    locked_profile(db, volunteer.id, create=True)
     start, end = as_utc(payload.requested_start_at), as_utc(payload.requested_end_at)
-    validate_eligibility(db, dog, volunteer, profile, start, end)
+    validate_eligibility(db, dog, volunteer, start, end)
     check_active_overlap(db, volunteer.id, dog.id, start, end)
     check_approved_conflicts(db, volunteer.id, dog.id, start, end)
     request = WalkRequest(user_id=volunteer.id, dog=dog, shelter_id=dog.shelter_id,
@@ -166,8 +158,8 @@ def transition_request(db, request_id, actor, payload):
         if request.status != "PENDING":
             raise HTTPException(409, "승인 대기 중인 신청만 승인하거나 거절할 수 있습니다.")
         if payload.action == "APPROVE":
-            profile = locked_profile(db, volunteer.id)
-            validate_eligibility(db, dog, volunteer, profile, request.requested_start_at,
+            locked_profile(db, volunteer.id)
+            validate_eligibility(db, dog, volunteer, request.requested_start_at,
                                  request.requested_end_at, shelter_id=request.shelter_id)
             ensure_not_started(db, request)
             check_approved_conflicts(db, volunteer.id, dog.id, request.requested_start_at,

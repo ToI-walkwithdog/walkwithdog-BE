@@ -34,6 +34,8 @@ def persist(db, operation, response_model):
             raise HTTPException(409, "다른 작업과 충돌했습니다. 다시 조회한 뒤 재시도하세요.") from None
         if code == "23505" and name in ("uq_walks_request", "uq_walk_points_sequence"):
             raise HTTPException(409, "산책 또는 좌표 순번이 중복됩니다. 저장 상태를 다시 확인하세요.") from None
+        if code == "23505" and name == "volunteer_profiles_pkey":
+            raise HTTPException(409, "봉사자 프로필 생성이 다른 요청과 충돌했습니다. 다시 시도하세요.") from None
         raise HTTPException(500, "산책 기록을 저장하지 못했습니다.") from None
 
 
