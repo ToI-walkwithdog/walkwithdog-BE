@@ -148,16 +148,21 @@ class WalkRecordingTests(WalkFixture, unittest.TestCase):
                  "recorded_at": "2030-01-07T09:00:00+09:00"}
         self.assertEqual(self.upload(walk["id"], [retry]).json()["duplicate_count"], 1)
 
-    def test_summary_distance_time_pace_and_request_profile_preservation(self):
+    def test_summary_distance_time_pace_and_request_preservation(self):
         walk = self.begin()
-        before = self.rows(VolunteerProfile), self.rows(WalkRequest)
+        before = self.rows(WalkRequest)
         self.advance(120)
         self.assertEqual(self.upload(walk["id"], [self.point(), self.point(1, 10, longitude="0.0001"), self.point(2, 20, longitude="0.0002")]).status_code, 200)
         ended = self.end(walk["id"])
         self.assertEqual(ended.status_code, 200, ended.text)
         self.assertEqual((ended.json()["status"], ended.json()["total_distance_m"], ended.json()["duration_seconds"], ended.json()["average_pace"]),
                          ("COMPLETED", "22.24", 120, "5395.68"))
-        self.assertEqual((self.rows(VolunteerProfile), self.rows(WalkRequest)), before)
+        self.assertEqual(self.rows(WalkRequest), before)
+        # Issue #6: a COMPLETED walk is now counted in the volunteer statistics, exactly once.
+        with self.Session() as db:
+            profile = db.get(VolunteerProfile, 1)
+            self.assertEqual((profile.total_walk_count, profile.total_distance_m, profile.total_duration_seconds),
+                             (1, Decimal("22.24"), 120))
         self.assertEqual(self.end(walk["id"]).status_code, 409)
 
     def test_no_points_zero_time_and_single_point_have_no_pace(self):

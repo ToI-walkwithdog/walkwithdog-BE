@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 
 from app.dependencies import require_shelter_access
 from app.models import Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest
+from app.volunteer_stats import refresh_volunteer_profile
 from app.walk_request_service import (
     as_utc, locked_profile, locked_request, lock_row, validate_eligibility, validate_walk_start,
 )
@@ -179,6 +180,9 @@ def end_walk(db, walk_id, actor, payload):
         walk.average_pace = None  # Unrepresentable pace is unknown, never truncated.
     walk.status, walk.ended_at = payload.status, now
     db.flush()
+    if walk.status == "COMPLETED":
+        # Issue #6: same transaction, so a failed refresh also rolls the walk end back.
+        refresh_volunteer_profile(db, request.user_id)
     return walk
 
 
