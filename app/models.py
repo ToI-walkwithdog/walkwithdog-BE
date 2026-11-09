@@ -24,6 +24,11 @@ class User(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    walk_requests = relationship("WalkRequest", foreign_keys="WalkRequest.user_id", back_populates="user", passive_deletes="all")
+    reviewed_walk_requests = relationship("WalkRequest", foreign_keys="WalkRequest.reviewed_by", back_populates="reviewer", passive_deletes="all")
+    volunteer_profile = relationship("VolunteerProfile", back_populates="user", uselist=False, passive_deletes="all")
+    walk_incidents = relationship("WalkIncident", back_populates="reporter", passive_deletes="all")
+
 class SessionToken(Base):
     # Legacy schema retained for compatibility; new login tokens use AuthSession.
     __tablename__ = "session_tokens"
@@ -56,6 +61,7 @@ class Shelter(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     dogs = relationship("Dog", back_populates="shelter")
+    walk_requests = relationship("WalkRequest", back_populates="shelter", passive_deletes="all")
 
 class Dog(Base):
     __tablename__ = "dogs"
@@ -97,7 +103,23 @@ class Dog(Base):
 
     matching_results = relationship("MatchingResult", back_populates="dog")
     shelter = relationship("Shelter", back_populates="dogs")
+    walk_setting = relationship("DogWalkSetting", back_populates="dog", uselist=False, passive_deletes="all")
+    walk_requests = relationship("WalkRequest", back_populates="dog", passive_deletes="all")
+    trait_summary = relationship("DogTraitSummary", back_populates="dog", uselist=False, passive_deletes="all")
+
+class DogWalkDateSlot(Base):
+    __tablename__ = "dog_walk_date_slots"
     
+    id = Column(Integer, primary_key=True, index=True)
+    dog_id = Column(Integer, ForeignKey("dogs.id", ondelete="CASCADE"), nullable=False)
+    slot_date = Column(Date, nullable=False)
+    start_time = Column(Time, nullable=False)
+    end_time = Column(Time, nullable=False)
+    duration_minutes = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    dog = relationship("Dog", backref="date_slots")
+
 class Survey(Base):
     __tablename__ = "surveys"
 
@@ -176,3 +198,10 @@ class BreedTrait(Base):
     separation_anxiety = Column(String(20), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# Register walk tables whenever the existing models entrypoint is imported.
+from app.walk_models import (  # noqa: E402,F401
+    DogWalkSetting, DogWalkSlot, WalkRequest, Walk, WalkPoint, WalkMarker,
+    WalkReview, DogTraitSummary, VolunteerProfile, WalkIncident,
+)

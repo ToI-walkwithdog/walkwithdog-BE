@@ -1,0 +1,288 @@
+{
+  "dog_trait_summaries": {
+    "relation": {"relkind": "r", "relpersistence": "p", "relrowsecurity": false, "relforcerowsecurity": false},
+    "columns": [
+      {"name": "dog_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "activity_level", "type": "numeric(4,2)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "walk_need", "type": "numeric(4,2)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "exploration_level", "type": "numeric(4,2)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "sociability_level", "type": "numeric(4,2)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "barking_level", "type": "numeric(4,2)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "handling_difficulty", "type": "numeric(4,2)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "walk_count", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "0", "sequence": null},
+      {"name": "review_count", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "0", "sequence": null},
+      {"name": "calculation_version", "type": "character varying(50)", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "evidence", "type": "json", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "updated_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null}
+    ],
+    "constraints": {
+      "ck_activity_level": {"definition": "CHECK (((activity_level >= (1)::numeric) AND (activity_level <= (5)::numeric)))", "validated": true},
+      "ck_barking_level": {"definition": "CHECK (((barking_level >= (1)::numeric) AND (barking_level <= (5)::numeric)))", "validated": true},
+      "ck_calculation_version": {"definition": "CHECK ((length((calculation_version)::text) > 0))", "validated": true},
+      "ck_exploration_level": {"definition": "CHECK (((exploration_level >= (1)::numeric) AND (exploration_level <= (5)::numeric)))", "validated": true},
+      "ck_handling_difficulty": {"definition": "CHECK (((handling_difficulty >= (1)::numeric) AND (handling_difficulty <= (5)::numeric)))", "validated": true},
+      "ck_sociability_level": {"definition": "CHECK (((sociability_level >= (1)::numeric) AND (sociability_level <= (5)::numeric)))", "validated": true},
+      "ck_trait_counts": {"definition": "CHECK (((walk_count >= 0) AND (review_count >= 0) AND (review_count <= walk_count)))", "validated": true},
+      "ck_trait_evidence": {"definition": "CHECK ((((activity_level IS NULL) AND (walk_need IS NULL) AND (exploration_level IS NULL) AND (sociability_level IS NULL) AND (barking_level IS NULL) AND (handling_difficulty IS NULL)) OR (evidence IS NOT NULL)))", "validated": true},
+      "ck_trait_observed": {"definition": "CHECK (((walk_count > 0) OR ((activity_level IS NULL) AND (walk_need IS NULL) AND (exploration_level IS NULL) AND (sociability_level IS NULL) AND (barking_level IS NULL) AND (handling_difficulty IS NULL))))", "validated": true},
+      "ck_walk_need": {"definition": "CHECK (((walk_need >= (1)::numeric) AND (walk_need <= (5)::numeric)))", "validated": true},
+      "dog_trait_summaries_dog_id_fkey": {"definition": "FOREIGN KEY (dog_id) REFERENCES dogs(id)", "validated": true},
+      "dog_trait_summaries_pkey": {"definition": "PRIMARY KEY (dog_id)", "validated": true}
+    },
+    "indexes": {
+      "dog_trait_summaries_pkey": {"definition": "CREATE UNIQUE INDEX dog_trait_summaries_pkey ON public.dog_trait_summaries USING btree (dog_id)", "valid": true, "ready": true, "live": true}
+    }
+  },
+  "dog_walk_settings": {
+    "relation": {"relkind": "r", "relpersistence": "p", "relrowsecurity": false, "relforcerowsecurity": false},
+    "columns": [
+      {"name": "id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "nextval('dog_walk_settings_id_seq'::regclass)", "sequence": "public.dog_walk_settings_id_seq"},
+      {"name": "dog_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "walkable", "type": "boolean", "not_null": true, "identity": "", "generated": "", "default": "false", "sequence": null},
+      {"name": "difficulty", "type": "character varying(20)", "not_null": true, "identity": "", "generated": "", "default": "'BEGINNER'::character varying", "sequence": null},
+      {"name": "precautions", "type": "text", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "recommended_duration_minutes", "type": "integer", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "created_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null},
+      {"name": "updated_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null}
+    ],
+    "constraints": {
+      "ck_difficulty": {"definition": "CHECK (((difficulty)::text = ANY ((ARRAY['BEGINNER'::character varying, 'EXPERIENCED'::character varying])::text[])))", "validated": true},
+      "ck_recommended_duration": {"definition": "CHECK ((recommended_duration_minutes > 0))", "validated": true},
+      "dog_walk_settings_dog_id_fkey": {"definition": "FOREIGN KEY (dog_id) REFERENCES dogs(id)", "validated": true},
+      "dog_walk_settings_pkey": {"definition": "PRIMARY KEY (id)", "validated": true},
+      "uq_dog_walk_settings_dog": {"definition": "UNIQUE (dog_id)", "validated": true}
+    },
+    "indexes": {
+      "dog_walk_settings_pkey": {"definition": "CREATE UNIQUE INDEX dog_walk_settings_pkey ON public.dog_walk_settings USING btree (id)", "valid": true, "ready": true, "live": true},
+      "uq_dog_walk_settings_dog": {"definition": "CREATE UNIQUE INDEX uq_dog_walk_settings_dog ON public.dog_walk_settings USING btree (dog_id)", "valid": true, "ready": true, "live": true}
+    }
+  },
+  "dog_walk_slots": {
+    "relation": {"relkind": "r", "relpersistence": "p", "relrowsecurity": false, "relforcerowsecurity": false},
+    "columns": [
+      {"name": "id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "nextval('dog_walk_slots_id_seq'::regclass)", "sequence": "public.dog_walk_slots_id_seq"},
+      {"name": "walk_setting_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "day_of_week", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "start_time", "type": "time without time zone", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "end_time", "type": "time without time zone", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null}
+    ],
+    "constraints": {
+      "ck_day_of_week": {"definition": "CHECK (((day_of_week >= 0) AND (day_of_week <= 6)))", "validated": true},
+      "ck_slot_time_order": {"definition": "CHECK ((start_time < end_time))", "validated": true},
+      "dog_walk_slots_pkey": {"definition": "PRIMARY KEY (id)", "validated": true},
+      "dog_walk_slots_walk_setting_id_fkey": {"definition": "FOREIGN KEY (walk_setting_id) REFERENCES dog_walk_settings(id)", "validated": true},
+      "uq_walk_slot": {"definition": "UNIQUE (walk_setting_id, day_of_week, start_time, end_time)", "validated": true}
+    },
+    "indexes": {
+      "dog_walk_slots_pkey": {"definition": "CREATE UNIQUE INDEX dog_walk_slots_pkey ON public.dog_walk_slots USING btree (id)", "valid": true, "ready": true, "live": true},
+      "uq_walk_slot": {"definition": "CREATE UNIQUE INDEX uq_walk_slot ON public.dog_walk_slots USING btree (walk_setting_id, day_of_week, start_time, end_time)", "valid": true, "ready": true, "live": true}
+    }
+  },
+  "volunteer_profiles": {
+    "relation": {"relkind": "r", "relpersistence": "p", "relrowsecurity": false, "relforcerowsecurity": false},
+    "columns": [
+      {"name": "user_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "level", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "1", "sequence": null},
+      {"name": "total_walk_count", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "0", "sequence": null},
+      {"name": "total_distance_m", "type": "numeric(14,2)", "not_null": true, "identity": "", "generated": "", "default": "'0'::numeric", "sequence": null},
+      {"name": "total_duration_seconds", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "0", "sequence": null},
+      {"name": "unique_dog_count", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "0", "sequence": null},
+      {"name": "updated_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null}
+    ],
+    "constraints": {
+      "ck_volunteer_level": {"definition": "CHECK ((level >= 1))", "validated": true},
+      "ck_volunteer_totals": {"definition": "CHECK (((total_walk_count >= 0) AND (total_distance_m >= (0)::numeric) AND (total_duration_seconds >= 0) AND (unique_dog_count >= 0) AND (unique_dog_count <= total_walk_count)))", "validated": true},
+      "volunteer_profiles_pkey": {"definition": "PRIMARY KEY (user_id)", "validated": true},
+      "volunteer_profiles_user_id_fkey": {"definition": "FOREIGN KEY (user_id) REFERENCES users(id)", "validated": true}
+    },
+    "indexes": {
+      "volunteer_profiles_pkey": {"definition": "CREATE UNIQUE INDEX volunteer_profiles_pkey ON public.volunteer_profiles USING btree (user_id)", "valid": true, "ready": true, "live": true}
+    }
+  },
+  "walk_incidents": {
+    "relation": {"relkind": "r", "relpersistence": "p", "relrowsecurity": false, "relforcerowsecurity": false},
+    "columns": [
+      {"name": "id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "nextval('walk_incidents_id_seq'::regclass)", "sequence": "public.walk_incidents_id_seq"},
+      {"name": "walk_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "reported_by", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "incident_type", "type": "character varying(30)", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "description", "type": "text", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "latitude", "type": "numeric(9,6)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "longitude", "type": "numeric(9,6)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "occurred_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "status", "type": "character varying(20)", "not_null": true, "identity": "", "generated": "", "default": "'OPEN'::character varying", "sequence": null},
+      {"name": "created_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null},
+      {"name": "updated_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null}
+    ],
+    "constraints": {
+      "ck_incident_coordinate_pair": {"definition": "CHECK (((latitude IS NULL) = (longitude IS NULL)))", "validated": true},
+      "ck_incident_description": {"definition": "CHECK ((length(description) > 0))", "validated": true},
+      "ck_incident_type": {"definition": "CHECK (((incident_type)::text = ANY ((ARRAY['INJURY'::character varying, 'LOST_DOG'::character varying, 'SAFETY_THREAT'::character varying, 'OTHER'::character varying])::text[])))", "validated": true},
+      "ck_latitude": {"definition": "CHECK (((latitude >= ('-90'::integer)::numeric) AND (latitude <= (90)::numeric)))", "validated": true},
+      "ck_longitude": {"definition": "CHECK (((longitude >= ('-180'::integer)::numeric) AND (longitude <= (180)::numeric)))", "validated": true},
+      "ck_status": {"definition": "CHECK (((status)::text = ANY ((ARRAY['OPEN'::character varying, 'IN_REVIEW'::character varying, 'RESOLVED'::character varying, 'DISMISSED'::character varying])::text[])))", "validated": true},
+      "walk_incidents_pkey": {"definition": "PRIMARY KEY (id)", "validated": true},
+      "walk_incidents_reported_by_fkey": {"definition": "FOREIGN KEY (reported_by) REFERENCES users(id)", "validated": true},
+      "walk_incidents_walk_id_fkey": {"definition": "FOREIGN KEY (walk_id) REFERENCES walks(id)", "validated": true}
+    },
+    "indexes": {
+      "ix_walk_incidents_reporter": {"definition": "CREATE INDEX ix_walk_incidents_reporter ON public.walk_incidents USING btree (reported_by)", "valid": true, "ready": true, "live": true},
+      "ix_walk_incidents_status": {"definition": "CREATE INDEX ix_walk_incidents_status ON public.walk_incidents USING btree (status, created_at)", "valid": true, "ready": true, "live": true},
+      "ix_walk_incidents_time": {"definition": "CREATE INDEX ix_walk_incidents_time ON public.walk_incidents USING btree (walk_id, occurred_at)", "valid": true, "ready": true, "live": true},
+      "walk_incidents_pkey": {"definition": "CREATE UNIQUE INDEX walk_incidents_pkey ON public.walk_incidents USING btree (id)", "valid": true, "ready": true, "live": true}
+    }
+  },
+  "walk_markers": {
+    "relation": {"relkind": "r", "relpersistence": "p", "relrowsecurity": false, "relforcerowsecurity": false},
+    "columns": [
+      {"name": "id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "nextval('walk_markers_id_seq'::regclass)", "sequence": "public.walk_markers_id_seq"},
+      {"name": "walk_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "marker_type", "type": "character varying(30)", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "latitude", "type": "numeric(9,6)", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "longitude", "type": "numeric(9,6)", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "recorded_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "memo", "type": "text", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null}
+    ],
+    "constraints": {
+      "ck_latitude": {"definition": "CHECK (((latitude >= ('-90'::integer)::numeric) AND (latitude <= (90)::numeric)))", "validated": true},
+      "ck_longitude": {"definition": "CHECK (((longitude >= ('-180'::integer)::numeric) AND (longitude <= (180)::numeric)))", "validated": true},
+      "ck_marker_type": {"definition": "CHECK (((marker_type)::text = ANY ((ARRAY['SNIFF'::character varying, 'POOP'::character varying, 'DOG_ENCOUNTER'::character varying, 'PERSON_ENCOUNTER'::character varying, 'BARKING'::character varying])::text[])))", "validated": true},
+      "walk_markers_pkey": {"definition": "PRIMARY KEY (id)", "validated": true},
+      "walk_markers_walk_id_fkey": {"definition": "FOREIGN KEY (walk_id) REFERENCES walks(id)", "validated": true}
+    },
+    "indexes": {
+      "ix_walk_markers_time": {"definition": "CREATE INDEX ix_walk_markers_time ON public.walk_markers USING btree (walk_id, recorded_at)", "valid": true, "ready": true, "live": true},
+      "walk_markers_pkey": {"definition": "CREATE UNIQUE INDEX walk_markers_pkey ON public.walk_markers USING btree (id)", "valid": true, "ready": true, "live": true}
+    }
+  },
+  "walk_points": {
+    "relation": {"relkind": "r", "relpersistence": "p", "relrowsecurity": false, "relforcerowsecurity": false},
+    "columns": [
+      {"name": "id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "nextval('walk_points_id_seq'::regclass)", "sequence": "public.walk_points_id_seq"},
+      {"name": "walk_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "latitude", "type": "numeric(9,6)", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "longitude", "type": "numeric(9,6)", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "recorded_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "accuracy_m", "type": "numeric(10,2)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "sequence_no", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null}
+    ],
+    "constraints": {
+      "ck_latitude": {"definition": "CHECK (((latitude >= ('-90'::integer)::numeric) AND (latitude <= (90)::numeric)))", "validated": true},
+      "ck_longitude": {"definition": "CHECK (((longitude >= ('-180'::integer)::numeric) AND (longitude <= (180)::numeric)))", "validated": true},
+      "ck_point_accuracy": {"definition": "CHECK ((accuracy_m >= (0)::numeric))", "validated": true},
+      "ck_point_sequence": {"definition": "CHECK ((sequence_no >= 0))", "validated": true},
+      "uq_walk_points_sequence": {"definition": "UNIQUE (walk_id, sequence_no)", "validated": true},
+      "walk_points_pkey": {"definition": "PRIMARY KEY (id)", "validated": true},
+      "walk_points_walk_id_fkey": {"definition": "FOREIGN KEY (walk_id) REFERENCES walks(id)", "validated": true}
+    },
+    "indexes": {
+      "ix_walk_points_time": {"definition": "CREATE INDEX ix_walk_points_time ON public.walk_points USING btree (walk_id, recorded_at, sequence_no)", "valid": true, "ready": true, "live": true},
+      "uq_walk_points_sequence": {"definition": "CREATE UNIQUE INDEX uq_walk_points_sequence ON public.walk_points USING btree (walk_id, sequence_no)", "valid": true, "ready": true, "live": true},
+      "walk_points_pkey": {"definition": "CREATE UNIQUE INDEX walk_points_pkey ON public.walk_points USING btree (id)", "valid": true, "ready": true, "live": true}
+    }
+  },
+  "walk_requests": {
+    "relation": {"relkind": "r", "relpersistence": "p", "relrowsecurity": false, "relforcerowsecurity": false},
+    "columns": [
+      {"name": "id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "nextval('walk_requests_id_seq'::regclass)", "sequence": "public.walk_requests_id_seq"},
+      {"name": "user_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "dog_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "shelter_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "requested_start_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "requested_end_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "status", "type": "character varying(20)", "not_null": true, "identity": "", "generated": "", "default": "'PENDING'::character varying", "sequence": null},
+      {"name": "reviewed_by", "type": "integer", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "reviewed_at", "type": "timestamp with time zone", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "rejection_reason", "type": "text", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "created_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null},
+      {"name": "updated_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null}
+    ],
+    "constraints": {
+      "ck_pending_unreviewed": {"definition": "CHECK ((((status)::text <> 'PENDING'::text) OR (reviewed_by IS NULL)))", "validated": true},
+      "ck_rejection_reason": {"definition": "CHECK ((((status)::text <> 'REJECTED'::text) OR (rejection_reason IS NOT NULL)))", "validated": true},
+      "ck_rejection_status": {"definition": "CHECK ((((status)::text = ANY ((ARRAY['REJECTED'::character varying, 'CANCELLED'::character varying])::text[])) OR (rejection_reason IS NULL)))", "validated": true},
+      "ck_request_time_order": {"definition": "CHECK ((requested_start_at < requested_end_at))", "validated": true},
+      "ck_review_pair": {"definition": "CHECK (((reviewed_by IS NULL) = (reviewed_at IS NULL)))", "validated": true},
+      "ck_review_required": {"definition": "CHECK ((((status)::text <> ALL ((ARRAY['APPROVED'::character varying, 'REJECTED'::character varying])::text[])) OR (reviewed_by IS NOT NULL)))", "validated": true},
+      "ck_status": {"definition": "CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying])::text[])))", "validated": true},
+      "ex_walk_requests_dog_booking": {"definition": "EXCLUDE USING gist (int8range((dog_id)::bigint, (dog_id)::bigint, '[]'::text) WITH &&, tstzrange(requested_start_at, requested_end_at, '[)'::text) WITH &&) WHERE (((status)::text = 'APPROVED'::text))", "validated": true},
+      "ex_walk_requests_user_booking": {"definition": "EXCLUDE USING gist (int8range((user_id)::bigint, (user_id)::bigint, '[]'::text) WITH &&, tstzrange(requested_start_at, requested_end_at, '[)'::text) WITH &&) WHERE (((status)::text = 'APPROVED'::text))", "validated": true},
+      "walk_requests_dog_id_fkey": {"definition": "FOREIGN KEY (dog_id) REFERENCES dogs(id)", "validated": true},
+      "walk_requests_pkey": {"definition": "PRIMARY KEY (id)", "validated": true},
+      "walk_requests_reviewed_by_fkey": {"definition": "FOREIGN KEY (reviewed_by) REFERENCES users(id)", "validated": true},
+      "walk_requests_shelter_id_fkey": {"definition": "FOREIGN KEY (shelter_id) REFERENCES shelters(id)", "validated": true},
+      "walk_requests_user_id_fkey": {"definition": "FOREIGN KEY (user_id) REFERENCES users(id)", "validated": true}
+    },
+    "indexes": {
+      "ex_walk_requests_dog_booking": {"definition": "CREATE INDEX ex_walk_requests_dog_booking ON public.walk_requests USING gist (int8range((dog_id)::bigint, (dog_id)::bigint, '[]'::text), tstzrange(requested_start_at, requested_end_at, '[)'::text)) WHERE ((status)::text = 'APPROVED'::text)", "valid": true, "ready": true, "live": true},
+      "ex_walk_requests_user_booking": {"definition": "CREATE INDEX ex_walk_requests_user_booking ON public.walk_requests USING gist (int8range((user_id)::bigint, (user_id)::bigint, '[]'::text), tstzrange(requested_start_at, requested_end_at, '[)'::text)) WHERE ((status)::text = 'APPROVED'::text)", "valid": true, "ready": true, "live": true},
+      "ix_walk_requests_dog_start": {"definition": "CREATE INDEX ix_walk_requests_dog_start ON public.walk_requests USING btree (dog_id, requested_start_at)", "valid": true, "ready": true, "live": true},
+      "ix_walk_requests_reviewer": {"definition": "CREATE INDEX ix_walk_requests_reviewer ON public.walk_requests USING btree (reviewed_by)", "valid": true, "ready": true, "live": true},
+      "ix_walk_requests_shelter_status": {"definition": "CREATE INDEX ix_walk_requests_shelter_status ON public.walk_requests USING btree (shelter_id, status, requested_start_at)", "valid": true, "ready": true, "live": true},
+      "ix_walk_requests_user_start": {"definition": "CREATE INDEX ix_walk_requests_user_start ON public.walk_requests USING btree (user_id, requested_start_at)", "valid": true, "ready": true, "live": true},
+      "uq_walk_requests_active": {"definition": "CREATE UNIQUE INDEX uq_walk_requests_active ON public.walk_requests USING btree (user_id, dog_id, requested_start_at, requested_end_at) WHERE ((status)::text = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying])::text[]))", "valid": true, "ready": true, "live": true},
+      "walk_requests_pkey": {"definition": "CREATE UNIQUE INDEX walk_requests_pkey ON public.walk_requests USING btree (id)", "valid": true, "ready": true, "live": true}
+    }
+  },
+  "walk_reviews": {
+    "relation": {"relkind": "r", "relpersistence": "p", "relrowsecurity": false, "relforcerowsecurity": false},
+    "columns": [
+      {"name": "id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "nextval('walk_reviews_id_seq'::regclass)", "sequence": "public.walk_reviews_id_seq"},
+      {"name": "walk_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "leash_pulling", "type": "integer", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "handling_difficulty", "type": "integer", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "sociability_with_people", "type": "integer", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "sociability_with_dogs", "type": "integer", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "barking_level", "type": "integer", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "memo", "type": "text", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "created_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null},
+      {"name": "updated_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null}
+    ],
+    "constraints": {
+      "ck_barking_level": {"definition": "CHECK (((barking_level >= 1) AND (barking_level <= 5)))", "validated": true},
+      "ck_handling_difficulty": {"definition": "CHECK (((handling_difficulty >= 1) AND (handling_difficulty <= 5)))", "validated": true},
+      "ck_leash_pulling": {"definition": "CHECK (((leash_pulling >= 1) AND (leash_pulling <= 5)))", "validated": true},
+      "ck_review_observation": {"definition": "CHECK (((leash_pulling IS NOT NULL) OR (handling_difficulty IS NOT NULL) OR (sociability_with_people IS NOT NULL) OR (sociability_with_dogs IS NOT NULL) OR (barking_level IS NOT NULL)))", "validated": true},
+      "ck_sociability_with_dogs": {"definition": "CHECK (((sociability_with_dogs >= 1) AND (sociability_with_dogs <= 5)))", "validated": true},
+      "ck_sociability_with_people": {"definition": "CHECK (((sociability_with_people >= 1) AND (sociability_with_people <= 5)))", "validated": true},
+      "uq_walk_reviews_walk": {"definition": "UNIQUE (walk_id)", "validated": true},
+      "walk_reviews_pkey": {"definition": "PRIMARY KEY (id)", "validated": true},
+      "walk_reviews_walk_id_fkey": {"definition": "FOREIGN KEY (walk_id) REFERENCES walks(id)", "validated": true}
+    },
+    "indexes": {
+      "uq_walk_reviews_walk": {"definition": "CREATE UNIQUE INDEX uq_walk_reviews_walk ON public.walk_reviews USING btree (walk_id)", "valid": true, "ready": true, "live": true},
+      "walk_reviews_pkey": {"definition": "CREATE UNIQUE INDEX walk_reviews_pkey ON public.walk_reviews USING btree (id)", "valid": true, "ready": true, "live": true}
+    }
+  },
+  "walks": {
+    "relation": {"relkind": "r", "relpersistence": "p", "relrowsecurity": false, "relforcerowsecurity": false},
+    "columns": [
+      {"name": "id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": "nextval('walks_id_seq'::regclass)", "sequence": "public.walks_id_seq"},
+      {"name": "walk_request_id", "type": "integer", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "status", "type": "character varying(20)", "not_null": true, "identity": "", "generated": "", "default": "'IN_PROGRESS'::character varying", "sequence": null},
+      {"name": "started_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "ended_at", "type": "timestamp with time zone", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "total_distance_m", "type": "numeric(12,2)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "duration_seconds", "type": "integer", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "average_pace", "type": "numeric(12,2)", "not_null": false, "identity": "", "generated": "", "default": null, "sequence": null},
+      {"name": "created_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null},
+      {"name": "updated_at", "type": "timestamp with time zone", "not_null": true, "identity": "", "generated": "", "default": "now()", "sequence": null}
+    ],
+    "constraints": {
+      "ck_status": {"definition": "CHECK (((status)::text = ANY ((ARRAY['IN_PROGRESS'::character varying, 'COMPLETED'::character varying, 'CANCELLED'::character varying, 'INTERRUPTED'::character varying])::text[])))", "validated": true},
+      "ck_walk_distance": {"definition": "CHECK ((total_distance_m >= (0)::numeric))", "validated": true},
+      "ck_walk_duration": {"definition": "CHECK ((duration_seconds >= 0))", "validated": true},
+      "ck_walk_end_status": {"definition": "CHECK (((((status)::text = 'IN_PROGRESS'::text) AND (ended_at IS NULL)) OR (((status)::text <> 'IN_PROGRESS'::text) AND (ended_at IS NOT NULL))))", "validated": true},
+      "ck_walk_pace": {"definition": "CHECK (((average_pace IS NULL) OR ((average_pace > (0)::numeric) AND (total_distance_m IS NOT NULL) AND (total_distance_m > (0)::numeric) AND (duration_seconds IS NOT NULL) AND (duration_seconds > 0))))", "validated": true},
+      "ck_walk_time_order": {"definition": "CHECK (((ended_at IS NULL) OR (ended_at >= started_at)))", "validated": true},
+      "uq_walks_request": {"definition": "UNIQUE (walk_request_id)", "validated": true},
+      "walks_pkey": {"definition": "PRIMARY KEY (id)", "validated": true},
+      "walks_walk_request_id_fkey": {"definition": "FOREIGN KEY (walk_request_id) REFERENCES walk_requests(id)", "validated": true}
+    },
+    "indexes": {
+      "ix_walks_status_started": {"definition": "CREATE INDEX ix_walks_status_started ON public.walks USING btree (status, started_at)", "valid": true, "ready": true, "live": true},
+      "uq_walks_request": {"definition": "CREATE UNIQUE INDEX uq_walks_request ON public.walks USING btree (walk_request_id)", "valid": true, "ready": true, "live": true},
+      "walks_pkey": {"definition": "CREATE UNIQUE INDEX walks_pkey ON public.walks USING btree (id)", "valid": true, "ready": true, "live": true}
+    }
+  }
+}
