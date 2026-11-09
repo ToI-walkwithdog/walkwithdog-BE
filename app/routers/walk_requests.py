@@ -11,6 +11,7 @@ from app.walk_request_schemas import (
     RequestStatus, VolunteerProfileResponse, WalkRequestAction, WalkRequestCreate, WalkRequestResponse,
 )
 from app.walk_request_service import create_request, request_list_query, transition_request
+from app.walk_request_service import get_available_dogs_by_region
 
 router = APIRouter(tags=["walk-requests"])
 require_volunteer = require_role(UserRole.USER)
@@ -83,3 +84,12 @@ def shelter_requests(shelter_id: int, status: RequestStatus | None = None,
 def my_volunteer_profile(actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
     profile = db.get(VolunteerProfile, actor.id)
     return profile if profile is not None else VolunteerProfileResponse(user_id=actor.id)
+
+
+@router.get("/walk-requests/available-dogs", tags=["walk-requests"])
+def available_dogs(
+    region: str = Query(..., description="검색할 지역명 (예: 고양시)"),
+    db: Session = Depends(get_db)
+):
+    # 반환 모델(response_model)은 기존 강아지 리스트 응답 스키마에 맞게 추후 지정하시면 됩니다.
+    return get_available_dogs_by_region(db, region)

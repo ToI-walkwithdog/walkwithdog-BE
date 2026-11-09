@@ -97,6 +97,8 @@ class WalkRequest(Timestamps, Base):
             (text("tstzrange(requested_start_at, requested_end_at, '[)')"), "&&"),
             where=text("status = 'APPROVED'"), name="ex_walk_requests_user_booking",
         ).ddl_if(dialect="postgresql"),
+        date_slot_id = Column(Integer, ForeignKey("dog_walk_date_slots.id", ondelete="CASCADE"), nullable=True)
+        date_slot = relationship("DogWalkDateSlot", backref="walk_requests")
     )
 
     id = Column(Integer, primary_key=True)
