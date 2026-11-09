@@ -106,7 +106,20 @@ class Dog(Base):
     walk_setting = relationship("DogWalkSetting", back_populates="dog", uselist=False, passive_deletes="all")
     walk_requests = relationship("WalkRequest", back_populates="dog", passive_deletes="all")
     trait_summary = relationship("DogTraitSummary", back_populates="dog", uselist=False, passive_deletes="all")
+
+class DogWalkDateSlot(Base):
+    __tablename__ = "dog_walk_date_slots"
     
+    id = Column(Integer, primary_key=True, index=True)
+    dog_id = Column(Integer, ForeignKey("dogs.id", ondelete="CASCADE"), nullable=False)
+    slot_date = Column(Date, nullable=False)
+    start_time = Column(Time, nullable=False)
+    end_time = Column(Time, nullable=False)
+    duration_minutes = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    dog = relationship("Dog", backref="date_slots")
+
 class Survey(Base):
     __tablename__ = "surveys"
 

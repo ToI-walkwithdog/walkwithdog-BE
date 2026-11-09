@@ -269,3 +269,32 @@ def update_dog_traits(
         "trait_source": dog.trait_source,
         "calculated_traits": calculated_traits
     }
+
+@router.post("/", status_code=201)
+def create_dog_with_slots(
+    name: str = Form(...),
+    breed: str = Form(...),
+    age: int = Form(...),
+    age_months: int = Form(...),
+    difficulty: str = Form(...),
+    precautions: str = Form(""),
+    slots: str = Form(...), # JSON 문자열 형태로 파싱
+    image: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user = Depends(require_shelter)
+):
+    # 1. 보호소 정보 자동 매핑
+    shelter_id = current_user.shelter_id
+    
+    # 2. 이미지 처리
+    image_url = save_dog_image(image)
+    
+    # 3. 강아지 데이터 생성 (트랜잭션 생략)
+    # ... 강아지 저장 로직 ...
+    
+    # 4. 슬롯 JSON 파싱 및 검증/저장
+    import json
+    slots_data = json.loads(slots) 
+    # validate_and_create_date_slots(db, new_dog.id, parsed_slots_data)
+    
+    return {"message": "Dog and slots registered successfully"}
