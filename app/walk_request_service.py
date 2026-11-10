@@ -11,7 +11,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
 
 from app.dependencies import require_shelter_access
-from app.models import Dog, DogWalkSetting, User, UserRole, VolunteerProfile, Walk, WalkRequest
+from app.models import Dog, DogWalkSetting, Survey, User, UserRole, VolunteerProfile, Walk, WalkRequest
 
 SEOUL = ZoneInfo("Asia/Seoul")
 ACTIVE = ("PENDING", "APPROVED")
@@ -166,12 +166,72 @@ def transition_request(db, request_id, actor, payload):
                                      request.requested_end_at, exclude_id=request.id)
             request.status = "APPROVED"
             request.rejection_reason = None
+            request.rejection_reason_code = None
         else:
             request.status = "REJECTED"
             request.rejection_reason = payload.rejection_reason
+            request.rejection_reason_code = (
+                payload.rejection_reason_code.value
+                if payload.rejection_reason_code
+                else None
+            )
         request.reviewed_by, request.reviewed_at = actor.id, utc_now()
     db.flush()
     return request
+
+
+def get_request_detail(db, request_id, actor):
+    request = (
+        db.query(WalkRequest)
+        .options(joinedload(WalkRequest.dog))
+        .filter(WalkRequest.id == request_id)
+        .first()
+    )
+    if request is None:
+        raise HTTPException(404, "Walk request not found")
+
+    if actor.role == UserRole.USER:
+        if request.user_id != actor.id:
+            raise HTTPException(403, "본인의 신청만 조회할 수 있습니다.")
+    else:
+        require_shelter_access(actor, request.shelter_id)
+
+    applicant_user = db.get(User, request.user_id)
+    latest_survey = (
+        db.query(Survey)
+        .filter_by(user_id=request.user_id)
+        .order_by(Survey.created_at.desc(), Survey.id.desc())
+        .first()
+    )
+    setting = db.query(DogWalkSetting).filter_by(dog_id=request.dog_id).first()
+    dog_difficulty = setting.difficulty if setting and setting.difficulty else "BEGINNER"
+
+    return {
+        "id": request.id,
+        "user_id": request.user_id,
+        "dog_id": request.dog_id,
+        "shelter_id": request.shelter_id,
+        "dog": request.dog,
+        "requested_start_at": request.requested_start_at,
+        "requested_end_at": request.requested_end_at,
+        "status": request.status,
+        "reviewed_by": request.reviewed_by,
+        "reviewed_at": request.reviewed_at,
+        "rejection_reason": request.rejection_reason,
+        "rejection_reason_code": request.rejection_reason_code,
+        "created_at": request.created_at,
+        "updated_at": request.updated_at,
+        "applicant": {
+            "id": applicant_user.id if applicant_user else request.user_id,
+            "nickname": applicant_user.nickname if applicant_user else "",
+            "name": None,
+            "age": None,
+            "dog_experience": latest_survey.dog_experience if latest_survey else None,
+            "experienced_breed": None,
+            "walk_frequency": latest_survey.walk_frequency if latest_survey else None,
+        },
+        "dog_difficulty": dog_difficulty,
+    }
 
 
 def validate_walk_start(db, request_id, actor):

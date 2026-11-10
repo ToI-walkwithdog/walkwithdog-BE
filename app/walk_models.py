@@ -37,7 +37,7 @@ class DogWalkSetting(Timestamps, Base):
     __tablename__ = "dog_walk_settings"
     __table_args__ = (
         UniqueConstraint("dog_id", name="uq_dog_walk_settings_dog"),
-        choices("difficulty", "BEGINNER EXPERIENCED"),
+        choices("difficulty", "BEGINNER INTERMEDIATE EXPERIENCED"),
         CheckConstraint("recommended_duration_minutes > 0", name="ck_recommended_duration"),
     )
 
@@ -110,6 +110,7 @@ class WalkRequest(Timestamps, Base):
     reviewed_by = Column(Integer, reference("users"), nullable=True)
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
     rejection_reason = Column(Text, nullable=True)
+    rejection_reason_code = Column(String(30), nullable=True)
 
     user = relationship("User", foreign_keys=[user_id], back_populates="walk_requests")
     reviewer = relationship("User", foreign_keys=[reviewed_by], back_populates="reviewed_walk_requests")
