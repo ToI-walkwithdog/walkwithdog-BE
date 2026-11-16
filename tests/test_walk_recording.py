@@ -127,9 +127,10 @@ class WalkRecordingTests(MotionRecordingAssertions, WalkFixture, unittest.TestCa
                              ("longitude", "Infinity"), ("latitude", True), ("accuracy_m", -1),
                              ("accuracy_m", "NaN"), ("accuracy_m", True)):
             self.assertEqual(self.upload(walk["id"], [{**self.point(), field: value}]).status_code, 422)
-        self.assertEqual(self.upload(walk["id"], [self.point(), self.point(1, 10, accuracy_m=51)]).status_code, 409)
-        self.assertEqual(self.rows(WalkPoint), [])
-        self.assertEqual(self.upload(walk["id"], [self.point(accuracy_m=None), self.point(1, 10, accuracy_m=50)]).status_code, 200)
+        self.assertEqual(self.upload(walk["id"], [self.point(), self.point(1, 10, accuracy_m=51)]).status_code, 200)
+        self.assertEqual(len(self.rows(WalkPoint)), 2)
+        self.assertEqual(self.upload(walk["id"], [self.point(2, 20, accuracy_m=None), self.point(3, 30, accuracy_m=50)]).status_code, 200)
+        self.assertEqual(len(self.rows(WalkPoint)), 4)
 
     def test_teleport_rejected_and_corrected_retry_accepted(self):
         walk = self.begin()

@@ -35,7 +35,7 @@ def get_auto_end_after_seconds():
 
 def is_walk_expired(walk, now):
     last_active = as_utc(walk.last_point_received_at or walk.started_at)
-    return (now - last_active).total_seconds() >= get_auto_end_after_seconds()
+    return (now - last_active).total_seconds() > get_auto_end_after_seconds()
 
 
 def start_walk(db, actor, payload):
@@ -222,7 +222,7 @@ def close_stale_walks(db, now=None, user_id=None):
         if walk is None or walk.status != "IN_PROGRESS":
             continue
         last_active = as_utc(walk.last_point_received_at or walk.started_at)
-        if (now - last_active).total_seconds() >= timeout_seconds:
+        if (now - last_active).total_seconds() > timeout_seconds:
             request = lock_row(db, WalkRequest, walk.walk_request_id)
             end_time = last_active
             finalize_walk_statistics(db, walk, end_time, "COMPLETED", "AUTO_TIMEOUT", request.user_id)
