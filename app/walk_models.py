@@ -131,6 +131,11 @@ class Walk(Timestamps, Base):
         CheckConstraint("average_pace IS NULL OR (average_pace > 0 AND total_distance_m IS NOT NULL AND total_distance_m > 0 AND duration_seconds IS NOT NULL AND duration_seconds > 0)", name="ck_walk_pace"),
         CheckConstraint("(moving_duration_seconds IS NULL AND stopped_duration_seconds IS NULL AND unknown_duration_seconds IS NULL AND moving_distance_m IS NULL) OR (moving_duration_seconds IS NOT NULL AND stopped_duration_seconds IS NOT NULL AND unknown_duration_seconds IS NOT NULL AND moving_distance_m IS NOT NULL AND duration_seconds IS NOT NULL AND total_distance_m IS NOT NULL AND ended_at IS NOT NULL AND status <> 'IN_PROGRESS' AND moving_duration_seconds >= 0 AND stopped_duration_seconds >= 0 AND unknown_duration_seconds >= 0 AND moving_distance_m >= 0 AND moving_distance_m <= total_distance_m AND CAST(moving_duration_seconds AS BIGINT) + CAST(stopped_duration_seconds AS BIGINT) + CAST(unknown_duration_seconds AS BIGINT) = duration_seconds)", name="ck_walk_motion_partition"),
         CheckConstraint("moving_duration_seconds IS NULL OR average_pace IS NULL OR (moving_duration_seconds > 0 AND moving_distance_m > 0)", name="ck_walk_motion_pace"),
+        CheckConstraint("(last_latitude IS NULL) = (last_longitude IS NULL)", name="ck_walk_last_coordinate_pair"),
+        CheckConstraint("last_latitude IS NULL OR (last_latitude BETWEEN -90 AND 90)", name="ck_walk_last_latitude"),
+        CheckConstraint("last_longitude IS NULL OR (last_longitude BETWEEN -180 AND 180)", name="ck_walk_last_longitude"),
+        CheckConstraint("last_accuracy_m IS NULL OR last_accuracy_m >= 0", name="ck_walk_last_accuracy"),
+        CheckConstraint("end_reason IS NULL OR end_reason IN ('USER', 'STAFF', 'AUTO_TIMEOUT')", name="ck_walk_end_reason"),
         Index("ix_walks_status_started", "status", "started_at"),
     )
 
@@ -146,6 +151,12 @@ class Walk(Timestamps, Base):
     stopped_duration_seconds = Column(Integer, nullable=True)
     unknown_duration_seconds = Column(Integer, nullable=True)
     moving_distance_m = Column(Numeric(12, 2), nullable=True)
+    last_latitude = Column(Numeric(9, 6), nullable=True)
+    last_longitude = Column(Numeric(9, 6), nullable=True)
+    last_accuracy_m = Column(Numeric(10, 2), nullable=True)
+    last_point_recorded_at = Column(DateTime(timezone=True), nullable=True)
+    last_point_received_at = Column(DateTime(timezone=True), nullable=True)
+    end_reason = Column(String(20), nullable=True)
 
     walk_request = relationship("WalkRequest", back_populates="walk")
     points = relationship("WalkPoint", back_populates="walk", passive_deletes="all", order_by="WalkPoint.sequence_no")

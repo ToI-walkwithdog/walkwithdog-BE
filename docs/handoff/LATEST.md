@@ -1,64 +1,81 @@
-# 인수인계: F-05 산책 승인 (보호소, SC-14)
+# 인수인계: F-06 산책 중 지도·경로 기록 (SC-07)
 
-- 날짜: 2026-11-10 (KST)
-- 브랜치: feature/f-05-walk-approval
-- 작업 요약: 보호소가 신청자의 정보(닉네임, 반려견 경험, 산책 빈도)와 강아지 난이도를 확인하고 산책을 승인 또는 거절하는 API(F-05, SC-14) 구현 완료. 승인/거절 결과는 사용자 마이페이지 예약 내역(F-13)에 반영됨.
+- 날짜: 2026-11-16 (KST)
+- 브랜치: `feature/f-06-walk-tracking`
+- 작업 요약: 산책 중 실시간 경로 좌표 저장, 약신호 좌표 저장 허용, 세션 만료 자동 종료 및 앱 비정상 종료 시 진행 중 산책 복원 API 구현.
 
 ## 1. 변경 파일
-- `migrations/011_f05_walk_approval.sql`: 강아지 난이도 3단계 확장 제약 및 `walk_requests.rejection_reason_code` 컬럼 추가
-- `app/models.py`: `DogWalkDateSlot`에 필요한 `Date, Time` 누락 import 수정
-- `app/walk_models.py`: 난이도 3단계 제약(`ck_difficulty`) 적용, `WalkRequest`에 `rejection_reason_code` 컬럼 추가
-- `app/walk_schemas.py`: `difficulty` Literal에 `INTERMEDIATE` 추가
-- `app/walk_request_schemas.py`: `RejectionReasonCode` enum 정의, `WalkRequestAction` 거절 사유 검증 확장, `WalkRequestDetailResponse` 신설, `cancelled_after_approval` 계산 필드 추가
-- `app/walk_request_service.py`: `transition_request` 거절 사유 코드 매핑 및 하위 호환 처리, `get_request_detail` 신청 상세 조회 구현
-- `app/routers/walk_requests.py`: `GET /walk-requests/{request_id}` 엔드포인트 신설
-- `app/routers/dogs.py`: F-03의 `File, Form, UploadFile, save_dog_image` 누락 import 보완
-- `tests/test_f05_walk_approval.py`: F-05 완료 기준 및 예외 케이스 검증 테스트 (11개 항목)
-- `docs/TODO.md`, `docs/handoff/LATEST.md`: 작업 목록 및 인수인계 문서 갱신
+- `migrations/012_f06_walk_tracking.sql`: `walks` 테이블에 마지막 위치(위도, 경도, 정확도, 기록시각, 수신시각) 및 종료 사유(`end_reason`) 컬럼과 제약조건(`ck_walk_last_coordinate_pair`, `ck_walk_last_latitude`, `ck_walk_last_longitude`, `ck_walk_last_accuracy`, `ck_walk_end_reason`) 추가
+- `app/models.py`: `DogWalkDateSlot`의 `Date, Time` 누락 import 보완
+- `app/routers/dogs.py`: F-03 `File, Form, UploadFile, save_dog_image` 누락 import 보완
+- `app/walk_models.py`: `Walk` 모델에 신규 컬럼 6개 및 제약조건 추가
+- `app/walk_record_schemas.py`: `WalkResponse`에 신규 필드 추가 및 `ActiveWalkResponse` 정의
+- `app/walk_service.py`: 정확도 50m 초과 좌표 409 거부 제거 및 저장 허용, `last_*` 위치/수신시각 갱신 로직 추가, 수동/자동 종료 공통 통계 함수(`finalize_walk_statistics`), `close_stale_walks`, `get_active_walk` 구현, 만료 검사 기준 초과(`>`) 조건 적용
+- `app/routers/walks.py`: `GET /walks/active` 복원 라우트 신설 (기존 `/{walk_id}`보다 상단 배치), 수동 종료 시 `end_reason`(`USER`/`STAFF`) 기록
+- `app/main.py`: FastAPI `lifespan` 기반 백그라운드 주기 만료 점검(`periodic_stale_walks_check`) 루프 등록
+- `.env.example`: `AUTO_END_AFTER_SECONDS=3600`, `AUTO_END_CHECK_INTERVAL_SECONDS=300` 추가
+- `tests/test_walk_recording.py`: 51m 정확도 좌표 409 거부 테스트를 200 저장 성공 검증으로 수정 (line 130)
+- `tests/test_f06_walk_tracking.py`: F-06 완료 기준 10개 항목에 대한 단위/통합 테스트 신설
+- `docs/TODO.md`: F-03, F-04, F-05, F-06 작업 목록 통합 및 완료 체크
+- `docs/handoff/LATEST.md`: F-06 구현 및 검증 결과 인수인계 문서 작성
 
 ## 2. 결정 사항
-- **신청자 정보 조회**: `users.nickname`과 함께 최신 `surveys` 레코드의 `dog_experience`, `walk_frequency`를 반환. (신청자 이름, 나이, 경험 견종은 F-01 구현 후 연동 예정으로 이번 이슈에서는 null 응답)
-- **강아지 난이도**: 3단계(`BEGINNER`, `INTERMEDIATE`, `EXPERIENCED`)로 모델, 스키마, DB 제약조건을 확장.
-- **거절 사유 코드**: 
-  - `SCHEDULE_CONFLICT` ("보호소 일정상 어려움")
-  - `EXPERIENCE_MISMATCH` ("경험 부족")
-  - `INFO_INSUFFICIENT` ("정보 확인 어려움")
-  - `OTHER` ("기타", 직접 입력 필수)
-  - 하위 호환: 사유 코드 없이 사유 텍스트만 전송된 요청은 `OTHER`로 자동 지정.
-- **승인 후 취소 식별**: 별도 DB 컬럼 없이 `status == "CANCELLED"`이고 검토 이력(`reviewed_by IS NOT NULL`)이 존재하는 경우 `cancelled_after_approval=True`로 반환.
-- **슬롯 복귀**: 거절(`REJECTED`) 또는 취소(`CANCELLED`)된 신청은 `PENDING`/`APPROVED` 활성 신청에서 제외되므로 즉시 다른 사용자(또는 동일 사용자)가 재신청 가능.
+- 마이그레이션 번호: `migrations/012_f06_walk_tracking.sql`로 지정 (F-04의 010, F-05의 011과 충돌 방지).
+- `scripts/walk_schema.py` 및 `007_walk_domain.schema.json`은 007 과거 검증용 불변 계약이므로 갱신하지 않음.
+- 정확도 50m 초과 좌표는 저장하되, 이동 거리(`total_distance`) 계산 시 신뢰도 필터(`accuracy_m <= 50m`)로 제외 유지.
+- 묶음 내 신규 좌표가 있는 경우에만 `last_point_received_at`을 서버 현재 시각으로 갱신 (중복 좌표만 있는 묶음은 갱신 제외).
+- 만료 기준: `now - coalesce(last_point_received_at, started_at) > AUTO_END_AFTER_SECONDS` (기본 3600초). 표준 1시간 예약 슬롯 경계와 레이스 컨디션을 방지하기 위해 초과(`>`) 조건 사용.
+- 만료 시각이 지난 산책에 좌표 전송 시 409 Conflict ("산책 세션이 만료되었습니다.") 반환.
+- 만료 자동 종료 시 `status='COMPLETED'`, `ended_at=coalesce(last_point_received_at, started_at)`, `end_reason='AUTO_TIMEOUT'`으로 기록하며 통계 계산 및 봉사 이력(`refresh_volunteer_profile`) 갱신 수행.
+- 수동 종료 시 봉사자 직접 종료는 `USER`, 보호소/관리자 안전 중단은 `STAFF`로 `end_reason` 기록.
+- `GET /walks/active`는 봉사자 본인의 진행 중 산책 정보(`walk_id`, 시작시각, 마지막 위치, `last_sequence_no`, 경과 초)를 반환하며, 없는 경우 404 응답. 조회 시점 및 `start_walk` 시점에도 해당 사용자의 만료 산책 자동 정리 수행.
 
 ## 3. 실행한 테스트 명령과 결과
-- 실행 명령:
-  `$env:PYTHONPATH="."; pytest tests/test_f05_walk_approval.py tests/test_walk_requests.py -v`
-- 결과:
-  **43 passed in 7.20s**
-  - `tests/test_f05_walk_approval.py`: 11 passed
-  - `tests/test_walk_requests.py`: 32 passed
+```powershell
+$env:PYTHONPATH="."
+pytest tests/test_f06_walk_tracking.py tests/test_f05_walk_approval.py tests/test_walk_recording.py tests/test_walk_requests.py -v
+```
+
+### 테스트 결과 요약
+- `tests/test_f06_walk_tracking.py`: 10 passed (100%)
+- `tests/test_f05_walk_approval.py`: 11 passed (100%)
+- `tests/test_walk_recording.py`: 39 passed (100%)
+- `tests/test_walk_requests.py`: 32 passed (100%)
+- **총합: 92 passed in ~12s (전체 성공)**
 
 ## 4. 완료 기준 대조표
 | 완료 기준 | 테스트 항목 | 결과 |
 |---|---|---|
-| 보호소 승인 대기 목록(PENDING) 조회 | `test_shelter_pending_requests_list` | 통과 |
-| 신청 상세에서 신청자 정보 및 강아지 난이도 확인 | `test_walk_request_detail_with_applicant_and_dog_difficulty` | 통과 |
-| 승인 결과 사용자 마이페이지 예약 내역 반영 | `test_approve_request_and_user_mypage_reflection` | 통과 |
-| 거절 사유 코드/기본 문구 처리 및 마이페이지 반영 | `test_reject_request_with_predefined_codes_and_mypage` | 통과 |
-| 거절 사유 기타(OTHER) 선택 시 상세 사유 직접 입력 필수 | `test_reject_with_other_requires_detail` | 통과 |
-| 사유 코드 없이 텍스트만 전달 시 OTHER 자동 매핑(하위 호환) | `test_reject_legacy_reason_only_defaults_to_other` | 통과 |
-| 이미 처리된 신청 재처리 불가 (409) | `test_already_processed_request_cannot_be_reprocessed` | 통과 |
-| 거절된 슬롯 재신청 가능 상태 복귀 | `test_rejected_slot_can_be_booked_again` | 통과 |
-| 승인 후 사용자 취소 시 슬롯 복귀 및 승인후취소 표시 | `test_cancel_after_approval_reopens_slot_and_shows_cancelled_after_approval` | 통과 |
-| 승인 전 대기 상태에서 취소 시 승인후취소 미표시 | `test_cancel_before_approval_shows_false` | 통과 |
-| 난이도 3단계(INTERMEDIATE 포함) 정상 동작 | `test_dog_walk_settings_intermediate_difficulty` | 통과 |
+| 좌표 묶음 저장 후 순서대로 경로 조회 | `test_path_retrieval_in_order` | 통과 (PASSED) |
+| 시간 공백 후 이어서 전송 시 last_* 정상 갱신 | `test_batch_continuation_with_gap` | 통과 (PASSED) |
+| 50m 초과 좌표 정상 저장 및 거리 계산 제외 | `test_accuracy_over_50m_accepted_and_excluded_from_distance` | 통과 (PASSED) |
+| 추가 좌표 미전송 시 마지막 위치 및 수신시각 보존 | `test_last_position_and_received_at_retained` | 통과 (PASSED) |
+| GET /walks/active 복원 정보 반환 및 다음 순번 전송 성공 | `test_active_walk_restoration_and_next_sequence` | 통과 (PASSED) |
+| 1시간 경과 산책 점검 시 AUTO_TIMEOUT 완료 및 통계 반영 | `test_auto_end_stale_walk_after_1_hour` | 통과 (PASSED) |
+| 1시간 미만 시 미종료 및 좌표 없는 산책 시작시각 기준 만료 | `test_not_expired_under_1_hour_and_no_points_start_basis` | 통과 (PASSED) |
+| 만료 점검 중복 실행 멱등성 (idempotent) | `test_close_stale_walks_idempotency` | 통과 (PASSED) |
+| 자동 종료 산책 좌표 전송 시 409 및 수동/안전중단 사유 기록 | `test_send_points_to_auto_ended_walk_409_and_reasons` | 통과 (PASSED) |
+| 회귀 검증: 예약시간대 시작, 동시 진행 1개 제한, 권한 검사 | `test_regression_guard_rules` | 통과 (PASSED) |
 
 ## 5. 로컬 실행 준비
-- PostgreSQL 데이터베이스에 신규 마이그레이션 적용:
-  `migrations/011_f05_walk_approval.sql`
+1. PostgreSQL 마이그레이션 실행:
+   ```bash
+   psql -d <DB_NAME> -f migrations/011_f05_walk_approval.sql
+   psql -d <DB_NAME> -f migrations/012_f06_walk_tracking.sql
+   ```
+2. 환경 변수 확인 (`.env`):
+   ```env
+   AUTO_END_AFTER_SECONDS=3600
+   AUTO_END_CHECK_INTERVAL_SECONDS=300
+   ```
 
 ## 6. 확인하지 못한 것
-- Windows 로컬 환경에서 비-bypass 샌드박스 실행 시 Python asyncio 내부의 `_fallback_socketpair`가 로컬 소켓 권한으로 차단되는 현상 (BypassSandbox 모드에서는 정상 통과 확인).
-- F-01(회원가입/프로필 관리)이 아직 dev에 머지되지 않아, 실제 사용자 이름/나이/경험견종 데이터베이스 컬럼 및 클라이언트 UI 연동 상태는 미확인 (현재는 null 및 설문 데이터로 대응).
+- **Windows Sandbox 환경 내 TestClient 실행 제약**: Windows 격리 샌드박스 내부에서는 `asyncio` 기반 self-pipe socketpair가 차단되어 `TestClient` 통신이 대기 상태에 머무릅니다. 따라서 테스트 실행은 샌드박스 네트워크 격리가 해제된 PowerShell 환경(`BypassSandbox: true` / 로컬 개발 터미널)에서 검증을 완료하였습니다.
+- **실제 PostgreSQL 통합 테스트(`tests/test_walk_recording_postgres.py`)**: 구동 중인 외부 PostgreSQL 인스턴스 접속 정보(`DATABASE_URL`)가 필요한 테스트로, 현재 로컬 SQLite 인메모리 테스트로 전체 로직을 검증하였으며 실 PostgreSQL 환경에서의 마이그레이션 DDL 실제 실행은 배포 환경 파이프라인에서 확인이 필요합니다.
 
 ## 7. 다음 할 일 및 주의사항
-- F-01 구현 완료 후 `ApplicantDetailResponse`에 실제 이름, 나이, 경험 견종을 매핑하도록 연동 필요.
-- F-04(산책 예약)가 dev에 머지된 후 날짜 슬롯(`date_slot_id`) 기준의 슬롯 해제/복귀 로직과의 통합 테스트 필요.
+- 본 머지 및 충돌 해결 완료 후 `feature/f-06-walk-tracking` 브랜치를 원격에 push하고 `dev` 대상 Pull Request(PR) 생성/확인.
+- 프론트엔드 연동 참고사항:
+  - 산책 진행 중 `POST /walks/{id}/points`를 주기적으로 호출하여 좌표 업로드.
+  - 앱이 꺼지거나 비정상 종료된 경우, 재기동 시 `GET /walks/active`를 호출해 진행 중 산책 여부를 확인하고, 반환된 `last_sequence_no`의 다음 순번(`last_sequence_no + 1`)부터 좌표를 이어 전송.
+  - 만약 409 ("산책 세션이 만료되었습니다.") 에러를 받으면 세션이 타임아웃 종료되었으므로 산책 UI를 종료하고 메인 화면으로 전환.

@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import asynccontextmanager
 import os
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,13 +10,51 @@ from app.models import Dog
 from app.routers import auth, users, shelters, dogs, surveys, matching, public_api, breed_traits, simulation, personality, chat
 from app.routers import walk_requests
 from app.routers import walks, walk_maps
+from app.walk_service import close_stale_walks
 
 # Existing DB changes must go through explicit, backed-up migrations.
 # Opt-in only for a fresh/isolated development database.
 if os.getenv("AUTO_CREATE_SCHEMA", "false").lower() == "true":
     Base.metadata.create_all(bind=engine)
 
-app = FastAPI()
+
+def get_check_interval_seconds():
+    return int(os.getenv("AUTO_END_CHECK_INTERVAL_SECONDS", "300"))
+
+
+async def periodic_stale_walks_check():
+    interval = get_check_interval_seconds()
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            db = SessionLocal()
+            try:
+                close_stale_walks(db)
+                db.commit()
+            except Exception:
+                db.rollback()
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(periodic_stale_walks_check())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(shelters.router)
