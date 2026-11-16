@@ -8,10 +8,10 @@ from app.database import get_db
 from app.dependencies import require_role
 from app.models import User, UserRole
 from app.walk_record_schemas import (
-    PointsReceipt, WalkDetailResponse, WalkEnd, WalkIncidentCreate, WalkIncidentResponse,
+    ActiveWalkResponse, PointsReceipt, WalkDetailResponse, WalkEnd, WalkIncidentCreate, WalkIncidentResponse,
     WalkMarkerCreate, WalkMarkerResponse, WalkPointsBatch, WalkResponse, WalkStart,
 )
-from app.walk_service import add_marker, append_points, end_walk, report_incident, start_walk, walk_detail
+from app.walk_service import add_marker, append_points, end_walk, get_active_walk, report_incident, start_walk, walk_detail
 
 router = APIRouter(prefix="/walks", tags=["walks"])
 require_volunteer = require_role(UserRole.USER)
@@ -68,6 +68,12 @@ def end(walk_id: int, payload: WalkEnd, actor: User = Depends(get_current_user),
     새 필드는 NULL이며 기존 average_pace는 전체 시간 기준 값으로 보존됩니다.
     """
     return persist(db, lambda: end_walk(db, walk_id, actor, payload), WalkResponse)
+
+
+@router.get("/active", response_model=ActiveWalkResponse)
+def active(actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
+    """현재 로그인한 봉사자의 진행 중인 산책을 복원 조회합니다."""
+    return persist(db, lambda: get_active_walk(db, actor), ActiveWalkResponse)
 
 
 @router.get("/{walk_id}", response_model=WalkDetailResponse)

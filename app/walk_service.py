@@ -41,6 +41,7 @@ def is_walk_expired(walk, now):
 def start_walk(db, actor, payload):
     request = validate_walk_start(db, payload.walk_request_id, actor)
     now = utc_now()
+    close_stale_walks(db, now=now, user_id=actor.id)
     if not as_utc(request.requested_start_at) <= now < as_utc(request.requested_end_at):
         raise HTTPException(409, "승인된 예약 시간 안에서만 산책을 시작할 수 있습니다.")
     locked_profile(db, request.user_id)
@@ -167,6 +168,29 @@ def total_distance(points):
     return Decimal(str(total)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def finalize_walk_statistics(db, walk, end_time, status, end_reason, user_id):
+    points = db.query(WalkPoint).filter_by(walk_id=walk.id).order_by(WalkPoint.sequence_no).yield_per(1000)
+    legacy_distance = total_distance(points)
+    motion_points = (db.query(WalkPoint).filter_by(walk_id=walk.id)
+                     .order_by(WalkPoint.recorded_at, WalkPoint.sequence_no).yield_per(1000))
+    motion = analyze_motion(motion_points, walk.started_at, end_time, distance_fn=distance_m, already_ordered=True)
+    walk.total_distance_m = legacy_distance
+    walk.duration_seconds = motion.duration_seconds
+    walk.moving_duration_seconds = motion.moving_duration_seconds
+    walk.stopped_duration_seconds = motion.stopped_duration_seconds
+    walk.unknown_duration_seconds = motion.unknown_duration_seconds
+    walk.moving_distance_m = motion.moving_distance_m
+    walk.average_pace = motion.average_pace
+    walk.status = status
+    walk.ended_at = end_time
+    walk.end_reason = end_reason
+    db.flush()
+    if walk.status == "COMPLETED":
+        # Issue #6: same transaction, so a failed refresh also rolls the walk end back.
+        refresh_volunteer_profile(db, user_id)
+    return walk
+
+
 def end_walk(db, walk_id, actor, payload):
     walk, request = locked_walk(db, walk_id, actor, allow_staff=True)
     if actor.id != request.user_id and payload.status != "INTERRUPTED":
@@ -179,24 +203,57 @@ def end_walk(db, walk_id, actor, payload):
         latest = db.query(func.max(timestamp)).filter(model.walk_id == walk.id).scalar()
         if latest and as_utc(latest) > now:
             raise HTTPException(409, "마지막 관찰 시각보다 빠르게 종료할 수 없습니다.")
-    points = db.query(WalkPoint).filter_by(walk_id=walk.id).order_by(WalkPoint.sequence_no).yield_per(1000)
-    legacy_distance = total_distance(points)
-    motion_points = (db.query(WalkPoint).filter_by(walk_id=walk.id)
-                     .order_by(WalkPoint.recorded_at, WalkPoint.sequence_no).yield_per(1000))
-    motion = analyze_motion(motion_points, walk.started_at, now, distance_fn=distance_m, already_ordered=True)
-    walk.total_distance_m = legacy_distance
-    walk.duration_seconds = motion.duration_seconds
-    walk.moving_duration_seconds = motion.moving_duration_seconds
-    walk.stopped_duration_seconds = motion.stopped_duration_seconds
-    walk.unknown_duration_seconds = motion.unknown_duration_seconds
-    walk.moving_distance_m = motion.moving_distance_m
-    walk.average_pace = motion.average_pace
-    walk.status, walk.ended_at = payload.status, now
+    end_reason = "USER" if actor.id == request.user_id else "STAFF"
+    return finalize_walk_statistics(db, walk, now, payload.status, end_reason, request.user_id)
+
+
+def close_stale_walks(db, now=None, user_id=None):
+    """Closes all expired IN_PROGRESS walks idempotently."""
+    if now is None:
+        now = utc_now()
+    timeout_seconds = get_auto_end_after_seconds()
+    query = db.query(Walk.id).join(WalkRequest).filter(Walk.status == "IN_PROGRESS")
+    if user_id is not None:
+        query = query.filter(WalkRequest.user_id == user_id)
+    candidate_ids = [r[0] for r in query.all()]
+    closed = []
+    for walk_id in candidate_ids:
+        walk = lock_row(db, Walk, walk_id)
+        if walk is None or walk.status != "IN_PROGRESS":
+            continue
+        last_active = as_utc(walk.last_point_received_at or walk.started_at)
+        if (now - last_active).total_seconds() >= timeout_seconds:
+            request = lock_row(db, WalkRequest, walk.walk_request_id)
+            end_time = last_active
+            finalize_walk_statistics(db, walk, end_time, "COMPLETED", "AUTO_TIMEOUT", request.user_id)
+            closed.append(walk)
     db.flush()
-    if walk.status == "COMPLETED":
-        # Issue #6: same transaction, so a failed refresh also rolls the walk end back.
-        refresh_volunteer_profile(db, request.user_id)
-    return walk
+    return closed
+
+
+def get_active_walk(db, actor):
+    now = utc_now()
+    close_stale_walks(db, now=now, user_id=actor.id)
+    walk = (
+        db.query(Walk)
+        .join(WalkRequest)
+        .filter(WalkRequest.user_id == actor.id, Walk.status == "IN_PROGRESS")
+        .first()
+    )
+    if walk is None:
+        raise HTTPException(404, "진행 중인 산책이 없습니다.")
+    last_seq = db.query(func.max(WalkPoint.sequence_no)).filter_by(walk_id=walk.id).scalar()
+    elapsed_seconds = int((now - as_utc(walk.started_at)).total_seconds())
+    return {
+        "walk_id": walk.id,
+        "started_at": walk.started_at,
+        "last_latitude": walk.last_latitude,
+        "last_longitude": walk.last_longitude,
+        "last_accuracy_m": walk.last_accuracy_m,
+        "last_point_recorded_at": walk.last_point_recorded_at,
+        "last_sequence_no": last_seq,
+        "elapsed_seconds": elapsed_seconds,
+    }
 
 
 def walk_detail(db, walk_id, actor, limit, offset):

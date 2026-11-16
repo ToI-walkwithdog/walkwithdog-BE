@@ -10,7 +10,10 @@
 - `app/routers/dogs.py`: F-03 `File, Form, UploadFile, save_dog_image` 누락 import 보완
 - `app/walk_models.py`: `Walk` 모델에 신규 컬럼 6개 및 제약조건 추가
 - `app/walk_record_schemas.py`: `WalkResponse`에 신규 필드 추가 및 `ActiveWalkResponse` 정의
-- `app/walk_service.py`: 정확도 50m 초과 좌표 409 거부 제거 및 저장 허용, `last_*` 위치/수신시각 갱신 로직 추가
+- `app/walk_service.py`: 정확도 50m 초과 좌표 409 거부 제거 및 저장 허용, `last_*` 위치/수신시각 갱신 로직 추가, 수동/자동 종료 공통 통계 함수(`finalize_walk_statistics`), `close_stale_walks`, `get_active_walk` 구현
+- `app/routers/walks.py`: `GET /walks/active` 복원 라우트 신설 (기존 `/{walk_id}`보다 상단 배치), 수동 종료 시 `end_reason`(`USER`/`STAFF`) 기록
+- `app/main.py`: FastAPI `lifespan` 기반 백그라운드 주기 만료 점검(`periodic_stale_walks_check`) 루프 등록
+- `.env.example`: `AUTO_END_AFTER_SECONDS=3600`, `AUTO_END_CHECK_INTERVAL_SECONDS=300` 추가
 - `docs/TODO.md`, `docs/handoff/LATEST.md`: F-06 작업 목록 및 인수인계 문서 갱신
 
 ## 2. 결정 사항
@@ -18,7 +21,10 @@
 - `scripts/walk_schema.py` 및 `007_walk_domain.schema.json`은 007 과거 검증용 불변 계약이므로 갱신하지 않음.
 - 정확도 50m 초과 좌표는 저장하되, 이동 거리(`total_distance`) 계산 시 신뢰도 필터(accuracy <= 50m)로 제외 유지.
 - 묶음 내 신규 좌표가 있는 경우에만 `last_point_received_at`을 서버 현재 시각으로 갱신 (중복 좌표만 있는 묶음은 갱신 제외).
-- 만료 시각이 지난 산책에 좌표 전송 시 409("산책 세션이 만료되었습니다.") 반환.
+- 만료 시각(`now - coalesce(last_point_received_at, started_at) >= AUTO_END_AFTER_SECONDS`)이 지난 산책에 좌표 전송 시 409("산책 세션이 만료되었습니다.") 반환.
+- 만료 자동 종료 시 `status='COMPLETED'`, `ended_at=coalesce(last_point_received_at, started_at)`, `end_reason='AUTO_TIMEOUT'`으로 기록하며 통계 계산 및 봉사 이력(`refresh_volunteer_profile`) 갱신 수행.
+- 수동 종료 시 봉사자 직접 종료는 `USER`, 보호소/관리자 안전 중단은 `STAFF`로 `end_reason` 기록.
+- `GET /walks/active`는 봉사자 본인의 진행 중 산책 정보(`walk_id`, 시작시각, 마지막 위치, `last_sequence_no`, 경과 초)를 반환하며, 없는 경우 404 응답. 조회 시점 및 `start_walk` 시점에도 해당 사용자의 만료 산책 자동 정리 수행.
 
 ## 3. 실행한 테스트 명령과 결과
 - (구현 진행 중)
