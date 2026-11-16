@@ -9,11 +9,16 @@
 - `app/models.py`: `DogWalkDateSlot`의 `Date, Time` 누락 import 보완
 - `app/routers/dogs.py`: F-03 `File, Form, UploadFile, save_dog_image` 누락 import 보완
 - `app/walk_models.py`: `Walk` 모델에 신규 컬럼 6개 및 제약조건 추가
+- `app/walk_record_schemas.py`: `WalkResponse`에 신규 필드 추가 및 `ActiveWalkResponse` 정의
+- `app/walk_service.py`: 정확도 50m 초과 좌표 409 거부 제거 및 저장 허용, `last_*` 위치/수신시각 갱신 로직 추가
 - `docs/TODO.md`, `docs/handoff/LATEST.md`: F-06 작업 목록 및 인수인계 문서 갱신
 
 ## 2. 결정 사항
 - 마이그레이션 번호: `migrations/012_f06_walk_tracking.sql`로 지정 (F-04의 010, F-05의 011과 충돌 방지).
 - `scripts/walk_schema.py` 및 `007_walk_domain.schema.json`은 007 과거 검증용 불변 계약이므로 갱신하지 않음.
+- 정확도 50m 초과 좌표는 저장하되, 이동 거리(`total_distance`) 계산 시 신뢰도 필터(accuracy <= 50m)로 제외 유지.
+- 묶음 내 신규 좌표가 있는 경우에만 `last_point_received_at`을 서버 현재 시각으로 갱신 (중복 좌표만 있는 묶음은 갱신 제외).
+- 만료 시각이 지난 산책에 좌표 전송 시 409("산책 세션이 만료되었습니다.") 반환.
 
 ## 3. 실행한 테스트 명령과 결과
 - (구현 진행 중)

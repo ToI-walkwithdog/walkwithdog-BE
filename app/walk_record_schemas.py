@@ -101,7 +101,10 @@ class WalkEnd(BaseModel):
 class UTCResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    @field_validator("started_at", "ended_at", "created_at", "updated_at", "recorded_at", "occurred_at", check_fields=False)
+    @field_validator(
+        "started_at", "ended_at", "created_at", "updated_at", "recorded_at", "occurred_at",
+        "last_point_recorded_at", "last_point_received_at", check_fields=False,
+    )
     @classmethod
     def utc_time(cls, value):
         return WalkRequestResponse.utc_datetime(value)
@@ -120,8 +123,25 @@ class WalkResponse(UTCResponse):
     stopped_duration_seconds: int | None = Field(default=None, description="60초 이상 안정 정지로 확정된 정수 초; 기존 미분석 기록은 NULL")
     unknown_duration_seconds: int | None = Field(default=None, description="GPS 근거 부족·공백·미확정 및 초 미만 절삭 잔여 시간; 기존 미분석 기록은 NULL")
     moving_distance_m: Decimal | None = Field(default=None, description="실제 이동으로 분류된 구간의 거리(m). 정지 흔들림은 제외하며 기존 미분석 기록은 NULL")
+    last_latitude: Decimal | None = None
+    last_longitude: Decimal | None = None
+    last_accuracy_m: Decimal | None = None
+    last_point_recorded_at: datetime | None = None
+    last_point_received_at: datetime | None = None
+    end_reason: Literal["USER", "STAFF", "AUTO_TIMEOUT"] | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ActiveWalkResponse(UTCResponse):
+    walk_id: int
+    started_at: datetime
+    last_latitude: Decimal | None = None
+    last_longitude: Decimal | None = None
+    last_accuracy_m: Decimal | None = None
+    last_point_recorded_at: datetime | None = None
+    last_sequence_no: int | None = None
+    elapsed_seconds: int
 
 
 class WalkPointResponse(UTCResponse):

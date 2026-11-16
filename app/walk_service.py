@@ -3,6 +3,7 @@
 Provisional GPS policy: known accuracy <=50m, segment speed <=5m/s, no distance
 bridge over sampling gaps >300s. Rejected batches never partially persist.
 """
+import os
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -26,6 +27,15 @@ MAX_DISTANCE_GAP_SECONDS = 300
 
 def utc_now():
     return datetime.now(timezone.utc)
+
+
+def get_auto_end_after_seconds():
+    return int(os.getenv("AUTO_END_AFTER_SECONDS", "3600"))
+
+
+def is_walk_expired(walk, now):
+    last_active = as_utc(walk.last_point_received_at or walk.started_at)
+    return (now - last_active).total_seconds() >= get_auto_end_after_seconds()
 
 
 def start_walk(db, actor, payload):
@@ -78,6 +88,8 @@ def point_key(point):
 def append_points(db, walk_id, actor, payload):
     walk, _ = locked_walk(db, walk_id, actor)
     now = utc_now()
+    if is_walk_expired(walk, now):
+        raise HTTPException(409, "산책 세션이 만료되었습니다.")
     incoming = {}
     for point in payload.points:
         if point.sequence_no in incoming and point_key(incoming[point.sequence_no]) != point_key(point):
@@ -97,8 +109,6 @@ def append_points(db, walk_id, actor, payload):
         if sequence != expected:
             raise HTTPException(409, f"좌표 순번이 연속되지 않습니다. 다음 순번은 {expected}입니다.")
         stamp = validate_event_time(walk, point.recorded_at, now)
-        if point.accuracy_m is not None and point.accuracy_m > MAX_ACCURACY_M:
-            raise HTTPException(409, "GPS 오차가 허용 범위 50m를 초과합니다.")
         if previous:
             elapsed = (stamp - as_utc(previous.recorded_at)).total_seconds()
             if elapsed <= 0:
@@ -109,11 +119,18 @@ def append_points(db, walk_id, actor, payload):
                         recorded_at=stamp, accuracy_m=point.accuracy_m, sequence_no=sequence)
         added.append(row)
         previous = row
-    db.add_all(added)
+    if added:
+        db.add_all(added)
+        last_point = added[-1]
+        walk.last_latitude = last_point.latitude
+        walk.last_longitude = last_point.longitude
+        walk.last_accuracy_m = last_point.accuracy_m
+        walk.last_point_recorded_at = last_point.recorded_at
+        walk.last_point_received_at = now
     db.flush()
     return {"walk_id": walk.id, "accepted_count": len(added),
             "duplicate_count": len(payload.points) - len(added),
-            "last_sequence_no": previous.sequence_no}
+            "last_sequence_no": previous.sequence_no if previous else 0}
 
 
 def add_marker(db, walk_id, actor, payload):
