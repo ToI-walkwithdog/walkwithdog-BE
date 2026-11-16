@@ -1,44 +1,42 @@
-# 인수인계: F-03 산책 등록 (보호소)
+# 인수인계: F-06 산책 중 지도·경로 기록 (SC-07)
 
-- 날짜: 2026-11-09 (KST)
-- 브랜치: feature/f-03-walk-register
-- 작업 요약: 보호소가 산책 가능한 강아지 정보와 날짜 지정형 산책 슬롯을 등록하는 API(F-03) 구현 완료. 
+- 날짜: 2026-11-16 (KST)
+- 브랜치: feature/f-06-walk-tracking
+- 작업 요약: 산책 중 실시간 경로 좌표 저장, 약신호 좌표 저장 허용, 세션 만료 자동 종료 및 앱 비정상 종료 시 진행 중 산책 복원 API 구현.
 
 ## 1. 변경 파일
-- migrations/001_add_f03_walk_register.sql
-- app/models.py
-- app/services/dog_service.py
-- app/routers/dogs.py
-- docs/TODO.md, docs/handoff/LATEST.md
-- .env.example
+- `migrations/012_f06_walk_tracking.sql`: `walks` 테이블에 마지막 위치(위도, 경도, 정확도, 기록시각, 수신시각) 및 종료 사유(`end_reason`) 컬럼과 제약조건 추가
+- `app/models.py`: `DogWalkDateSlot`의 `Date, Time` 누락 import 보완
+- `app/routers/dogs.py`: F-03 `File, Form, UploadFile, save_dog_image` 누락 import 보완
+- `app/walk_models.py`: `Walk` 모델에 신규 컬럼 6개 및 제약조건 추가
+- `docs/TODO.md`, `docs/handoff/LATEST.md`: F-06 작업 목록 및 인수인계 문서 갱신
 
 ## 2. 결정 사항
-- 사진 저장: 환경변수 `UPLOAD_DIR` 기준 로컬 디렉터리에 UUID 파일명으로 저장, 5MB 제한 및 확장자(jpg/png) 시그니처 검사 적용.
-- 슬롯 모델: `dog_walk_date_slots` 테이블을 신설하여 기존 요일 기반 슬롯과 분리. 주마다 다른 요일 대응 가능.
-- 시간 규칙: KST 기준, 당일 지난 시각은 등록 불가. 최대 6개월 내 설정 가능.
+- 마이그레이션 번호: `migrations/012_f06_walk_tracking.sql`로 지정 (F-04의 010, F-05의 011과 충돌 방지).
+- `scripts/walk_schema.py` 및 `007_walk_domain.schema.json`은 007 과거 검증용 불변 계약이므로 갱신하지 않음.
 
 ## 3. 실행한 테스트 명령과 결과
-- 실행 명령: (예: `pytest tests/test_f03_walk_register.py -v`)
-- 결과: (로컬 테스트 완료 후 통과 수 기재 요망)
+- (구현 진행 중)
 
 ## 4. 완료 기준 대조표
 | 완료 기준 | 테스트 항목 | 결과 |
 |---|---|---|
-| 예약 목록에 등록한 강아지·슬롯 표시 | `test_register_and_list_display` | - |
-| 필수값 누락 시 등록 거부 | `test_missing_required_fields` | - |
-| 지난 시각·6개월 초과 기간 등록 거부 | `test_past_time_and_6_months_limit` | - |
-| 동일 강아지 겹치는 시간대 거부 | `test_overlap_time_slots` | - |
-| 파일 형식(jpg/png) 및 5MB 크기 제한 | `test_image_upload_validation` | - |
-| 보호소 인증 정보로 이름·지역 자동 채움 | `test_auto_fill_shelter_info` | - |
-| 담당 보호소가 아닌 일반 사용자 등록 제한 | `test_unauthorized_access` | - |
+| 좌표 묶음 저장 후 순서대로 경로 조회 | `test_path_retrieval_in_order` | - |
+| 시간 공백 후 이어서 전송 시 last_* 정상 갱신 | `test_batch_continuation_with_gap` | - |
+| 50m 초과 좌표 정상 저장 및 거리 계산 제외 | `test_accuracy_over_50m_accepted_and_excluded_from_distance` | - |
+| 추가 좌표 미전송 시 마지막 위치 및 수신시각 보존 | `test_last_position_and_received_at_retained` | - |
+| GET /walks/active 복원 정보 반환 및 다음 순번 전송 성공 | `test_active_walk_restoration_and_next_sequence` | - |
+| 1시간 경과 산책 점검 시 AUTO_TIMEOUT 완료 및 통계 반영 | `test_auto_end_stale_walk_after_1_hour` | - |
+| 1시간 미만 시 미종료 및 좌표 없는 산책 시작시각 기준 만료 | `test_not_expired_under_1_hour_and_no_points_start_basis` | - |
+| 만료 점검 중복 실행 멱등성 (idempotent) | `test_close_stale_walks_idempotency` | - |
+| 자동 종료 산책 좌표 전송 시 409 및 수동/안전중단 사유 기록 | `test_send_points_to_auto_ended_walk_409_and_reasons` | - |
+| 회귀 검증: 예약시간대 시작, 동시 진행 1개 제한, 권한 검사 | `test_regression_guard_rules` | - |
 
 ## 5. 로컬 실행 준비
-- `.env`에 `UPLOAD_DIR=./uploads/dogs` 추가.
-- 저장소 루트에서 `mkdir -p uploads/dogs` 실행.
-- PostgreSQL 마이그레이션 SQL 실행.
+- PostgreSQL 마이그레이션 실행: `migrations/012_f06_walk_tracking.sql`
 
 ## 6. 확인하지 못한 것
-- 클라이언트 앱에서 Multipart/form-data 형식으로 JSON 배열(슬롯 정보)을 보낼 때의 파싱 호환성.
+- (구현 진행 중)
 
 ## 7. 다음 할 일 및 주의사항
-- 기존 산책 신청 검증(`validate_eligibility`)이 `dog_walk_date_slots`를 바라보도록 변경하는 후속 이슈 진행 필요.
+- 다음 단계: 좌표 저장 변경(정확도 50m 초과 허용, `last_*` 갱신) 및 스키마 반영

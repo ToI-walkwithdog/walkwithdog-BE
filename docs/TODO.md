@@ -10,3 +10,13 @@
 - [x] DB 스키마 변경 (마이그레이션 SQL 작성)
 - [x] 완료 기준 검증 테스트 작성
 - [x] .env.example 갱신
+
+# F-06 산책 중 지도·경로 기록 TODO
+
+- [x] DB 마이그레이션 (012_f06_walk_tracking.sql) 및 Walk 모델 컬럼/제약조건 추가
+- [ ] 정확도 50m 초과 409 거부 제거 및 last_* 갱신 (중복 좌표 묶음은 수신시각 갱신 제외)
+- [ ] 응답 스키마 WalkResponse 필드 추가 및 ActiveWalkResponse 정의
+- [ ] 수동/자동 종료 공통 로직 분리 및 만료 산책 자동 종료 (close_stale_walks)
+- [ ] 진행 중 산책 복원 API (GET /walks/active) 구현
+- [ ] 서버 백그라운드 주기 점검 루프 등록 및 .env.example 갱신
+- [ ] 기존 테스트(51m 허용) 수정 및 F-06 완료 기준 검증 테스트 작성

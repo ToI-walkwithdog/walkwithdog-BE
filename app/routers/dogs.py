@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from app.dependencies import require_shelter, require_shelter_access
 from app.models import User
+from app.services.dog_service import save_dog_image
 
 from app.database import SessionLocal
 from app.models import Dog, DogWalkSetting, Shelter
