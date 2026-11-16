@@ -16,7 +16,7 @@
 - `.env.example`: `AUTO_END_AFTER_SECONDS=3600`, `AUTO_END_CHECK_INTERVAL_SECONDS=300` 추가
 - `tests/test_walk_recording.py`: 51m 정확도 좌표 409 거부 테스트를 200 저장 성공 검증으로 수정 (line 130)
 - `tests/test_f06_walk_tracking.py`: F-06 완료 기준 10개 항목에 대한 단위/통합 테스트 신설
-- `docs/TODO.md`: F-06 작업 목록 갱신 및 완료 체크
+- `docs/TODO.md`: F-03, F-04, F-05, F-06 작업 목록 통합 및 완료 체크
 - `docs/handoff/LATEST.md`: F-06 구현 및 검증 결과 인수인계 문서 작성
 
 ## 2. 결정 사항
@@ -33,14 +33,15 @@
 ## 3. 실행한 테스트 명령과 결과
 ```powershell
 $env:PYTHONPATH="."
-pytest tests/test_f06_walk_tracking.py tests/test_walk_recording.py tests/test_walk_requests.py -v
+pytest tests/test_f06_walk_tracking.py tests/test_f05_walk_approval.py tests/test_walk_recording.py tests/test_walk_requests.py -v
 ```
 
 ### 테스트 결과 요약
 - `tests/test_f06_walk_tracking.py`: 10 passed (100%)
+- `tests/test_f05_walk_approval.py`: 11 passed (100%)
 - `tests/test_walk_recording.py`: 39 passed (100%)
-- `tests/test_walk_requests.py`: 31 passed (100%)
-- **총합: 80 passed, 11 warnings in 7.13s (전체 성공)**
+- `tests/test_walk_requests.py`: 32 passed (100%)
+- **총합: 92 passed in ~12s (전체 성공)**
 
 ## 4. 완료 기준 대조표
 | 완료 기준 | 테스트 항목 | 결과 |
@@ -59,6 +60,7 @@ pytest tests/test_f06_walk_tracking.py tests/test_walk_recording.py tests/test_w
 ## 5. 로컬 실행 준비
 1. PostgreSQL 마이그레이션 실행:
    ```bash
+   psql -d <DB_NAME> -f migrations/011_f05_walk_approval.sql
    psql -d <DB_NAME> -f migrations/012_f06_walk_tracking.sql
    ```
 2. 환경 변수 확인 (`.env`):
@@ -69,10 +71,10 @@ pytest tests/test_f06_walk_tracking.py tests/test_walk_recording.py tests/test_w
 
 ## 6. 확인하지 못한 것
 - **Windows Sandbox 환경 내 TestClient 실행 제약**: Windows 격리 샌드박스 내부에서는 `asyncio` 기반 self-pipe socketpair가 차단되어 `TestClient` 통신이 대기 상태에 머무릅니다. 따라서 테스트 실행은 샌드박스 네트워크 격리가 해제된 PowerShell 환경(`BypassSandbox: true` / 로컬 개발 터미널)에서 검증을 완료하였습니다.
-- **실제 PostgreSQL 통합 테스트(`tests/test_walk_recording_postgres.py`)**: 구동 중인 외부 PostgreSQL 인스턴스 접속 정보(`DATABASE_URL`)가 필요한 테스트로, 현재 로컬 SQLite 인메모리 테스트 80개로 전체 로직을 검증하였으며 실 PostgreSQL 환경에서의 마이그레이션 DDL 실제 실행은 배포 환경 파이프라인에서 확인이 필요합니다.
+- **실제 PostgreSQL 통합 테스트(`tests/test_walk_recording_postgres.py`)**: 구동 중인 외부 PostgreSQL 인스턴스 접속 정보(`DATABASE_URL`)가 필요한 테스트로, 현재 로컬 SQLite 인메모리 테스트로 전체 로직을 검증하였으며 실 PostgreSQL 환경에서의 마이그레이션 DDL 실제 실행은 배포 환경 파이프라인에서 확인이 필요합니다.
 
 ## 7. 다음 할 일 및 주의사항
-- 본 기능 구현 완료 후 `feature/f-06-walk-tracking` 브랜치를 원격에 push하고 `dev` 대상 Pull Request(PR) 생성.
+- 본 머지 및 충돌 해결 완료 후 `feature/f-06-walk-tracking` 브랜치를 원격에 push하고 `dev` 대상 Pull Request(PR) 생성/확인.
 - 프론트엔드 연동 참고사항:
   - 산책 진행 중 `POST /walks/{id}/points`를 주기적으로 호출하여 좌표 업로드.
   - 앱이 꺼지거나 비정상 종료된 경우, 재기동 시 `GET /walks/active`를 호출해 진행 중 산책 여부를 확인하고, 반환된 `last_sequence_no`의 다음 순번(`last_sequence_no + 1`)부터 좌표를 이어 전송.

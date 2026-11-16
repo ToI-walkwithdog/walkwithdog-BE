@@ -33,7 +33,7 @@ class WalkSettingsPatch(BaseModel):
 
     # Defaults match the existing ORM; model_fields_set controls partial updates.
     walkable: StrictBool = False
-    difficulty: Literal["BEGINNER", "EXPERIENCED"] = "BEGINNER"
+    difficulty: Literal["BEGINNER", "INTERMEDIATE", "EXPERIENCED"] = "BEGINNER"
     precautions: str | None = None
     recommended_duration_minutes: Annotated[int, Field(strict=True, ge=1, le=2147483647)] | None = None
     slots: list[WalkSlotInput] = Field(default_factory=list)
@@ -60,7 +60,7 @@ class WalkSettingsResponse(BaseModel):
     id: int
     dog_id: int
     walkable: bool
-    difficulty: Literal["BEGINNER", "EXPERIENCED"]
+    difficulty: Literal["BEGINNER", "INTERMEDIATE", "EXPERIENCED"]
     precautions: str | None
     recommended_duration_minutes: int | None
     slots: list[WalkSlotResponse]
