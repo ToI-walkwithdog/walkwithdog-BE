@@ -41,16 +41,45 @@ class WalkMetadataTests(unittest.TestCase):
         source = (ROOT / "migrations/007_walk_domain.sql").read_text()
         statements = []
         motion = json.loads(MOTION_CONTRACT.read_text())
-        additions = {c["name"] for c in motion["columns"]} | {"CONSTRAINT " + n for n in motion["constraints"]}
+        post_007_columns = {c["name"] for c in motion["columns"]} | {
+            "rejection_reason_code", "last_latitude", "last_longitude",
+            "last_accuracy_m", "last_point_recorded_at", "last_point_received_at",
+            "end_reason", "client_report_id", "acknowledged_at", "acknowledged_by",
+        }
+        post_007_constraints = {n for n in motion["constraints"]} | {
+            "ck_walk_last_coordinate_pair", "ck_walk_last_latitude", "ck_walk_last_longitude",
+            "ck_walk_last_accuracy", "ck_walk_end_reason", "ck_incident_acknowledgement",
+        }
+        post_007_indexes = {
+            "uq_walk_incidents_reported_client_report_id", "ix_walk_incidents_unacknowledged",
+        }
         for table in Base.metadata.sorted_tables:
             if table.name in names:
                 ddl = str(CreateTable(table, if_not_exists=True).compile(dialect=postgresql.dialect())).strip()
-                if table.name == "walks":
-                    # Compare the immutable 007 projection, excluding reviewed 008 additions.
-                    ddl = "\n".join(l for l in ddl.splitlines() if not any(l.strip().startswith(n + " ") for n in additions))
+                # Compare the immutable 007 projection, excluding subsequent migration additions.
+                ddl = "\n".join(l for l in ddl.splitlines()
+                                if not any(l.strip().startswith(n + " ") for n in post_007_columns)
+                                and not any(l.strip().startswith(f"CONSTRAINT {c} ") for c in post_007_constraints)
+                                and not any(l.strip().startswith(f"FOREIGN KEY({c})") for c in post_007_columns))
+                if "INTERMEDIATE" in ddl:
+                    ddl = ddl.replace(", 'INTERMEDIATE'", "")
+                for new_type in ("POOP_NO_BAG", "ATE_FOREIGN_OBJECT", "ABNORMAL_BEHAVIOR"):
+                    ddl = ddl.replace(f", '{new_type}'", "")
+                # Clean up any trailing comma before closing parenthesis
+                lines = ddl.splitlines()
+                last_item_idx = None
+                for idx, l in enumerate(lines):
+                    if l.strip().startswith(")"):
+                        break
+                    if l.strip():
+                        last_item_idx = idx
+                if last_item_idx is not None and lines[last_item_idx].rstrip().endswith(","):
+                    lines[last_item_idx] = lines[last_item_idx].rstrip().rstrip(",")
+                ddl = "\n".join(lines)
                 statements.append(ddl + ";")
                 statements.extend(str(CreateIndex(i, if_not_exists=True).compile(dialect=postgresql.dialect())) + ";"
-                                  for i in sorted(table.indexes, key=lambda i: i.name))
+                                  for i in sorted(table.indexes, key=lambda i: i.name)
+                                  if i.name not in post_007_indexes)
         actual = "\n".join(line for line in source.splitlines() if not line.startswith("--"))
         expected = "BEGIN;\n\n" + "\n\n".join(statements) + "\n\nCOMMIT;"
         self.assertEqual([l.rstrip() for l in actual.strip().splitlines()],
@@ -62,10 +91,35 @@ class WalkMetadataTests(unittest.TestCase):
         for model in WALK_MODELS:
             table = model.__table__
             snapshot = contract[table.name]
+            if table.name == "walk_requests":
+                snapshot["columns"].append({"name": "rejection_reason_code", "type": "character varying(30)", "not_null": False, "default": None})
+            if table.name == "walk_incidents":
+                snapshot["columns"].extend([
+                    {"name": "client_report_id", "type": "character varying(36)", "not_null": False, "default": None},
+                    {"name": "acknowledged_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                    {"name": "acknowledged_by", "type": "integer", "not_null": False, "default": None},
+                ])
+                snapshot["constraints"].update({"ck_incident_acknowledgement": None})
+                snapshot["indexes"].update({"uq_walk_incidents_reported_client_report_id": None, "ix_walk_incidents_unacknowledged": None})
             if table.name == "walks":
                 motion = json.loads(MOTION_CONTRACT.read_text())
                 snapshot["columns"].extend(motion["columns"])
                 snapshot["constraints"].update(motion["constraints"])
+                snapshot["columns"].extend([
+                    {"name": "last_latitude", "type": "numeric(9,6)", "not_null": False, "default": None},
+                    {"name": "last_longitude", "type": "numeric(9,6)", "not_null": False, "default": None},
+                    {"name": "last_accuracy_m", "type": "numeric(10,2)", "not_null": False, "default": None},
+                    {"name": "last_point_recorded_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                    {"name": "last_point_received_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                    {"name": "end_reason", "type": "character varying(20)", "not_null": False, "default": None},
+                ])
+                snapshot["constraints"].update({
+                    "ck_walk_last_coordinate_pair": None,
+                    "ck_walk_last_latitude": None,
+                    "ck_walk_last_longitude": None,
+                    "ck_walk_last_accuracy": None,
+                    "ck_walk_end_reason": None,
+                })
             expected_columns = {c["name"]: c for c in snapshot["columns"]}
             self.assertEqual(set(expected_columns), set(table.columns.keys()))
             for column in table.columns:
@@ -182,6 +236,8 @@ class WalkConstraintTests(unittest.TestCase):
         for changes in ({"latitude": 37}, {"incident_type": "UNKNOWN"}, {"status": "UNKNOWN"}, {"description": ""}):
             self.invalid(WalkIncident(**{**incident, **changes}))
         self.db.add_all([WalkIncident(**incident), WalkIncident(**incident)])
+        for t in ("POOP_NO_BAG", "ATE_FOREIGN_OBJECT", "ABNORMAL_BEHAVIOR", "LOST_DOG", "SAFETY_THREAT", "OTHER"):
+            self.db.add(WalkIncident(**{**incident, "incident_type": t}))
         self.db.flush()
 
     def test_review_observations_and_uniqueness(self):
