@@ -1,5 +1,5 @@
 """Authenticated GPS sessions; raw locations and safety reports are never public."""
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -55,8 +55,14 @@ def marker(walk_id: int, payload: WalkMarkerCreate, actor: User = Depends(get_cu
 
 
 @router.post("/{walk_id}/incidents", response_model=WalkIncidentResponse, status_code=201)
-def incident(walk_id: int, payload: WalkIncidentCreate, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return persist(db, lambda: report_incident(db, walk_id, actor, payload), WalkIncidentResponse)
+def incident(walk_id: int, payload: WalkIncidentCreate, response: Response, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    def operation():
+        incident_obj, is_created = report_incident(db, walk_id, actor, payload)
+        if not is_created:
+            response.status_code = 200
+        return incident_obj
+
+    return persist(db, operation, WalkIncidentResponse)
 
 
 @router.patch("/{walk_id}/end", response_model=WalkResponse)

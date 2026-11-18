@@ -74,9 +74,14 @@ class WalkMarkerCreate(PositionEvent):
 class WalkIncidentCreate(Coordinates):
     latitude: Latitude | None = None
     longitude: Longitude | None = None
-    incident_type: Literal["INJURY", "LOST_DOG", "SAFETY_THREAT", "OTHER"]
-    description: str
+    incident_type: Literal[
+        "INJURY", "LOST_DOG", "SAFETY_THREAT", "OTHER",
+        "POOP_NO_BAG", "ATE_FOREIGN_OBJECT", "ABNORMAL_BEHAVIOR",
+    ]
+    description: str | None = None
     occurred_at: AwareDatetime
+    client_report_id: str | None = Field(None, max_length=36)
+    confirm_duplicate: bool = False
 
     @field_validator("occurred_at", mode="before")
     @classmethod
@@ -87,9 +92,10 @@ class WalkIncidentCreate(Coordinates):
     def location_pair_and_description(self):
         if (self.latitude is None) != (self.longitude is None):
             raise ValueError("위도와 경도는 함께 입력해야 합니다.")
-        self.description = self.description.strip()
-        if not self.description:
-            raise ValueError("신고 내용이 필요합니다.")
+        if self.description is not None:
+            self.description = self.description.strip()
+            if not self.description:
+                self.description = None
         return self
 
 
@@ -176,6 +182,8 @@ class WalkIncidentResponse(UTCResponse):
     status: str
     created_at: datetime
     updated_at: datetime
+    client_report_id: str | None = None
+    acknowledged_at: datetime | None = None
 
 
 class PointsReceipt(BaseModel):

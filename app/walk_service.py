@@ -9,6 +9,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload
 
 from app.dependencies import require_shelter_access
@@ -36,6 +37,33 @@ def get_auto_end_after_seconds():
 def is_walk_expired(walk, now):
     last_active = as_utc(walk.last_point_received_at or walk.started_at)
     return (now - last_active).total_seconds() > get_auto_end_after_seconds()
+
+
+INCIDENT_TYPE_LABELS = {
+    "LOST_DOG": "도주",
+    "INJURY": "부상",
+    "POOP_NO_BAG": "똥 쌈(배변봉투 없음)",
+    "ATE_FOREIGN_OBJECT": "이상한 것 주워먹음",
+    "ABNORMAL_BEHAVIOR": "이상행동",
+    "SAFETY_THREAT": "안전 위협",
+    "OTHER": "기타",
+}
+
+
+def get_incident_duplicate_window_seconds():
+    val = os.getenv("INCIDENT_DUPLICATE_WINDOW_SECONDS", "180")
+    try:
+        return int(val)
+    except ValueError:
+        return 180
+
+
+def get_incident_late_report_hours():
+    val = os.getenv("INCIDENT_LATE_REPORT_HOURS", "24")
+    try:
+        return int(val)
+    except ValueError:
+        return 24
 
 
 def start_walk(db, actor, payload):
@@ -144,14 +172,135 @@ def add_marker(db, walk_id, actor, payload):
     return marker
 
 
+def locked_walk_for_incident(db, walk_id, actor, occurred_at):
+    hint = db.query(Walk.walk_request_id, WalkRequest.user_id).join(WalkRequest).filter(Walk.id == walk_id).first()
+    if hint is None:
+        raise HTTPException(404, "Walk not found")
+    action = "CANCEL" if actor.id != hint.user_id else "START"
+    request, _, _ = locked_request(db, hint.walk_request_id, actor, action)
+    walk = lock_row(db, Walk, walk_id)
+    if walk is None:
+        raise HTTPException(404, "Walk not found")
+    if walk.walk_request_id != request.id:
+        raise HTTPException(409, "산책 신청 연결이 변경되었습니다. 다시 조회하세요.")
+
+    now = utc_now()
+    stamp = as_utc(occurred_at)
+    started = as_utc(walk.started_at)
+
+    if walk.status == "IN_PROGRESS":
+        if not (started <= stamp <= now):
+            raise HTTPException(409, "기록 시각은 산책 시작 이후이며 서버 현재 시각 이하여야 합니다.")
+    elif walk.status in ("COMPLETED", "INTERRUPTED"):
+        if walk.ended_at is None:
+            raise HTTPException(409, "종료 시각 정보가 없는 산책입니다.")
+        ended = as_utc(walk.ended_at)
+        late_limit_seconds = get_incident_late_report_hours() * 3600
+        if (now - ended).total_seconds() > late_limit_seconds:
+            raise HTTPException(409, "종료된 산책의 신고 가능 시간이 초과되었습니다.")
+        if not (started <= stamp <= ended):
+            raise HTTPException(409, "종료된 산책의 기록 시각은 산책 시작 이후이며 종료 시각 이하여야 합니다.")
+    else:
+        raise HTTPException(409, "취소되었거나 유효하지 않은 산책 상태입니다.")
+
+    return walk, request, stamp
+
+
+def is_same_incident(existing, walk_id, incident_type, description, lat, lng, occurred_utc):
+    if existing.walk_id != walk_id or existing.incident_type != incident_type:
+        return False
+    if existing.description != description:
+        return False
+    if as_utc(existing.occurred_at) != occurred_utc:
+        return False
+    ex_lat = float(existing.latitude) if existing.latitude is not None else None
+    ex_lng = float(existing.longitude) if existing.longitude is not None else None
+    tgt_lat = float(lat) if lat is not None else None
+    tgt_lng = float(lng) if lng is not None else None
+    if (ex_lat is None) != (tgt_lat is None) or (ex_lng is None) != (tgt_lng is None):
+        return False
+    if ex_lat is not None and abs(ex_lat - tgt_lat) > 1e-5:
+        return False
+    if ex_lng is not None and abs(ex_lng - tgt_lng) > 1e-5:
+        return False
+    return True
+
+
 def report_incident(db, walk_id, actor, payload):
-    walk, _ = locked_walk(db, walk_id, actor, allow_staff=True)
-    data = payload.model_dump()
-    data["occurred_at"] = validate_event_time(walk, payload.occurred_at, utc_now())
-    incident = WalkIncident(walk_id=walk.id, reported_by=actor.id, status="OPEN", **data)
+    occurred_utc = as_utc(payload.occurred_at)
+    desc = payload.description.strip() if payload.description and payload.description.strip() else INCIDENT_TYPE_LABELS.get(payload.incident_type, payload.incident_type)
+
+    if payload.client_report_id:
+        existing = db.query(WalkIncident).filter_by(
+            reported_by=actor.id, client_report_id=payload.client_report_id
+        ).first()
+        if existing:
+            lat = payload.latitude if payload.latitude is not None else existing.latitude
+            lng = payload.longitude if payload.longitude is not None else existing.longitude
+            if is_same_incident(existing, walk_id, payload.incident_type, desc, lat, lng, occurred_utc):
+                return existing, False
+            raise HTTPException(409, "이미 동일한 client_report_id로 다른 내용의 신고가 접수되었습니다.")
+
+    walk, request, occurred_utc = locked_walk_for_incident(db, walk_id, actor, payload.occurred_at)
+
+    if payload.latitude is None and payload.longitude is None:
+        lat, lng = walk.last_latitude, walk.last_longitude
+    else:
+        lat, lng = payload.latitude, payload.longitude
+
+    if payload.client_report_id:
+        existing = db.query(WalkIncident).filter_by(
+            reported_by=actor.id, client_report_id=payload.client_report_id
+        ).first()
+        if existing:
+            if is_same_incident(existing, walk.id, payload.incident_type, desc, lat, lng, occurred_utc):
+                return existing, False
+            raise HTTPException(409, "이미 동일한 client_report_id로 다른 내용의 신고가 접수되었습니다.")
+
+    dup_window = get_incident_duplicate_window_seconds()
+    existing_type_incidents = db.query(WalkIncident).filter(
+        WalkIncident.walk_id == walk.id,
+        WalkIncident.incident_type == payload.incident_type,
+    ).all()
+    for inc in existing_type_incidents:
+        diff_sec = abs((as_utc(inc.occurred_at) - occurred_utc).total_seconds())
+        if diff_sec <= dup_window:
+            if not payload.confirm_duplicate:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "DUPLICATE_RECENT",
+                        "message": f"최근 {dup_window}초 이내에 동일한 유형의 신고가 접수되었습니다.",
+                        "duplicate_incident_id": inc.id,
+                    },
+                )
+
+    incident = WalkIncident(
+        walk_id=walk.id,
+        reported_by=actor.id,
+        incident_type=payload.incident_type,
+        description=desc,
+        latitude=lat,
+        longitude=lng,
+        occurred_at=occurred_utc,
+        status="OPEN",
+        client_report_id=payload.client_report_id,
+    )
     db.add(incident)
-    db.flush()
-    return incident
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        if payload.client_report_id:
+            existing = db.query(WalkIncident).filter_by(
+                reported_by=actor.id, client_report_id=payload.client_report_id
+            ).first()
+            if existing and is_same_incident(existing, walk.id, payload.incident_type, desc, lat, lng, occurred_utc):
+                return existing, False
+            raise HTTPException(409, "이미 동일한 client_report_id로 다른 내용의 신고가 접수되었습니다.")
+        raise
+
+    return incident, True
 
 
 def total_distance(points):
