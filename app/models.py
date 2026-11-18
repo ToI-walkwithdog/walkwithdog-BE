@@ -27,7 +27,7 @@ class User(Base):
     walk_requests = relationship("WalkRequest", foreign_keys="WalkRequest.user_id", back_populates="user", passive_deletes="all")
     reviewed_walk_requests = relationship("WalkRequest", foreign_keys="WalkRequest.reviewed_by", back_populates="reviewer", passive_deletes="all")
     volunteer_profile = relationship("VolunteerProfile", back_populates="user", uselist=False, passive_deletes="all")
-    walk_incidents = relationship("WalkIncident", back_populates="reporter", passive_deletes="all")
+    walk_incidents = relationship("WalkIncident", foreign_keys="WalkIncident.reported_by", back_populates="reporter", passive_deletes="all")
 
 class SessionToken(Base):
     # Legacy schema retained for compatibility; new login tokens use AuthSession.

@@ -1,81 +1,85 @@
-# 인수인계: F-06 산책 중 지도·경로 기록 (SC-07)
+# 인수인계: F-07 위험 상황 신고 (SC-07·SC-15)
 
-- 날짜: 2026-11-16 (KST)
-- 브랜치: `feature/f-06-walk-tracking`
-- 작업 요약: 산책 중 실시간 경로 좌표 저장, 약신호 좌표 저장 허용, 세션 만료 자동 종료 및 앱 비정상 종료 시 진행 중 산책 복원 API 구현.
+- 날짜: 2026-11-18 (KST)
+- 브랜치: `feature/f-07-danger-report`
+- 작업 요약: 산책 중 및 종료 후 위험 상황 신고 접수(7개 유형, 좌표 대체, 3분 중복 판정, 멱등 처리) 및 보호소 알림 폴링/확인/이력 관리 API 구현 및 검증 완료.
 
 ## 1. 변경 파일
-- `migrations/012_f06_walk_tracking.sql`: `walks` 테이블에 마지막 위치(위도, 경도, 정확도, 기록시각, 수신시각) 및 종료 사유(`end_reason`) 컬럼과 제약조건(`ck_walk_last_coordinate_pair`, `ck_walk_last_latitude`, `ck_walk_last_longitude`, `ck_walk_last_accuracy`, `ck_walk_end_reason`) 추가
-- `app/models.py`: `DogWalkDateSlot`의 `Date, Time` 누락 import 보완
-- `app/routers/dogs.py`: F-03 `File, Form, UploadFile, save_dog_image` 누락 import 보완
-- `app/walk_models.py`: `Walk` 모델에 신규 컬럼 6개 및 제약조건 추가
-- `app/walk_record_schemas.py`: `WalkResponse`에 신규 필드 추가 및 `ActiveWalkResponse` 정의
-- `app/walk_service.py`: 정확도 50m 초과 좌표 409 거부 제거 및 저장 허용, `last_*` 위치/수신시각 갱신 로직 추가, 수동/자동 종료 공통 통계 함수(`finalize_walk_statistics`), `close_stale_walks`, `get_active_walk` 구현, 만료 검사 기준 초과(`>`) 조건 적용
-- `app/routers/walks.py`: `GET /walks/active` 복원 라우트 신설 (기존 `/{walk_id}`보다 상단 배치), 수동 종료 시 `end_reason`(`USER`/`STAFF`) 기록
-- `app/main.py`: FastAPI `lifespan` 기반 백그라운드 주기 만료 점검(`periodic_stale_walks_check`) 루프 등록
-- `.env.example`: `AUTO_END_AFTER_SECONDS=3600`, `AUTO_END_CHECK_INTERVAL_SECONDS=300` 추가
-- `tests/test_walk_recording.py`: 51m 정확도 좌표 409 거부 테스트를 200 저장 성공 검증으로 수정 (line 130)
-- `tests/test_f06_walk_tracking.py`: F-06 완료 기준 10개 항목에 대한 단위/통합 테스트 신설
-- `docs/TODO.md`: F-03, F-04, F-05, F-06 작업 목록 통합 및 완료 체크
-- `docs/handoff/LATEST.md`: F-06 구현 및 검증 결과 인수인계 문서 작성
+- `migrations/013_f07_incident_report.sql`: `walk_incidents` 테이블에 `client_report_id`, `acknowledged_at`, `acknowledged_by` 컬럼 추가, 유형 7종 체크 제약(`ck_incident_type`), 확인 쌍 제약(`ck_incident_acknowledgement`), 유니크 부분 인덱스(`uq_walk_incidents_reported_client_report_id`) 및 미확인 조회 부분 인덱스(`ix_walk_incidents_unacknowledged`) 추가
+- `app/models.py`: `User.walk_incidents`에 `foreign_keys="WalkIncident.reported_by"` 관계 명시
+- `app/walk_models.py`: `WalkIncident` 모델에 신규 컬럼 3종, 제약조건, 부분 인덱스 2종 및 `reporter` 관계 반영
+- `app/walk_record_schemas.py`: `WalkIncidentCreate` (7종 유형, 선택 설명, `client_report_id`, `confirm_duplicate`), `WalkIncidentResponse` (`client_report_id`, `acknowledged_at` 추가), `ShelterIncidentDog`, `ShelterIncidentItem` 정의
+- `app/walk_service.py`: `report_incident`, `locked_walk_for_incident` (종료 후 24시간 이내 산책 신고 허용, 3분 이내 동일 유형 중복 감지 및 `confirm_duplicate` 처리, `client_report_id` 동일 내용 200/상이 내용 409 멱등성, 산책 마지막 위치 대체, 한글 라벨 자동 채움)
+- `app/routers/walks.py`: `POST /walks/{walk_id}/incidents` 멱등 반환 시 200 상태코드 지원
+- `app/routers/shelter_incidents.py` (신규):
+  - `GET /shelters/me/incident-alerts`: 미확인 신고 알림 조회 (`after_id` 지원, 보호소 계정 전용, id 오름차순)
+  - `POST /shelters/me/incident-alerts/{incident_id}/ack`: 알림 확인 처리 (멱등 유지, 타 보호소 403)
+  - `GET /shelters/me/incidents`: 보호소 신고 이력 목록 조회 (기간, 유형, 확인여부 필터, 관리자 `shelter_id` 지정)
+- `app/main.py`: `shelters.router`보다 앞에 `shelter_incidents.router` 등록
+- `.env.example`: `INCIDENT_DUPLICATE_WINDOW_SECONDS=180`, `INCIDENT_LATE_REPORT_HOURS=24` 추가
+- `tests/test_f07_incident_report.py` (신규): F-07 완료 기준 12개 검증 테스트 작성
+- `tests/test_walk_recording.py`: 설명 공백 시 422 기대치에서 201 한글 라벨 저장으로 변경된 부분 수정 및 동일 산책 신고 중복 방지 반영
+- `tests/test_walk_domain.py`: 7종 제약조건(`ck_incident_type`) 검증 추가 및 후속 마이그레이션(011~013) DDL/스키마 프로젝션 호환 처리
+- `docs/TODO.md`: F-07 전체 작업 목록 완료 체크
+- `docs/handoff/LATEST.md`: F-07 인수인계 문서 작성
 
 ## 2. 결정 사항
-- 마이그레이션 번호: `migrations/012_f06_walk_tracking.sql`로 지정 (F-04의 010, F-05의 011과 충돌 방지).
-- `scripts/walk_schema.py` 및 `007_walk_domain.schema.json`은 007 과거 검증용 불변 계약이므로 갱신하지 않음.
-- 정확도 50m 초과 좌표는 저장하되, 이동 거리(`total_distance`) 계산 시 신뢰도 필터(`accuracy_m <= 50m`)로 제외 유지.
-- 묶음 내 신규 좌표가 있는 경우에만 `last_point_received_at`을 서버 현재 시각으로 갱신 (중복 좌표만 있는 묶음은 갱신 제외).
-- 만료 기준: `now - coalesce(last_point_received_at, started_at) > AUTO_END_AFTER_SECONDS` (기본 3600초). 표준 1시간 예약 슬롯 경계와 레이스 컨디션을 방지하기 위해 초과(`>`) 조건 사용.
-- 만료 시각이 지난 산책에 좌표 전송 시 409 Conflict ("산책 세션이 만료되었습니다.") 반환.
-- 만료 자동 종료 시 `status='COMPLETED'`, `ended_at=coalesce(last_point_received_at, started_at)`, `end_reason='AUTO_TIMEOUT'`으로 기록하며 통계 계산 및 봉사 이력(`refresh_volunteer_profile`) 갱신 수행.
-- 수동 종료 시 봉사자 직접 종료는 `USER`, 보호소/관리자 안전 중단은 `STAFF`로 `end_reason` 기록.
-- `GET /walks/active`는 봉사자 본인의 진행 중 산책 정보(`walk_id`, 시작시각, 마지막 위치, `last_sequence_no`, 경과 초)를 반환하며, 없는 경우 404 응답. 조회 시점 및 `start_walk` 시점에도 해당 사용자의 만료 산책 자동 정리 수행.
+- 마이그레이션 번호: `migrations/013_f07_incident_report.sql`로 확정.
+- 신고 유형: 기존 4종(`INJURY`, `LOST_DOG`, `SAFETY_THREAT`, `OTHER`)에 3종(`POOP_NO_BAG`, `ATE_FOREIGN_OBJECT`, `ABNORMAL_BEHAVIOR`) 추가(총 7종).
+- 멱등성: `client_report_id`로 동일 요청 재전송 시 200 반환, 상이한 내용 전송 시 409 반환.
+- 중복 윈도우: 동일 산책, 동일 유형에 대해 발생 시각 차이 180초 이내인 경우 `confirm_duplicate=false`이면 `DUPLICATE_RECENT` 409 반환, `true`이면 201 저장.
+- 종료 후 신고: `COMPLETED`, `INTERRUPTED` 산책은 종료 시각으로부터 24시간 이내 및 산책 기간 내 발생 시각인 경우 정상 신고 접수.
+- 좌표 대체: 요청 좌표가 없으면 `walks.last_latitude/longitude` 사용, 없으면 NULL 저장.
+- 보호소 알림 격리: `GET /shelters/me/incident-alerts`는 보호소 계정(`UserRole.SHELTER`) 전용이며, 봉사자 및 관리자는 403 반환. 타 보호소 알림은 보이지 않음.
+- 라우트 충돌 방지: `app/main.py`에서 `shelter_incidents.router`(`/shelters/me/...`)를 `shelters.router`(`/{shelter_id}`)보다 상단에 등록.
 
 ## 3. 실행한 테스트 명령과 결과
 ```powershell
-$env:PYTHONPATH="."
-pytest tests/test_f06_walk_tracking.py tests/test_f05_walk_approval.py tests/test_walk_recording.py tests/test_walk_requests.py -v
+$env:PYTHONPATH="."; pytest tests/test_f07_incident_report.py tests/test_walk_recording.py tests/test_f06_walk_tracking.py tests/test_f05_walk_approval.py tests/test_walk_domain.py -v
 ```
 
 ### 테스트 결과 요약
+- `tests/test_f07_incident_report.py`: 12 passed (100%)
+- `tests/test_walk_recording.py`: 38 passed (100%)
 - `tests/test_f06_walk_tracking.py`: 10 passed (100%)
 - `tests/test_f05_walk_approval.py`: 11 passed (100%)
-- `tests/test_walk_recording.py`: 39 passed (100%)
-- `tests/test_walk_requests.py`: 32 passed (100%)
-- **총합: 92 passed in ~12s (전체 성공)**
+- `tests/test_walk_domain.py`: 22 passed (79 subtests passed) (100%)
+- **총합: 93 passed, 11 warnings, 79 subtests passed in 11.33s (전체 성공)**
 
 ## 4. 완료 기준 대조표
 | 완료 기준 | 테스트 항목 | 결과 |
 |---|---|---|
-| 좌표 묶음 저장 후 순서대로 경로 조회 | `test_path_retrieval_in_order` | 통과 (PASSED) |
-| 시간 공백 후 이어서 전송 시 last_* 정상 갱신 | `test_batch_continuation_with_gap` | 통과 (PASSED) |
-| 50m 초과 좌표 정상 저장 및 거리 계산 제외 | `test_accuracy_over_50m_accepted_and_excluded_from_distance` | 통과 (PASSED) |
-| 추가 좌표 미전송 시 마지막 위치 및 수신시각 보존 | `test_last_position_and_received_at_retained` | 통과 (PASSED) |
-| GET /walks/active 복원 정보 반환 및 다음 순번 전송 성공 | `test_active_walk_restoration_and_next_sequence` | 통과 (PASSED) |
-| 1시간 경과 산책 점검 시 AUTO_TIMEOUT 완료 및 통계 반영 | `test_auto_end_stale_walk_after_1_hour` | 통과 (PASSED) |
-| 1시간 미만 시 미종료 및 좌표 없는 산책 시작시각 기준 만료 | `test_not_expired_under_1_hour_and_no_points_start_basis` | 통과 (PASSED) |
-| 만료 점검 중복 실행 멱등성 (idempotent) | `test_close_stale_walks_idempotency` | 통과 (PASSED) |
-| 자동 종료 산책 좌표 전송 시 409 및 수동/안전중단 사유 기록 | `test_send_points_to_auto_ended_walk_409_and_reasons` | 통과 (PASSED) |
-| 회귀 검증: 예약시간대 시작, 동시 진행 1개 제한, 권한 검사 | `test_regression_guard_rules` | 통과 (PASSED) |
+| 신고 5종 저장, status OPEN, 상세 공백 시 한글 라벨 자동 저장 | `test_report_incident_success_and_default_korean_label` | 통과 (PASSED) |
+| 필수 유형 누락 및 미지원 유형 422 | `test_invalid_incident_type_returns_422` | 통과 (PASSED) |
+| 보호소 알림 조회 (미확인 목록, after_id 지원, 보호소 격리) | `test_shelter_incident_alerts_polling` | 통과 (PASSED) |
+| 타 보호소 알림 격리 및 일반 사용자/관리자 접근 제한 (403) | `test_incident_alerts_authorization` | 통과 (PASSED) |
+| 알림 확인 처리 멱등성 및 이력 보존 | `test_acknowledge_incident_alert_idempotent` | 통과 (PASSED) |
+| 3분 이내 동일 유형 중복 시 409 및 confirm_duplicate 재전송 시 201 | `test_duplicate_incident_window_and_confirmation` | 통과 (PASSED) |
+| client_report_id 멱등 재전송 200 반환 및 상이 내용 409 | `test_client_report_id_idempotency` | 통과 (PASSED) |
+| 종료 24시간 이내 산책 신고 201 및 초과/CANCELLED 409 | `test_late_report_for_ended_walk` | 통과 (PASSED) |
+| 좌표 누락 시 산책 마지막 위치 대체 및 둘 다 없을 시 NULL | `test_fallback_to_walk_last_coordinates` | 통과 (PASSED) |
+| 보호소 신고 이력 필터링 및 관리자 shelter_id 지정 조회 | `test_shelter_incidents_history_filters` | 통과 (PASSED) |
+| 동일 산책 동일 유형 동시 신고 레이스 컨디션 방어 | `test_concurrent_incident_race_condition` | 통과 (PASSED) |
+| 회귀 검증: 산책 권한, GET /walks/{id} incidents 조회, F-06 통과 | `test_regression_rules` | 통과 (PASSED) |
 
 ## 5. 로컬 실행 준비
 1. PostgreSQL 마이그레이션 실행:
    ```bash
-   psql -d <DB_NAME> -f migrations/011_f05_walk_approval.sql
-   psql -d <DB_NAME> -f migrations/012_f06_walk_tracking.sql
+   psql -d <DB_NAME> -f migrations/013_f07_incident_report.sql
    ```
 2. 환경 변수 확인 (`.env`):
    ```env
-   AUTO_END_AFTER_SECONDS=3600
-   AUTO_END_CHECK_INTERVAL_SECONDS=300
+   INCIDENT_DUPLICATE_WINDOW_SECONDS=180
+   INCIDENT_LATE_REPORT_HOURS=24
    ```
 
 ## 6. 확인하지 못한 것
-- **Windows Sandbox 환경 내 TestClient 실행 제약**: Windows 격리 샌드박스 내부에서는 `asyncio` 기반 self-pipe socketpair가 차단되어 `TestClient` 통신이 대기 상태에 머무릅니다. 따라서 테스트 실행은 샌드박스 네트워크 격리가 해제된 PowerShell 환경(`BypassSandbox: true` / 로컬 개발 터미널)에서 검증을 완료하였습니다.
-- **실제 PostgreSQL 통합 테스트(`tests/test_walk_recording_postgres.py`)**: 구동 중인 외부 PostgreSQL 인스턴스 접속 정보(`DATABASE_URL`)가 필요한 테스트로, 현재 로컬 SQLite 인메모리 테스트로 전체 로직을 검증하였으며 실 PostgreSQL 환경에서의 마이그레이션 DDL 실제 실행은 배포 환경 파이프라인에서 확인이 필요합니다.
+- **Windows Sandbox 환경 내 TestClient 실행 제약**: Windows 격리 샌드박스 내부에서는 `asyncio` self-pipe socketpair가 차단되어 `TestClient` 실행 시 블로킹이 발생하므로, 샌드박스 네트워크 격리가 해제된 PowerShell 환경(`BypassSandbox: true` / 로컬 개발 터미널)에서 검증을 완료하였습니다.
+- **실제 PostgreSQL 통합 테스트(`tests/test_walk_recording_postgres.py`)**: 구동 중인 외부 PostgreSQL 인스턴스 접속 정보(`DATABASE_URL`)가 필요한 테스트로, 본 환경에서는 SQLite 인메모리 테스트 93건으로 전체 비즈니스 로직을 검증하였습니다.
 
 ## 7. 다음 할 일 및 주의사항
-- 본 머지 및 충돌 해결 완료 후 `feature/f-06-walk-tracking` 브랜치를 원격에 push하고 `dev` 대상 Pull Request(PR) 생성/확인.
+- 본 기능 구현 완료 후 `feature/f-07-danger-report` 브랜치를 원격에 push하고 `dev` 대상 Pull Request(PR) 생성.
 - 프론트엔드 연동 참고사항:
-  - 산책 진행 중 `POST /walks/{id}/points`를 주기적으로 호출하여 좌표 업로드.
-  - 앱이 꺼지거나 비정상 종료된 경우, 재기동 시 `GET /walks/active`를 호출해 진행 중 산책 여부를 확인하고, 반환된 `last_sequence_no`의 다음 순번(`last_sequence_no + 1`)부터 좌표를 이어 전송.
-  - 만약 409 ("산책 세션이 만료되었습니다.") 에러를 받으면 세션이 타임아웃 종료되었으므로 산책 UI를 종료하고 메인 화면으로 전환.
+  - 위험 상황 신고 요청 시 네트워크 재전송에 대비하여 클라이언트 UUID를 `client_report_id` 필드에 포함하여 전송 권장 (동일 신고 재전송 시 200 반환).
+  - 3분 이내 동일 유형 신고 시 409 (`DUPLICATE_RECENT`) 에러 발생 시, 사용자에게 "최근 동일한 유형의 신고가 접수되었습니다. 추가로 접수하시겠습니까?" 팝업 표시 후 사용자가 확인하면 `confirm_duplicate=true`를 포함하여 재요청.
+  - 보호소 웹/앱 클라이언트는 `GET /shelters/me/incident-alerts?after_id={last_seen_id}`를 폴링하여 신규 미확인 위험 신고를 수신하고, 확인 버튼 클릭 시 `POST /shelters/me/incident-alerts/{id}/ack` 호출.

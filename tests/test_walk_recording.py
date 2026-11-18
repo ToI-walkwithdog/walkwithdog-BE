@@ -231,17 +231,20 @@ class WalkRecordingTests(MotionRecordingAssertions, WalkFixture, unittest.TestCa
     def test_incident_permissions_nullable_location_and_server_open_status(self):
         walk = self.begin()
         self.advance(120)
-        for user in (1, 3, 5):
-            result = self.incident(walk["id"], user)
+        for user, inc_type in ((1, "INJURY"), (3, "LOST_DOG"), (5, "SAFETY_THREAT")):
+            result = self.incident(walk["id"], user, incident_type=inc_type)
             self.assertEqual(result.status_code, 201, result.text)
             self.assertEqual((result.json()["reported_by"], result.json()["status"]), (user, "OPEN"))
             self.assertIsNone(result.json()["latitude"])
         for user in (None, 2, 4, 7):
             self.assertEqual(self.incident(walk["id"], user).status_code, 401 if user is None else 403)
-        for extra in ({"description": " "}, {"latitude": 0}, {"incident_type": "UNKNOWN"},
+        for extra in ({"latitude": 0}, {"incident_type": "UNKNOWN"},
                       {"reported_by": 5}, {"status": "RESOLVED"}, {"occurred_at": "2030-01-07T00:00"}):
             self.assertEqual(self.incident(walk["id"], **extra).status_code, 422)
-        self.assertEqual(self.incident(walk["id"], latitude=0, longitude=0).status_code, 201)
+        blank_desc_resp = self.incident(walk["id"], description=" ", incident_type="POOP_NO_BAG")
+        self.assertEqual(blank_desc_resp.status_code, 201)
+        self.assertEqual(blank_desc_resp.json()["description"], "똥 쌈(배변봉투 없음)")
+        self.assertEqual(self.incident(walk["id"], latitude=0, longitude=0, incident_type="ATE_FOREIGN_OBJECT").status_code, 201)
         self.assertEqual(self.incident(walk["id"], seconds=121).status_code, 409)
 
     def test_staff_can_interrupt_but_not_claim_normal_completion(self):
@@ -273,7 +276,7 @@ class WalkRecordingTests(MotionRecordingAssertions, WalkFixture, unittest.TestCa
         self.upload(walk["id"], [self.point(), self.point(1, 10), self.point(2, 20)])
         for _ in range(3):
             self.marker(walk["id"])
-            self.incident(walk["id"])
+            self.incident(walk["id"], confirm_duplicate=True)
         statements = []
 
         def record(conn, cursor, statement, params, context, executemany):

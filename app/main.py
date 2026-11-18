@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import Base, engine, SessionLocal
 from app.models import Dog
-from app.routers import auth, users, shelters, dogs, surveys, matching, public_api, breed_traits, simulation, personality, chat
+from app.routers import auth, users, shelter_incidents, shelters, dogs, surveys, matching, public_api, breed_traits, simulation, personality, chat
 from app.routers import walk_requests
 from app.routers import walks, walk_maps
 from app.walk_service import close_stale_walks
@@ -57,6 +57,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(shelter_incidents.router)
 app.include_router(shelters.router)
 app.include_router(dogs.router)
 app.include_router(personality.router)
