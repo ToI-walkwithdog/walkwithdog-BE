@@ -193,6 +193,26 @@ class PointsReceipt(BaseModel):
     last_sequence_no: int
 
 
+class ShelterIncidentDog(BaseModel):
+    id: int
+    name: str
+
+
+class ShelterIncidentItem(UTCResponse):
+    id: int
+    walk_id: int
+    incident_type: str
+    description: str
+    dog: ShelterIncidentDog
+    latitude: Decimal | None
+    longitude: Decimal | None
+    occurred_at: datetime
+    created_at: datetime
+    reporter_nickname: str
+    shelter_phone: str | None
+    acknowledged_at: datetime | None
+
+
 class WalkDetailResponse(BaseModel):
     walk: WalkResponse
     user_id: int

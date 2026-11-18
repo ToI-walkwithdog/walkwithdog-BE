@@ -49,5 +49,5 @@
 
 - [x] DB 마이그레이션 (013_f07_incident_report.sql) 및 WalkIncident 모델 확장
 - [x] 신고 접수 스키마 및 서비스 확장 (유형 7종, 멱등, 종료 산책, 위치대체, 3분 중복)
-- [ ] 보호소 알림/확인/이력 API 라우터 구현 (GET/POST /shelters/me/incident-alerts, GET /shelters/me/incidents)
+- [x] 보호소 알림/확인/이력 API 라우터 구현 (GET/POST /shelters/me/incident-alerts, GET /shelters/me/incidents)
 - [ ] 기존 테스트(description 공백) 수정 및 F-07 완료 기준 검증 테스트 작성
