@@ -279,12 +279,29 @@ class WalkIncident(Timestamps, Base):
     __table_args__ = (
         *coordinates(),
         CheckConstraint("(latitude IS NULL) = (longitude IS NULL)", name="ck_incident_coordinate_pair"),
-        choices("incident_type", "INJURY LOST_DOG SAFETY_THREAT OTHER"),
+        choices("incident_type", "INJURY LOST_DOG SAFETY_THREAT OTHER POOP_NO_BAG ATE_FOREIGN_OBJECT ABNORMAL_BEHAVIOR"),
         choices("status", "OPEN IN_REVIEW RESOLVED DISMISSED"),
         CheckConstraint("length(description) > 0", name="ck_incident_description"),
+        CheckConstraint(
+            "(acknowledged_at IS NULL AND acknowledged_by IS NULL) OR (acknowledged_at IS NOT NULL AND acknowledged_by IS NOT NULL)",
+            name="ck_incident_acknowledgement",
+        ),
         Index("ix_walk_incidents_time", "walk_id", "occurred_at"),
         Index("ix_walk_incidents_reporter", "reported_by"),
         Index("ix_walk_incidents_status", "status", "created_at"),
+        Index(
+            "uq_walk_incidents_reported_client_report_id",
+            "reported_by", "client_report_id",
+            unique=True,
+            postgresql_where=text("client_report_id IS NOT NULL"),
+            sqlite_where=text("client_report_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_walk_incidents_unacknowledged",
+            "acknowledged_at",
+            postgresql_where=text("acknowledged_at IS NULL"),
+            sqlite_where=text("acknowledged_at IS NULL"),
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -296,9 +313,12 @@ class WalkIncident(Timestamps, Base):
     longitude = Column(Numeric(9, 6), nullable=True)
     occurred_at = Column(DateTime(timezone=True), nullable=False)
     status = Column(String(20), nullable=False, default="OPEN", server_default="OPEN")
+    client_report_id = Column(String(36), nullable=True)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    acknowledged_by = Column(Integer, reference("users"), nullable=True)
 
     walk = relationship("Walk", back_populates="incidents")
-    reporter = relationship("User", back_populates="walk_incidents")
+    reporter = relationship("User", foreign_keys=[reported_by], back_populates="walk_incidents")
 
 
 WALK_MODELS = (DogWalkSetting, DogWalkSlot, WalkRequest, Walk, WalkPoint,

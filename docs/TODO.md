@@ -43,3 +43,11 @@
 - [x] 진행 중 산책 복원 API (GET /walks/active) 구현
 - [x] 서버 백그라운드 주기 점검 루프 등록 및 .env.example 갱신
 - [x] 기존 테스트(51m 허용) 수정 및 F-06 완료 기준 검증 테스트 작성
+
+
+# F-07 위험 상황 신고 TODO
+
+- [x] DB 마이그레이션 (013_f07_incident_report.sql) 및 WalkIncident 모델 확장
+- [ ] 신고 접수 스키마 및 서비스 확장 (유형 7종, 멱등, 종료 산책, 위치대체, 3분 중복)
+- [ ] 보호소 알림/확인/이력 API 라우터 구현 (GET/POST /shelters/me/incident-alerts, GET /shelters/me/incidents)
+- [ ] 기존 테스트(description 공백) 수정 및 F-07 완료 기준 검증 테스트 작성
