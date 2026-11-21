@@ -12,6 +12,9 @@ from app.database import get_db
 from app.models import AuthSession, User
 
 bearer = HTTPBearer(auto_error=False)
+# Stored for accounts that must never log in (e.g. demo fixtures). It is not a
+# scrypt hash, so verify_password always rejects it.
+UNUSABLE_PASSWORD = "!"
 
 
 def hash_password(password: str) -> str:

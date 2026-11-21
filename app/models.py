@@ -1,6 +1,6 @@
 import enum
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, UniqueConstraint, Boolean, Enum, Date, Time
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, UniqueConstraint, Boolean, Enum, Date, Time, Index
 from sqlalchemy.sql import func
 from app.database import Base
 from sqlalchemy.orm import relationship
@@ -15,9 +15,12 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
+    # Sign-up stores login_id and email lowercased and nickname NFC-trimmed.
+    # Case-insensitive uniqueness comes from the lower() indexes below the class.
+    login_id = Column(String(20), nullable=False)
     email = Column(String(100), unique=True, nullable=False)
-    nickname = Column(String(50), nullable=False)
-    password = Column(String(255), nullable=True)
+    nickname = Column(String(20), nullable=False)
+    password = Column(String(255), nullable=False)
     role = Column(Enum(UserRole), default=UserRole.USER, server_default="USER", nullable=False)
     # Existing accounts remain unassigned until an administrator chooses a shelter.
     shelter_id = Column(Integer, ForeignKey("shelters.id", name="fk_users_shelter_id"), nullable=True, index=True)
@@ -28,6 +31,13 @@ class User(Base):
     reviewed_walk_requests = relationship("WalkRequest", foreign_keys="WalkRequest.reviewed_by", back_populates="reviewer", passive_deletes="all")
     volunteer_profile = relationship("VolunteerProfile", back_populates="user", uselist=False, passive_deletes="all")
     walk_incidents = relationship("WalkIncident", foreign_keys="WalkIncident.reported_by", back_populates="reporter", passive_deletes="all")
+
+
+# app.signup_service maps these names to the conflicting field (migration 014).
+Index("uq_users_login_id_lower", func.lower(User.login_id), unique=True)
+Index("uq_users_nickname_lower", func.lower(User.nickname), unique=True)
+Index("uq_users_email_lower", func.lower(User.email), unique=True)
+
 
 class SessionToken(Base):
     # Legacy schema retained for compatibility; new login tokens use AuthSession.

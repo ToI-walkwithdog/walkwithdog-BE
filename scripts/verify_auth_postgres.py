@@ -42,13 +42,16 @@ def verify(live_ai=False):
                 assert db.query(Dog).count() == original_dogs + 1
                 assert db.query(Dog).filter(Dog.desertion_no == identifier).one().id == original_id
             with TestClient(app) as client:
-                password = secrets.token_urlsafe(24)
+                # Prefix satisfies the sign-up complexity rules; the random part stays secret.
+                password = "Verify1!" + secrets.token_urlsafe(24)
                 accounts = []
                 for _ in range(2):
-                    email = f"auth-verify-{secrets.token_hex(8)}@example.com"
-                    response = client.post("/users/", json={"email": email, "nickname": "[VERIFY]", "password": password})
+                    suffix = secrets.token_hex(6)
+                    email = f"auth-verify-{suffix}@example.com"
+                    response = client.post("/users/", json={"login_id": f"verify_{suffix}", "nickname": f"VERIFY_{suffix}",
+                                                            "email": email, "password": password})
                     assert response.status_code == 200, "registration failed"
-                    accounts.append((email, response.json()["id"]))
+                    accounts.append((email, response.json()["data"]["id"]))
                 response = client.post("/auth/login", json={"email": accounts[0][0], "password": password})
                 assert response.status_code == 200, "login failed"
                 client.headers["Authorization"] = "Bearer " + response.json()["access_token"]

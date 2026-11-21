@@ -3,11 +3,13 @@
 import argparse
 import json
 
-from sqlalchemy import text
+from sqlalchemy import func, or_, text
 
+from app.auth import UNUSABLE_PASSWORD
 from app.models import User, Shelter, Dog
 
 EMAIL = "api-demo@example.invalid"
+LOGIN_ID = "api_demo_seed"
 NICKNAME = "[DEMO] API 시연 사용자"
 SHELTER_KEY = "DEMO-API-SHELTER-V1"
 SHELTER_NAME = "[DEMO] API 시연 보호소"
@@ -26,8 +28,11 @@ def seed(db, apply=False):
         db.execute(text("SELECT pg_advisory_xact_lock(724931001)"))
     user = db.query(User).filter(User.email == EMAIL).first()
     shelter = db.query(Shelter).filter(Shelter.desertion_no == SHELTER_KEY).first()
-    if user and (user.nickname != NICKNAME or user.password is not None):
+    if user and (user.nickname != NICKNAME or user.login_id != LOGIN_ID or user.password != UNUSABLE_PASSWORD):
         raise ValueError("시연 사용자 이메일이 기존 다른 사용자와 충돌합니다.")
+    if user is None and db.query(User).filter(or_(func.lower(User.login_id) == LOGIN_ID,
+                                                  func.lower(User.nickname) == func.lower(NICKNAME))).first():
+        raise ValueError("시연 사용자 아이디 또는 닉네임이 기존 다른 사용자와 충돌합니다.")
     if shelter and shelter.name != SHELTER_NAME:
         raise ValueError("시연 보호소 식별자가 기존 다른 보호소와 충돌합니다.")
     dogs = []
@@ -43,7 +48,8 @@ def seed(db, apply=False):
                "dogs": sum(dog is None for _, _, _, dog in dogs)}
     if apply:
         if user is None:
-            user = User(email=EMAIL, nickname=NICKNAME, password=None)
+            # Never a login account: UNUSABLE_PASSWORD always fails verification.
+            user = User(email=EMAIL, login_id=LOGIN_ID, nickname=NICKNAME, password=UNUSABLE_PASSWORD)
             db.add(user)
         if shelter is None:
             shelter = Shelter(desertion_no=SHELTER_KEY, name=SHELTER_NAME,
