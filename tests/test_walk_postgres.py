@@ -52,7 +52,7 @@ class WalkPostgresTests(unittest.TestCase):
             names = {m.__tablename__ for m in WALK_MODELS}
             Base.metadata.create_all(connection, tables=[t for t in Base.metadata.sorted_tables if t.name not in names])
             connection.execute(text("INSERT INTO shelters(id, name) VALUES (1, '기존 보호소')"))
-            connection.execute(text("INSERT INTO users(id, email, nickname) VALUES (1, 'one@example.com', '봉사자'), (2, 'two@example.com', '담당자')"))
+            connection.execute(text("INSERT INTO users(id, login_id, email, nickname, password) VALUES (1, 'user_one', 'one@example.com', '봉사자', '!'), (2, 'user_two', 'two@example.com', '담당자', '!')"))
             connection.execute(text("INSERT INTO dogs(id, name, shelter_id) VALUES (1, '강아지1', 1), (2, '강아지2', 1)"))
             connection.execute(text("INSERT INTO surveys(id, user_id) VALUES (1, 1)"))
             connection.execute(text("INSERT INTO matching_results(id, user_id, dog_id, survey_id, score, analysis_snapshot) VALUES (1, 1, 1, 1, 80, '{\"preserved\": true}')"))
@@ -188,7 +188,7 @@ class WalkPostgresTests(unittest.TestCase):
 
     def test_booking_range_supports_full_integer_id_domain(self):
         self.apply_sql()
-        self.connection.execute(text("INSERT INTO users(id, email, nickname) VALUES (2147483647, 'max@example.com', '상한 ID')"))
+        self.connection.execute(text("INSERT INTO users(id, login_id, email, nickname, password) VALUES (2147483647, 'user_max', 'max@example.com', '상한 ID', '!')"))
         self.connection.execute(text("INSERT INTO dogs(id, name, shelter_id) VALUES (2147483647, '상한 ID', 1)"))
         self.request(user=2147483647, dog=2147483647)
 

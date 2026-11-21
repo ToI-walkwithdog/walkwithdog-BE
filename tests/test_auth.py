@@ -8,7 +8,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.database import Base, get_db
     from app.models import User, UserRole, Dog, Shelter, Survey, AuthSession, SessionToken, MatchingResult
     from app.routers import auth, users, surveys, matching, simulation, dogs, breed_traits, public_api
-    from app.auth import hash_password, verify_password, token_digest
+    from app.auth import UNUSABLE_PASSWORD, hash_password, verify_password, token_digest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -17,6 +17,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 PASSWORD = "correct horse battery staple"
+# Sign-up enforces complexity; login (Issue #32 scope) does not re-check it.
+SIGNUP_PASSWORD = "Correct-Horse-Battery-9"
 
 
 class AuthTests(unittest.TestCase):
@@ -41,39 +43,42 @@ class AuthTests(unittest.TestCase):
         app.dependency_overrides[dogs.get_db] = test_db
         self.client = TestClient(app)
         with self.Session.begin() as db:
-            db.add_all([User(id=1, email="one@example.com", nickname="one", password=self.password_hash),
-                        User(id=2, email="two@example.com", nickname="two", password=self.password_hash),
-                        User(id=3, email="demo@example.com", nickname="demo"),
-                        User(id=4, email="old@example.com", nickname="old", password=PASSWORD),
+            db.add_all([User(id=1, login_id="user_one", email="one@example.com", nickname="one", password=self.password_hash),
+                        User(id=2, login_id="user_two", email="two@example.com", nickname="two", password=self.password_hash),
+                        User(id=3, login_id="user_demo", email="demo@example.com", nickname="demo", password=UNUSABLE_PASSWORD),
+                        User(id=4, login_id="user_old", email="old@example.com", nickname="old", password=PASSWORD),
                         Dog(id=1, name="테스트", energy_level=3)])
 
     def tearDown(self):
         self.client.close()
         self.engine.dispose()
 
-    def login(self, email="one@example.com"):
-        response = self.client.post("/auth/login", json={"email": email, "password": PASSWORD})
+    def login(self, email="one@example.com", password=PASSWORD):
+        response = self.client.post("/auth/login", json={"email": email, "password": password})
         self.assertEqual(response.status_code, 200, response.text)
         token = response.json()["access_token"]
         self.client.headers["Authorization"] = f"Bearer {token}"
         return token
 
     def test_registration_hashes_password_and_normalizes_email(self):
-        response = self.client.post("/users/", json={"email": "New@Example.com", "nickname": " new ", "password": PASSWORD})
+        response = self.client.post("/users/", json={"login_id": "new_user", "email": "New@Example.com",
+                                                    "nickname": " new ", "password": SIGNUP_PASSWORD})
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertNotIn("password", response.json())
+        self.assertNotIn("password", response.json()["data"])
         with self.Session() as db:
-            user = db.get(User, response.json()["id"])
+            user = db.get(User, response.json()["data"]["id"])
             self.assertEqual(user.email, "new@example.com")
             self.assertEqual(user.nickname, "new")
-            self.assertNotEqual(user.password, PASSWORD)
-            self.assertTrue(verify_password(PASSWORD, user.password))
-        self.login("NEW@example.com")
+            self.assertNotEqual(user.password, SIGNUP_PASSWORD)
+            self.assertTrue(verify_password(SIGNUP_PASSWORD, user.password))
+        self.login("NEW@example.com", SIGNUP_PASSWORD)
 
     def test_duplicate_email_and_invalid_registration(self):
-        self.assertEqual(self.client.post("/users/", json={"email": "ONE@example.com", "nickname": "n", "password": PASSWORD}).status_code, 409)
+        body = {"login_id": "new_user", "email": "new@example.com", "nickname": "new", "password": SIGNUP_PASSWORD}
+        response = self.client.post("/users/", json={**body, "email": "ONE@example.com"})
+        self.assertEqual((response.status_code, response.json()["code"]), (409, "EMAIL_ALREADY_EXISTS"))
         for changes in ({"password": "short"}, {"email": "invalid"}, {"nickname": " "}):
-            self.assertEqual(self.client.post("/users/", json={"email": "new@example.com", "nickname": "n", "password": PASSWORD, **changes}).status_code, 422)
+            self.assertEqual(self.client.post("/users/", json={**body, **changes}).status_code, 422)
 
     def test_login_and_only_hashed_token_is_persisted(self):
         token = self.login()
@@ -90,7 +95,7 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(response.status_code, 401)
         with self.Session() as db:
             self.assertEqual(db.get(User, 4).password, PASSWORD)
-            self.assertIsNone(db.get(User, 3).password)
+            self.assertEqual(db.get(User, 3).password, UNUSABLE_PASSWORD)
 
     def test_missing_and_invalid_tokens(self):
         self.assertEqual(self.client.get("/surveys/options").status_code, 200)
@@ -168,12 +173,12 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.client.get("/users/me").status_code, 401)
 
     def test_role_defaults_cannot_be_selected_during_registration(self):
-        response = self.client.post("/users/", json={"email": "role@example.com", "nickname": "role",
-                                                    "password": PASSWORD, "role": "admin"})
+        response = self.client.post("/users/", json={"login_id": "role_user", "email": "role@example.com", "nickname": "role",
+                                                    "password": SIGNUP_PASSWORD, "role": "admin"})
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["role"], "user")
+        self.assertEqual(response.json()["data"]["role"], "user")
         with self.Session() as db:
-            self.assertEqual(db.get(User, response.json()["id"]).role, UserRole.USER)
+            self.assertEqual(db.get(User, response.json()["data"]["id"]).role, UserRole.USER)
 
     def test_one_session_authenticates_personal_and_role_protected_routes(self):
         with self.Session.begin() as db:

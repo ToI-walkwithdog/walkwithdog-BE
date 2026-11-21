@@ -51,3 +51,18 @@
 - [x] 신고 접수 스키마 및 서비스 확장 (유형 7종, 멱등, 종료 산책, 위치대체, 3분 중복)
 - [x] 보호소 알림/확인/이력 API 라우터 구현 (GET/POST /shelters/me/incident-alerts, GET /shelters/me/incidents)
 - [x] 기존 테스트(description 공백) 수정 및 F-07 완료 기준 검증 테스트 작성
+
+
+# 온보딩 회원가입 TODO (Issue #30)
+
+- [x] `users.login_id` 추가, `nickname` 20자, `password` NOT NULL, `lower()` 고유 인덱스 3종 (모델, `migrations/014_onboarding_signup.sql`)
+- [x] 가입과 중복 확인이 공유하는 정규화 및 검증 함수 (`app/account_rules.py`)
+- [x] `POST /users/` 새 계약 (`code`, `data`, `message`), 필드별 422와 409, 500
+- [x] `GET /users/nickname-availability`, `GET /users/id-availability` (`/{user_id}` 앞 등록, 인증 불필요)
+- [x] 동시 가입 UNIQUE 위반의 필드 판별과 롤백 (`app/signup_service.py`)
+- [x] 기존 fixture, 데모 시드, 인증 검증 스크립트를 NOT NULL 컬럼에 맞춤
+- [x] SQLite 테스트 (`tests/test_signup.py`)
+- [ ] 격리 PostgreSQL 테스트 실행 (`tests/test_signup_postgres.py` 작성 완료, 미실행)
+- [ ] 429 실제 요청 제한 (수치 미확정, 응답 계약만 정의)
+- [ ] 기존 사용자가 있는 개발 DB의 014 적용 방안 결정 (현재 014는 빈 `users`에서만 적용)
+- [ ] 오류 메시지 문구를 Notion 원문과 대조

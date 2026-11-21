@@ -4,7 +4,7 @@ import os
 from unittest.mock import patch
 
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
-    from app.auth import token_digest
+    from app.auth import UNUSABLE_PASSWORD, token_digest
     from app.database import Base, get_db
     from app.models import (
         AuthSession, Dog, DogWalkSetting, DogWalkSlot, Shelter, User, UserRole,
@@ -50,8 +50,8 @@ class RequestFixture:
                 (3, UserRole.SHELTER, 1), (4, UserRole.SHELTER, 2),
                 (5, UserRole.ADMIN, None), (6, UserRole.USER, None), (7, UserRole.SHELTER, None),
             ):
-                db.add(User(id=identifier, email=f"req-{identifier}@example.com", nickname=f"사용자{identifier}",
-                            role=role, shelter_id=shelter_id))
+                db.add(User(id=identifier, login_id=f"req_user_{identifier}", email=f"req-{identifier}@example.com",
+                            nickname=f"사용자{identifier}", password=UNUSABLE_PASSWORD, role=role, shelter_id=shelter_id))
             for identifier in range(1, 10):
                 db.add(Dog(id=identifier, name=f"강아지{identifier}",
                            shelter_id=None if identifier == 4 else (2 if identifier == 3 else 1), energy_level=2))
