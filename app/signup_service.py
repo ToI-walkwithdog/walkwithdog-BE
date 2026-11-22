@@ -10,7 +10,7 @@ from app.models import User, UserRole
 DUPLICATE_ERRORS = {
     "login_id": ("LOGIN_ID_ALREADY_EXISTS", "이미 사용 중인 아이디입니다."),
     "nickname": ("NICKNAME_ALREADY_EXISTS", "이미 사용 중인 닉네임입니다."),
-    "email": ("EMAIL_ALREADY_EXISTS", "이미 가입된 이메일입니다."),
+    "email": ("EMAIL_ALREADY_EXISTS", "이미 사용 중인 이메일입니다."),
 }
 # Index and constraint names from app.models and migration 014. users_email_key is
 # the pre-existing column constraint that PostgreSQL created for email.

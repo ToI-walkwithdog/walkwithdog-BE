@@ -1,15 +1,28 @@
 """Sign-up uniqueness, concurrency and migration 014 on real PostgreSQL.
 
 SIGNUP_TEST_DATABASE_URL must name an EMPTY local toi_walk_test_* database.
-Each test works in its own new schema; no existing DB is read or changed.
+Each test works in its own new su_<uuid> schema and drops only that schema
+afterwards, so the same test DB can be reused; no other schema is touched.
 """
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import re
 from threading import Barrier, Event
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
+
+# app.database builds its engine from DATABASE_URL at import time. Pin it to an
+# in-memory SQLite URL so this file imports on its own, never touches the dev DB
+# named in DATABASE_URL or .env, and does not depend on another test importing app
+# first. Every test overrides get_db with SIGNUP_TEST_DATABASE_URL.
+with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
+    from app import signup_service
+    from app.auth import UNUSABLE_PASSWORD
+    from app.database import Base, get_db
+    from app.models import User
+    from app.routers import users
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -17,14 +30,10 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from app import signup_service
-from app.auth import UNUSABLE_PASSWORD
-from app.database import Base, get_db
-from app.models import User
-from app.routers import users
 from scripts.prepare_demo_db import PreparationError, validate_local_engine
 
 TEST_URL = os.getenv("SIGNUP_TEST_DATABASE_URL")
+SCHEMA_NAME = re.compile(r"su_[0-9a-f]{32}")
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (ROOT / "migrations" / "014_onboarding_signup.sql").read_text(encoding="utf-8")
 PASSWORD = "WalkTogether2026!"
@@ -47,17 +56,48 @@ class SignupPostgresTests(unittest.TestCase):
                       if s not in ("public", "information_schema") and not s.startswith("pg_")]
             if inspector.get_table_names() or custom:
                 raise PreparationError("새로운 빈 테스트 DB만 허용합니다.")
+        cls.created_schemas = set()
 
     @classmethod
     def tearDownClass(cls):
-        cls.admin.dispose()
+        try:
+            with cls.admin.connect() as connection:
+                left = sorted(set(inspect(connection).get_schema_names()) & cls.created_schemas)
+            if left:
+                raise PreparationError(f"정리되지 않은 테스트 스키마: {', '.join(left)}")
+        finally:
+            cls.admin.dispose()
 
     def setUp(self):
         self.schema = "su_" + uuid4().hex
         with self.admin.begin() as connection:
             connection.exec_driver_sql(f'CREATE SCHEMA "{self.schema}"')
+        self.created_schemas.add(self.schema)
+        # Cleanups run last-in first-out: client and engine close before the drop.
+        self.addCleanup(self.drop_own_schema, self.schema)
         self.engine = create_engine(TEST_URL, connect_args={"options": f"-csearch_path={self.schema}"})
         self.addCleanup(self.engine.dispose)
+
+    def drop_own_schema(self, schema):
+        """Drop only a schema this run created, owned by the test role, in the test DB.
+
+        Runs on success and failure (addCleanup). Any check that fails leaves the schema
+        in place and raises, so the test reports the leftover instead of guessing.
+        """
+        if (schema not in self.created_schemas or SCHEMA_NAME.fullmatch(schema) is None
+                or not self.admin.url.database.startswith("toi_walk_test_")):
+            raise PreparationError(f"이 실행이 만든 테스트 스키마가 아니므로 삭제하지 않습니다: {schema}")
+        with self.admin.begin() as connection:
+            connection.exec_driver_sql("SET LOCAL lock_timeout = '5s'")
+            owned = connection.execute(text(
+                "SELECT n.nspowner = r.oid FROM pg_namespace n, pg_roles r"
+                " WHERE n.nspname = :schema AND r.rolname = current_user"), {"schema": schema}).scalar_one_or_none()
+            if owned is not True:
+                raise PreparationError(f"현재 테스트 계정 소유 스키마가 아니므로 삭제하지 않습니다: {schema}")
+            # CASCADE removes only objects inside this schema; the DB was verified empty
+            # in setUpClass, so nothing outside it can depend on them.
+            connection.exec_driver_sql(f'DROP SCHEMA "{schema}" CASCADE')
+        self.created_schemas.discard(schema)
 
     def start_api(self):
         Base.metadata.create_all(self.engine)
@@ -70,6 +110,9 @@ class SignupPostgresTests(unittest.TestCase):
                 yield db
 
         app.dependency_overrides[get_db] = test_db
+        # Concurrency tests send more sign-ups than the per-IP limit; limits are tested separately.
+        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER):
+            app.dependency_overrides[limiter] = lambda: None
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
 

@@ -24,24 +24,30 @@ from sqlalchemy.schema import CreateIndex
 ROOT = Path(__file__).resolve().parents[1]
 PASSWORD = "WalkTogether2026!"
 VALID = {"login_id": "walker04", "nickname": "산책왕", "email": "walker@example.com", "password": PASSWORD}
-REQUIRED = ("REQUIRED_FIELD", "필수 입력값을 입력해주세요.")
+# Messages are copied from the Notion API spec, not imported from app code, so a
+# changed string in the app fails here instead of silently updating the expectation.
+REQUIRED = ("REQUIRED_FIELD", "필수 입력 항목을 확인해 주세요.")
 MESSAGES = {
-    "INVALID_LOGIN_ID_LENGTH": "아이디는 4자 이상 20자 이하로 입력해주세요.",
-    "INVALID_LOGIN_ID_FORMAT": "아이디는 영문 소문자, 숫자, 밑줄(_)만 사용할 수 있습니다.",
-    "INVALID_NICKNAME_LENGTH": "닉네임은 3자 이상 20자 이하로 입력해주세요.",
-    "INVALID_NICKNAME_FORMAT": "닉네임은 한글, 영문, 숫자, 밑줄(_)만 사용할 수 있습니다.",
-    "INVALID_EMAIL": "올바른 이메일 주소를 입력해주세요.",
-    "INVALID_PASSWORD_LENGTH": "비밀번호는 15자 이상 128자 이하로 입력해주세요.",
-    "PASSWORD_UPPERCASE_REQUIRED": "비밀번호에 영문 대문자를 1개 이상 포함해주세요.",
-    "PASSWORD_LOWERCASE_REQUIRED": "비밀번호에 영문 소문자를 1개 이상 포함해주세요.",
-    "PASSWORD_NUMBER_REQUIRED": "비밀번호에 숫자를 1개 이상 포함해주세요.",
-    "PASSWORD_SPECIAL_REQUIRED": "비밀번호에 특수문자를 1개 이상 포함해주세요.",
+    "INVALID_LOGIN_ID_LENGTH": "아이디는 4~20자로 입력해 주세요.",
+    # Sign-up wording; GET /users/id-availability uses AVAILABILITY_LOGIN_ID_FORMAT.
+    "INVALID_LOGIN_ID_FORMAT": "아이디에는 영문 소문자, 숫자, 밑줄만 사용할 수 있습니다.",
+    "INVALID_NICKNAME_LENGTH": "닉네임은 3~20자로 입력해 주세요.",
+    "INVALID_NICKNAME_FORMAT": "닉네임에 사용할 수 없는 문자가 포함되어 있습니다.",
+    "INVALID_EMAIL": "올바른 이메일을 입력해 주세요.",
+    "INVALID_PASSWORD_LENGTH": "비밀번호는 15~128자로 입력해 주세요.",
+    "PASSWORD_UPPERCASE_REQUIRED": "비밀번호에 영문 대문자를 1개 이상 포함해 주세요.",
+    "PASSWORD_LOWERCASE_REQUIRED": "비밀번호에 영문 소문자를 1개 이상 포함해 주세요.",
+    "PASSWORD_NUMBER_REQUIRED": "비밀번호에 숫자를 1개 이상 포함해 주세요.",
+    "PASSWORD_SPECIAL_REQUIRED": "비밀번호에 특수문자를 1개 이상 포함해 주세요.",
     "LOGIN_ID_ALREADY_EXISTS": "이미 사용 중인 아이디입니다.",
     "NICKNAME_ALREADY_EXISTS": "이미 사용 중인 닉네임입니다.",
-    "EMAIL_ALREADY_EXISTS": "이미 가입된 이메일입니다.",
-    "LOGIN_ID_REQUIRED": "아이디를 입력해주세요.",
-    "NICKNAME_REQUIRED": "닉네임을 입력해주세요.",
+    "EMAIL_ALREADY_EXISTS": "이미 사용 중인 이메일입니다.",
+    "LOGIN_ID_REQUIRED": "아이디를 입력해 주세요.",
+    "NICKNAME_REQUIRED": "닉네임을 입력해 주세요.",
 }
+AVAILABILITY_LOGIN_ID_FORMAT = "아이디에 사용할 수 없는 문자가 포함되어 있습니다."
+INTERNAL_SERVER_ERROR = "일시적인 오류가 발생했습니다."
+TOO_MANY_REQUESTS = "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."
 LOGIN_ID_LENGTH = {"field": "login_id", "min_length": 4, "max_length": 20}
 NICKNAME_LENGTH = {"field": "nickname", "min_length": 3, "max_length": 20}
 PASSWORD_LENGTH = {"field": "password", "min_length": 15, "max_length": 128}
@@ -61,6 +67,9 @@ class SignupTests(unittest.TestCase):
                 yield db
 
         app.dependency_overrides[get_db] = test_db
+        # These tests send many requests per test on purpose; limits are covered in test_rate_limit.py.
+        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER):
+            app.dependency_overrides[limiter] = lambda: None
         self.client = TestClient(app)
 
     def tearDown(self):
@@ -249,8 +258,7 @@ class SignupTests(unittest.TestCase):
                 patch("app.signup_service.first_taken_field", return_value=None), \
                 self.assertLogs("app.api_contract", "ERROR") as logs:
             response = self.signup()
-        self.assert_contract(response, 500, "INTERNAL_SERVER_ERROR", {},
-                             "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+        self.assert_contract(response, 500, "INTERNAL_SERVER_ERROR", {}, INTERNAL_SERVER_ERROR)
         output = response.text + "".join(logs.output)
         self.assertNotIn("scrypt$", output)
         self.assertNotIn(PASSWORD, output)
@@ -261,10 +269,18 @@ class SignupTests(unittest.TestCase):
         with patch("app.signup_service.hash_password", side_effect=RuntimeError(f"boom {PASSWORD}")), \
                 self.assertLogs("app.api_contract", "ERROR") as logs:
             response = self.signup()
-        self.assert_contract(response, 500, "INTERNAL_SERVER_ERROR", {},
-                             "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+        self.assert_contract(response, 500, "INTERNAL_SERVER_ERROR", {}, INTERNAL_SERVER_ERROR)
         self.assertNotIn(PASSWORD, response.text + "".join(logs.output))
         self.assertEqual(self.user_count(), 0)
+
+    def test_unexpected_availability_failure_is_500_contract(self):
+        for path, params in (("/users/id-availability", {"login_id": "walker04"}),
+                             ("/users/nickname-availability", {"nickname": "산책왕"})):
+            with self.subTest(path=path), patch("app.routers.users.is_taken", side_effect=RuntimeError("db down")), \
+                    self.assertLogs("app.api_contract", "ERROR") as logs:
+                response = self.client.get(path, params=params)
+            self.assert_contract(response, 500, "INTERNAL_SERVER_ERROR", {}, INTERNAL_SERVER_ERROR)
+            self.assertNotIn("db down", response.text + "".join(logs.output))
 
     # Availability checks
 
@@ -292,15 +308,31 @@ class SignupTests(unittest.TestCase):
             ("/users/id-availability", {}, "LOGIN_ID_REQUIRED", {"field": "login_id"}),
             ("/users/id-availability", {"login_id": "  "}, "LOGIN_ID_REQUIRED", {"field": "login_id"}),
             ("/users/id-availability", {"login_id": "abc"}, "INVALID_LOGIN_ID_LENGTH", LOGIN_ID_LENGTH),
-            ("/users/id-availability", {"login_id": "walker-04"}, "INVALID_LOGIN_ID_FORMAT", {"field": "login_id"}),
+            ("/users/id-availability", {"login_id": "walker-04"}, "INVALID_LOGIN_ID_FORMAT", {"field": "login_id"},
+             AVAILABILITY_LOGIN_ID_FORMAT),
             ("/users/nickname-availability", {}, "NICKNAME_REQUIRED", {"field": "nickname"}),
             ("/users/nickname-availability", {"nickname": ""}, "NICKNAME_REQUIRED", {"field": "nickname"}),
             ("/users/nickname-availability", {"nickname": "ab"}, "INVALID_NICKNAME_LENGTH", NICKNAME_LENGTH),
             ("/users/nickname-availability", {"nickname": "산책 왕"}, "INVALID_NICKNAME_FORMAT", {"field": "nickname"}),
         )
-        for path, params, code, data in cases:
+        for path, params, code, data, *message in cases:
             with self.subTest(path=path, params=params):
-                self.assert_contract(self.client.get(path, params=params), 422, code, data)
+                self.assert_contract(self.client.get(path, params=params), 422, code, data, *message)
+
+    def test_login_id_format_error_wording_depends_on_the_api_but_the_rule_does_not(self):
+        # One validator, two messages: same inputs fail with the same code and data on both APIs.
+        # "K" is the Kelvin sign, which must not fold into an ASCII "k".
+        for value in ("walker-04", "walker 04", "walker.04", "산책아이디", "walker!", "Kelvin1"):
+            with self.subTest(value=value):
+                self.assert_contract(self.signup(login_id=value), 422, "INVALID_LOGIN_ID_FORMAT",
+                                     {"field": "login_id"}, MESSAGES["INVALID_LOGIN_ID_FORMAT"])
+                self.assert_contract(self.client.get("/users/id-availability", params={"login_id": value}), 422,
+                                     "INVALID_LOGIN_ID_FORMAT", {"field": "login_id"}, AVAILABILITY_LOGIN_ID_FORMAT)
+        self.assertNotEqual(MESSAGES["INVALID_LOGIN_ID_FORMAT"], AVAILABILITY_LOGIN_ID_FORMAT)
+        # Length is checked before format and keeps one message on both APIs.
+        for response in (self.signup(login_id="a-b"), self.client.get("/users/id-availability", params={"login_id": "a-b"})):
+            self.assert_contract(response, 422, "INVALID_LOGIN_ID_LENGTH", LOGIN_ID_LENGTH)
+        self.assertEqual(self.user_count(), 0)
 
     def test_availability_does_not_reserve_and_signup_rechecks(self):
         params = {"login_id": "walker04"}
@@ -373,7 +405,7 @@ class SignupTests(unittest.TestCase):
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.headers["Retry-After"], "30")
         self.assertEqual(response.body, '{"code":"TOO_MANY_REQUESTS","data":{"retry_after_seconds":30},'
-                                        '"message":"요청이 너무 많습니다. 잠시 후 다시 시도해주세요."}'.encode())
+                                        f'"message":"{TOO_MANY_REQUESTS}"}}'.encode())
 
     def test_openapi_documents_the_contract(self):
         app = FastAPI()

@@ -33,6 +33,10 @@ class ShelterPermissionTests(unittest.TestCase):
 
         for dependency in (get_db, dogs.get_db, shelters.get_db):
             app.dependency_overrides[dependency] = test_db
+        # The real per-IP limiters stay on; reset so counts never carry over between tests.
+        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER):
+            limiter.reset()
+            self.addCleanup(limiter.reset)
         self.client = TestClient(app)
         with self.Session.begin() as db:
             db.add_all([Shelter(id=1, name="첫 보호소"), Shelter(id=2, name="다른 보호소")])

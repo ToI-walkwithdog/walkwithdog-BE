@@ -14,8 +14,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
 
-INTERNAL_SERVER_ERROR_MESSAGE = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
-REQUIRED_FIELD_MESSAGE = "필수 입력값을 입력해주세요."
+INTERNAL_SERVER_ERROR_MESSAGE = "일시적인 오류가 발생했습니다."
+REQUIRED_FIELD_MESSAGE = "필수 입력 항목을 확인해 주세요."
 
 
 class ContractErrorResponse(BaseModel):
@@ -49,8 +49,8 @@ def ok(data: dict, message: str) -> JSONResponse:
 
 
 def too_many_requests(retry_after_seconds: int) -> ContractError:
-    """429 contract only. No limiter calls this until the limit policy is decided."""
-    return ContractError(429, "TOO_MANY_REQUESTS", "요청이 너무 많습니다. 잠시 후 다시 시도해주세요.",
+    """429 contract; app.rate_limit passes the real seconds until the next allowed request."""
+    return ContractError(429, "TOO_MANY_REQUESTS", "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.",
                          {"retry_after_seconds": retry_after_seconds},
                          headers={"Retry-After": str(retry_after_seconds)})
 
