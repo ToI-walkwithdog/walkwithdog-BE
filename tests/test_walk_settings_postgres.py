@@ -6,7 +6,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
-    from app.auth import token_digest
+    from app.auth import UNUSABLE_PASSWORD, token_digest
     from app.database import Base, get_db
     from app.dog_walk_settings import apply_walk_settings
     from app.models import AuthSession, Dog, DogWalkSetting, DogWalkSlot, Shelter, User, UserRole
@@ -60,7 +60,7 @@ class WalkSettingsPostgresTests(unittest.TestCase):
             db.add_all([own, other])
             db.flush()
             self.shelter_id, self.other_shelter_id = own.id, other.id
-            staff = User(email=f"{token}@example.com", nickname="담당", role=UserRole.SHELTER, shelter_id=own.id)
+            staff = User(email=f"{token}@example.com", login_id=f"staff_{token[:12]}", nickname=f"담당_{token[:8]}", password=UNUSABLE_PASSWORD, role=UserRole.SHELTER, shelter_id=own.id)
             db.add(staff)
             dog = Dog(name="테스트 강아지", shelter_id=own.id, energy_level=2)
             db.add(dog)

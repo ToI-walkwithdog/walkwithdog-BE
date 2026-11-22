@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
-    from app.auth import token_digest
+    from app.auth import UNUSABLE_PASSWORD, token_digest
     from app.database import Base, get_db
     from app.models import (
         AuthSession, Dog, DogWalkSetting, DogWalkSlot, MatchingResult, Shelter,
@@ -57,11 +57,11 @@ class WalkSettingsAPITests(unittest.TestCase):
                         Shelter(id=2, name="다른 보호소"), Shelter(id=3, name="빈 보호소")])
             db.flush()
             db.add_all([
-                User(id=1, email="user@example.com", nickname="일반"),
-                User(id=2, email="first@example.com", nickname="담당1", role=UserRole.SHELTER, shelter_id=1),
-                User(id=3, email="second@example.com", nickname="담당2", role=UserRole.SHELTER, shelter_id=2),
-                User(id=4, email="unset@example.com", nickname="소속 없음", role=UserRole.SHELTER),
-                User(id=5, email="admin@example.com", nickname="관리자", role=UserRole.ADMIN),
+                User(id=1, login_id="user_1", email="user@example.com", nickname="일반", password=UNUSABLE_PASSWORD),
+                User(id=2, login_id="staff_1", email="first@example.com", nickname="담당1", password=UNUSABLE_PASSWORD, role=UserRole.SHELTER, shelter_id=1),
+                User(id=3, login_id="staff_2", email="second@example.com", nickname="담당2", password=UNUSABLE_PASSWORD, role=UserRole.SHELTER, shelter_id=2),
+                User(id=4, login_id="staff_unset", email="unset@example.com", nickname="소속 없음", password=UNUSABLE_PASSWORD, role=UserRole.SHELTER),
+                User(id=5, login_id="admin_1", email="admin@example.com", nickname="관리자", password=UNUSABLE_PASSWORD, role=UserRole.ADMIN),
                 Dog(id=1, name="미설정", shelter_id=1, desertion_no="448567202600718", energy_level=2, description="기존 설명"),
                 Dog(id=2, name="타 보호소", shelter_id=2, energy_level=4),
                 Dog(id=3, name="미배정"), Dog(id=4, name="산책 가능", shelter_id=1),

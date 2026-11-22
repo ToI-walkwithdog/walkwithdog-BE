@@ -1,5 +1,7 @@
 from pydantic import AliasChoices, BaseModel, Field, field_validator, EmailStr
-from typing import Optional
+from typing import Literal, Optional
+from app.account_rules import normalize_email, normalize_login_id, normalize_nickname, validate_password
+from app.api_contract import as_field_error
 from app.models import UserRole
 from app.walk_schemas import WalkSettingsResponse
 from app.survey_codes import (
@@ -8,18 +10,60 @@ from app.survey_codes import (
 )
 
 
-class UserCreate(BaseModel):
-    email: EmailStr = Field(max_length=100)
-    nickname: str = Field(min_length=1, max_length=50)
-    password: str = Field(min_length=15, max_length=128)
+class SignupRequest(BaseModel):
+    """Account fields only. The privacy consent object is added with Issue #31."""
+    login_id: str = Field(description="영문 소문자, 숫자, 밑줄(_) 4~20자. 앞뒤 공백 제거 후 소문자로 저장",
+                          examples=["walker04"])
+    nickname: str = Field(description="한글, 영문, 숫자, 밑줄(_) 3~20자. 앞뒤 공백 제거, NFC 정규화",
+                          examples=["산책왕"])
+    email: str = Field(description="이메일 형식, 최대 100자. 소문자로 저장", examples=["walker@example.com"])
+    password: str = Field(description="15~128자, 영문 대문자, 소문자, 숫자, 특수문자 각 1개 이상. 변형 없이 해시",
+                          examples=["WalkTogether2026!"])
 
-    @field_validator("nickname")
+    @field_validator("login_id", mode="before")
     @classmethod
-    def nonempty_nickname(cls, value):
-        value = value.strip()
-        if not value:
-            raise ValueError("닉네임이 필요합니다.")
-        return value
+    def check_login_id(cls, value):
+        return as_field_error(normalize_login_id, value)
+
+    @field_validator("nickname", mode="before")
+    @classmethod
+    def check_nickname(cls, value):
+        return as_field_error(normalize_nickname, value)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def check_email(cls, value):
+        return as_field_error(normalize_email, value)
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def check_password(cls, value):
+        return as_field_error(validate_password, value)
+
+
+class SignupUserData(BaseModel):
+    id: int
+    login_id: str
+    nickname: str
+    email: str
+    role: UserRole
+    shelter_id: int | None = None
+
+
+class SignupResponse(BaseModel):
+    code: Literal["OK"] = "OK"
+    data: SignupUserData
+    message: str
+
+
+class AvailabilityData(BaseModel):
+    available: bool
+
+
+class AvailabilityResponse(BaseModel):
+    code: Literal["OK"] = "OK"
+    data: AvailabilityData
+    message: str
 
 
 class LoginRequest(BaseModel):

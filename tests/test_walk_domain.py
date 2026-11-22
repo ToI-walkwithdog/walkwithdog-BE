@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
+    from app.auth import UNUSABLE_PASSWORD
     from app.models import Base, Dog, Shelter, User
     from app.walk_models import (
         WALK_MODELS, DogWalkSetting, DogWalkSlot, DogTraitSummary, VolunteerProfile,
@@ -159,7 +160,7 @@ class WalkConstraintTests(unittest.TestCase):
         self.addCleanup(self.engine.dispose)
         self.db = sessionmaker(bind=self.engine)()
         self.addCleanup(self.db.close)
-        self.db.add_all([User(id=1, email="walk@example.com", nickname="봉사자"), Shelter(id=1, name="보호소")])
+        self.db.add_all([User(id=1, login_id="walk_user", email="walk@example.com", nickname="봉사자", password=UNUSABLE_PASSWORD), Shelter(id=1, name="보호소")])
         self.db.flush()
         self.db.add(Dog(id=1, name="강아지", shelter_id=1))
         self.db.flush()
