@@ -51,3 +51,16 @@
 - [x] 신고 접수 스키마 및 서비스 확장 (유형 7종, 멱등, 종료 산책, 위치대체, 3분 중복)
 - [x] 보호소 알림/확인/이력 API 라우터 구현 (GET/POST /shelters/me/incident-alerts, GET /shelters/me/incidents)
 - [x] 기존 테스트(description 공백) 수정 및 F-07 완료 기준 검증 테스트 작성
+
+# F-08 실시간 산책 확인 TODO
+
+- [x] DB 마이그레이션 (014_f08_live_walk.sql) 및 User 모델 phone 컬럼 추가
+- [x] 응답 스키마 (app/walk_live_schemas.py) 정의 (카드, 상세, 증분, 마커, 경로)
+- [x] 실시간 산책 서비스 (app/walk_live_service.py) 구현 (목록 조회, 상세, 증분, stale 판정, 마커 조립)
+- [x] 보호소 실시간 산책 라우터 (app/routers/shelter_live_walks.py) 구현 (3개 엔드포인트)
+- [x] app/main.py 라우터 등록 순서 (shelters.router 앞) 및 라우트 충돌 방지
+- [x] .env.example에 LIVE_WALK_STALE_SECONDS=60 추가
+- [x] 권한 제어 (보호소 격리, 봉사자 403, 타 보호소 403, 관리자 shelter_id 파라미터 지원)
+- [x] 보안 규칙 준수 (산책자 전화번호는 IN_PROGRESS 상세에만 노출, 목록/증분 제외)
+- [x] F-08 완료 기준 검증 테스트 작성 (tests/test_f08_live_walk.py 8건 통과)
+- [x] F-05~F-07 및 도메인 회귀 테스트 통과 (총 101건 통과)
