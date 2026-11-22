@@ -214,7 +214,8 @@ class WalkReview(Timestamps, Base):
     __table_args__ = (
         UniqueConstraint("walk_id", name="uq_walk_reviews_walk"),
         *(CheckConstraint(f"{metric} BETWEEN 1 AND 5", name=f"ck_{metric}") for metric in REVIEW_METRICS),
-        CheckConstraint(" OR ".join(f"{metric} IS NOT NULL" for metric in REVIEW_METRICS), name="ck_review_observation"),
+        CheckConstraint("rating IS NULL OR (rating BETWEEN 1 AND 5)", name="ck_walk_review_rating"),
+        CheckConstraint("rating IS NOT NULL OR " + " OR ".join(f"{metric} IS NOT NULL" for metric in REVIEW_METRICS), name="ck_review_observation"),
     )
 
     id = Column(Integer, primary_key=True)
@@ -225,9 +226,27 @@ class WalkReview(Timestamps, Base):
     sociability_with_people = Column(Integer, nullable=True)
     sociability_with_dogs = Column(Integer, nullable=True)
     barking_level = Column(Integer, nullable=True)
+    rating = Column(Integer, nullable=True)
+    comment = Column(String(100), nullable=True)
     memo = Column(Text, nullable=True)
 
     walk = relationship("Walk", back_populates="review")
+    tags = relationship("WalkReviewTag", back_populates="review", cascade="all, delete-orphan", passive_deletes=True)
+
+
+class WalkReviewTag(Base):
+    __tablename__ = "walk_review_tags"
+    __table_args__ = (
+        UniqueConstraint("review_id", "tag_code", name="uq_walk_review_tags_review_code"),
+        choices("tag_code", "ENERGETIC CALM EXCITED TENSE TIRED SCARED UNWELL"),
+        Index("ix_walk_review_tags_review_id", "review_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    review_id = Column(Integer, ForeignKey("walk_reviews.id", ondelete="CASCADE"), nullable=False)
+    tag_code = Column(String(30), nullable=False)
+
+    review = relationship("WalkReview", back_populates="tags")
 
 
 class DogTraitSummary(Base):

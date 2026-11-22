@@ -12,7 +12,7 @@ DUPLICATE_ERRORS = {
     "nickname": ("NICKNAME_ALREADY_EXISTS", "이미 사용 중인 닉네임입니다."),
     "email": ("EMAIL_ALREADY_EXISTS", "이미 사용 중인 이메일입니다."),
 }
-# Index and constraint names from app.models and migration 014. users_email_key is
+# Index and constraint names from app.models and migration 016. users_email_key is
 # the pre-existing column constraint that PostgreSQL created for email.
 UNIQUE_CONSTRAINT_FIELDS = {
     "uq_users_login_id_lower": "login_id",

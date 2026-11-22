@@ -24,6 +24,7 @@ class User(Base):
     role = Column(Enum(UserRole), default=UserRole.USER, server_default="USER", nullable=False)
     # Existing accounts remain unassigned until an administrator chooses a shelter.
     shelter_id = Column(Integer, ForeignKey("shelters.id", name="fk_users_shelter_id"), nullable=True, index=True)
+    phone = Column(String(50), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -33,7 +34,7 @@ class User(Base):
     walk_incidents = relationship("WalkIncident", foreign_keys="WalkIncident.reported_by", back_populates="reporter", passive_deletes="all")
 
 
-# app.signup_service maps these names to the conflicting field (migration 014).
+# app.signup_service maps these names to the conflicting field (migration 016).
 Index("uq_users_login_id_lower", func.lower(User.login_id), unique=True)
 Index("uq_users_nickname_lower", func.lower(User.nickname), unique=True)
 Index("uq_users_email_lower", func.lower(User.email), unique=True)
@@ -213,5 +214,5 @@ class BreedTrait(Base):
 # Register walk tables whenever the existing models entrypoint is imported.
 from app.walk_models import (  # noqa: E402,F401
     DogWalkSetting, DogWalkSlot, WalkRequest, Walk, WalkPoint, WalkMarker,
-    WalkReview, DogTraitSummary, VolunteerProfile, WalkIncident,
+    WalkReview, WalkReviewTag, DogTraitSummary, VolunteerProfile, WalkIncident,
 )

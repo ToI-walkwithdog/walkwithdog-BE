@@ -365,8 +365,8 @@ class SignupTests(unittest.TestCase):
 
     # Schema and contract details
 
-    def test_unique_indexes_match_migration_014(self):
-        migration = (ROOT / "migrations" / "014_onboarding_signup.sql").read_text(encoding="utf-8")
+    def test_unique_indexes_match_migration_016(self):
+        migration = (ROOT / "migrations" / "016_onboarding_signup.sql").read_text(encoding="utf-8")
         indexes = {index.name: index for index in User.__table__.indexes}
         for name, column in (("uq_users_login_id_lower", "login_id"), ("uq_users_nickname_lower", "nickname"),
                              ("uq_users_email_lower", "email")):

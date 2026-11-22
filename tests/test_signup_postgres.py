@@ -1,4 +1,4 @@
-"""Sign-up uniqueness, concurrency and migration 014 on real PostgreSQL.
+"""Sign-up uniqueness, concurrency and migration 016 on real PostgreSQL.
 
 SIGNUP_TEST_DATABASE_URL must name an EMPTY local toi_walk_test_* database.
 Each test works in its own new su_<uuid> schema and drops only that schema
@@ -35,7 +35,13 @@ from scripts.prepare_demo_db import PreparationError, validate_local_engine
 TEST_URL = os.getenv("SIGNUP_TEST_DATABASE_URL")
 SCHEMA_NAME = re.compile(r"su_[0-9a-f]{32}")
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = (ROOT / "migrations" / "014_onboarding_signup.sql").read_text(encoding="utf-8")
+MIGRATION = (ROOT / "migrations" / "016_onboarding_signup.sql").read_text(encoding="utf-8")
+# Real files a dev DB has applied to users and walk tables before 016, in order.
+# 014 (F-08) adds users.phone; 015 (F-09) needs walk_reviews from 007.
+DEV_CHAIN_BEFORE_016 = ("005_user_roles.sql", "006_user_shelters.sql", "007_walk_domain.sql",
+                        "014_f08_live_walk.sql", "015_f09_walk_review.sql")
+USER_REFERENCES = {("surveys", "user_id"), ("volunteer_profiles", "user_id"), ("walk_requests", "user_id"),
+                   ("walk_requests", "reviewed_by"), ("walk_incidents", "reported_by")}
 PASSWORD = "WalkTogether2026!"
 INDEXES = {"uq_users_login_id_lower": "lower((login_id)::text)",
            "uq_users_nickname_lower": "lower((nickname)::text)",
@@ -99,8 +105,10 @@ class SignupPostgresTests(unittest.TestCase):
             connection.exec_driver_sql(f'DROP SCHEMA "{schema}" CASCADE')
         self.created_schemas.discard(schema)
 
-    def start_api(self):
-        Base.metadata.create_all(self.engine)
+    def start_api(self, create_schema=True):
+        # create_schema=False runs the API on tables built only by migration files.
+        if create_schema:
+            Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
         app = FastAPI()
         app.include_router(users.router)
@@ -139,8 +147,8 @@ class SignupPostgresTests(unittest.TestCase):
             driver.autocommit = False
             raw.close()
 
-    def create_pre_014_tables(self):
-        """Users as created before migration 014, plus a referencing table."""
+    def create_pre_016_tables(self):
+        """Users as created before migration 016, plus a referencing table."""
         with self.engine.begin() as connection:
             connection.exec_driver_sql("CREATE TABLE shelters (id SERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL)")
             connection.exec_driver_sql(
@@ -150,6 +158,33 @@ class SignupPostgresTests(unittest.TestCase):
                 " created_at TIMESTAMPTZ DEFAULT now())")
             connection.exec_driver_sql(
                 "CREATE TABLE surveys (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id))")
+
+    def create_dev_schema_before_016(self):
+        """Legacy users plus minimal dogs/surveys, then the real migrations dev ran before 016."""
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("CREATE TABLE shelters (id SERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL)")
+            connection.exec_driver_sql(
+                "CREATE TABLE users (id SERIAL PRIMARY KEY, email VARCHAR(100) NOT NULL UNIQUE,"
+                " nickname VARCHAR(50) NOT NULL, password VARCHAR(255), created_at TIMESTAMPTZ DEFAULT now())")
+            connection.exec_driver_sql("CREATE TABLE dogs (id SERIAL PRIMARY KEY, name VARCHAR(100))")
+            connection.exec_driver_sql(
+                "CREATE TABLE surveys (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id))")
+        for name in DEV_CHAIN_BEFORE_016:
+            self.run_sql_file((ROOT / "migrations" / name).read_text(encoding="utf-8"))
+
+    def schema_snapshot(self):
+        """Columns, indexes and constraints of every table in this test's schema."""
+        with self.engine.connect() as connection:
+            inspector = inspect(connection)
+            tables = {name: sorted((c["name"], str(c["type"]), c["nullable"]) for c in inspector.get_columns(name))
+                      for name in inspector.get_table_names()}
+            indexes = sorted(tuple(row) for row in connection.execute(text(
+                "SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema()")))
+            constraints = sorted(tuple(row) for row in connection.execute(text(
+                "SELECT t.relname, c.conname, pg_get_constraintdef(c.oid) FROM pg_constraint c"
+                " JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace"
+                " WHERE n.nspname = current_schema()")))
+        return tables, indexes, constraints
 
     def users_structure(self):
         with self.engine.connect() as connection:
@@ -252,10 +287,10 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual({r.json()["code"] for r in responses if r.status_code == 409}, {"LOGIN_ID_ALREADY_EXISTS"})
         self.assertEqual(self.count(), 1)
 
-    # Migration 014
+    # Migration 016
 
-    def test_migration_014_on_empty_users_matches_the_model(self):
-        self.create_pre_014_tables()
+    def test_migration_016_on_empty_users_matches_the_model(self):
+        self.create_pre_016_tables()
         self.run_sql_file(MIGRATION)
         columns, indexes, survey_fk, user_fk = self.users_structure()
         self.assertEqual(columns["login_id"], ("VARCHAR(20)", False))
@@ -271,8 +306,8 @@ class SignupPostgresTests(unittest.TestCase):
         # Re-running on the migrated empty table is a no-op.
         self.run_sql_file(MIGRATION)
 
-    def test_migration_014_aborts_without_changes_when_users_has_rows(self):
-        self.create_pre_014_tables()
+    def test_migration_016_aborts_without_changes_when_users_has_rows(self):
+        self.create_pre_016_tables()
         with self.engine.begin() as connection:
             connection.exec_driver_sql("INSERT INTO users (id, email, nickname) VALUES (1, 'legacy@example.com', '기존 사용자')")
             connection.exec_driver_sql("INSERT INTO surveys (user_id) VALUES (1)")
@@ -285,6 +320,81 @@ class SignupPostgresTests(unittest.TestCase):
             row = connection.execute(text("SELECT email, nickname, password FROM users")).one()
             self.assertEqual(tuple(row), ("legacy@example.com", "기존 사용자", None))
             self.assertEqual(connection.execute(text("SELECT count(*) FROM surveys")).scalar_one(), 1)
+
+    # Migration 016 after F-08 (014) and F-09 (015)
+
+    def test_migration_016_after_f08_f09_keeps_their_schema_and_signup_works_without_create_all(self):
+        self.create_dev_schema_before_016()
+        before_tables, before_indexes, before_constraints = self.schema_snapshot()
+        self.assertEqual(dict(before_tables)["users"].count(("phone", "VARCHAR(50)", True)), 1)
+        self.run_sql_file(MIGRATION)
+        tables, indexes, constraints = self.schema_snapshot()
+        columns, user_indexes, _, user_fk = self.users_structure()
+        self.assertEqual(columns["phone"], ("VARCHAR(50)", True))  # F-08 column kept as is
+        self.assertEqual(columns["login_id"], ("VARCHAR(20)", False))
+        self.assertEqual(columns["nickname"], ("VARCHAR(20)", False))
+        self.assertEqual(columns["email"], ("VARCHAR(100)", False))
+        self.assertEqual(columns["password"], ("VARCHAR(255)", False))
+        with self.engine.connect() as connection:  # str() of a reflected ENUM is generic VARCHAR; ask the catalog
+            role_type = connection.execute(text(
+                "SELECT format_type(atttypid, atttypmod) FROM pg_attribute"
+                " WHERE attrelid = 'users'::regclass AND attname = 'role'")).scalar_one()
+        self.assertEqual((role_type, columns["role"][1]), ("userrole", False))
+        for name, expression in INDEXES.items():
+            with self.subTest(index=name):
+                self.assertIn("CREATE UNIQUE INDEX", user_indexes[name])
+                self.assertIn(f"({expression})", user_indexes[name])
+        self.assertEqual(user_fk, [(["shelter_id"], "shelters")])
+        # 016 changes users only: every other table, index and constraint is identical.
+        self.assertEqual({k: v for k, v in tables.items() if k != "users"},
+                         {k: v for k, v in before_tables.items() if k != "users"})
+        self.assertEqual([i for i in indexes if i[0] != "users"], [i for i in before_indexes if i[0] != "users"])
+        self.assertEqual([c for c in constraints if c[0] != "users"],
+                         [c for c in before_constraints if c[0] != "users"])
+        # F-09 (015) objects are present and every walk-domain reference to users survives.
+        self.assertIn("walk_review_tags", tables)
+        self.assertLessEqual({("rating", "INTEGER", True), ("comment", "VARCHAR(100)", True)},
+                             set(tables["walk_reviews"]))
+        self.assertLessEqual({"ck_walk_review_rating", "ck_review_observation"},
+                             {c[1] for c in constraints if c[0] == "walk_reviews"})
+        with self.engine.connect() as connection:
+            inspector = inspect(connection)
+            references = {(table, fk["constrained_columns"][0]) for table in inspector.get_table_names()
+                          for fk in inspector.get_foreign_keys(table) if fk["referred_table"] == "users"}
+        self.assertLessEqual(USER_REFERENCES, references)
+        self.run_sql_file(MIGRATION)  # re-running on the still-empty migrated table is a no-op
+        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        # The ORM and sign-up API work on the migrated tables with no create_all().
+        self.start_api(create_schema=False)
+        response = self.client.post("/users/", json=self.body("chain", login_id="Chain_User"))
+        self.assertEqual(response.status_code, 200, response.text)
+        duplicate = self.client.post("/users/", json=self.body("other", login_id="CHAIN_USER"))
+        self.assertEqual((duplicate.status_code, duplicate.json()["code"]), (409, "LOGIN_ID_ALREADY_EXISTS"))
+        with self.engine.connect() as connection:
+            row = connection.execute(text("SELECT login_id, role::text, phone FROM users")).one()
+        self.assertEqual(tuple(row), ("chain_user", "USER", None))
+        # Once an account exists, re-applying 016 is refused and changes nothing.
+        with self.assertRaisesRegex(Exception, "016: users has existing rows"):
+            self.run_sql_file(MIGRATION)
+        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+
+    def test_migration_016_after_f08_aborts_and_preserves_rows_including_phone(self):
+        self.create_dev_schema_before_016()
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("INSERT INTO users (id, email, nickname, phone)"
+                                       " VALUES (1, 'legacy@example.com', '기존 사용자', '010-0000-0000')")
+            connection.exec_driver_sql("INSERT INTO surveys (user_id) VALUES (1)")
+            connection.exec_driver_sql("INSERT INTO volunteer_profiles (user_id) VALUES (1)")
+        before = self.schema_snapshot()
+        with self.assertRaisesRegex(Exception, "016: users has existing rows"):
+            self.run_sql_file(MIGRATION)
+        self.assertEqual(self.schema_snapshot(), before)  # the whole transaction rolled back
+        self.assertNotIn("login_id", dict((c[0], c) for c in before[0]["users"]))
+        with self.engine.connect() as connection:
+            row = connection.execute(text("SELECT email, nickname, password, phone, role::text FROM users")).one()
+            self.assertEqual(tuple(row), ("legacy@example.com", "기존 사용자", None, "010-0000-0000", "USER"))
+            for table in ("surveys", "volunteer_profiles"):
+                self.assertEqual(connection.execute(text(f"SELECT count(*) FROM {table}")).scalar_one(), 1)
 
 
 if __name__ == "__main__":

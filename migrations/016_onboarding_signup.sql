@@ -7,7 +7,7 @@
 -- first, with a verified backup, before applying.
 --
 -- Run with psql so an error rolls the transaction back:
---   psql -v ON_ERROR_STOP=1 -d <DB_NAME> -f migrations/014_onboarding_signup.sql
+--   psql -v ON_ERROR_STOP=1 -d <DB_NAME> -f migrations/016_onboarding_signup.sql
 BEGIN;
 
 -- Block concurrent sign-ups between the emptiness check and the DDL.
@@ -16,7 +16,7 @@ LOCK TABLE users IN ACCESS EXCLUSIVE MODE;
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM users) THEN
-        RAISE EXCEPTION '014: users has existing rows. Nothing was changed. Decide the existing-account plan first.';
+        RAISE EXCEPTION '016: users has existing rows. Nothing was changed. Decide the existing-account plan first.';
     END IF;
 END;
 $$;

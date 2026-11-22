@@ -52,17 +52,29 @@
 - [x] 보호소 알림/확인/이력 API 라우터 구현 (GET/POST /shelters/me/incident-alerts, GET /shelters/me/incidents)
 - [x] 기존 테스트(description 공백) 수정 및 F-07 완료 기준 검증 테스트 작성
 
+# F-08 실시간 산책 확인 TODO
 
-# 온보딩 회원가입 TODO (Issue #30)
+- [x] DB 마이그레이션 (014_f08_live_walk.sql) 및 User 모델 phone 컬럼 추가
+- [x] 응답 스키마 (app/walk_live_schemas.py) 정의 (카드, 상세, 증분, 마커, 경로)
+- [x] 실시간 산책 서비스 (app/walk_live_service.py) 구현 (목록 조회, 상세, 증분, stale 판정, 마커 조립)
+- [x] 보호소 실시간 산책 라우터 (app/routers/shelter_live_walks.py) 구현 (3개 엔드포인트)
+- [x] app/main.py 라우터 등록 순서 (shelters.router 앞) 및 라우트 충돌 방지
+- [x] .env.example에 LIVE_WALK_STALE_SECONDS=60 추가
+- [x] 권한 제어 (보호소 격리, 봉사자 403, 타 보호소 403, 관리자 shelter_id 파라미터 지원)
+- [x] 보안 규칙 준수 (산책자 전화번호는 IN_PROGRESS 상세에만 노출, 목록/증분 제외)
+- [x] F-08 완료 기준 검증 테스트 작성 (tests/test_f08_live_walk.py 8건 통과)
+- [x] F-05~F-07 및 도메인 회귀 테스트 통과 (총 101건 통과)
 
-- [x] `users.login_id` 추가, `nickname` 20자, `password` NOT NULL, `lower()` 고유 인덱스 3종 (모델, `migrations/014_onboarding_signup.sql`)
-- [x] 가입과 중복 확인이 공유하는 정규화 및 검증 함수 (`app/account_rules.py`)
-- [x] `POST /users/` 새 계약 (`code`, `data`, `message`), 필드별 422와 409, 500
-- [x] `GET /users/nickname-availability`, `GET /users/id-availability` (`/{user_id}` 앞 등록, 인증 불필요)
-- [x] 동시 가입 UNIQUE 위반의 필드 판별과 롤백 (`app/signup_service.py`)
-- [x] 기존 fixture, 데모 시드, 인증 검증 스크립트를 NOT NULL 컬럼에 맞춤
-- [x] SQLite 테스트 (`tests/test_signup.py`)
-- [ ] 격리 PostgreSQL 테스트 실행 (`tests/test_signup_postgres.py` 작성 완료, 미실행)
-- [ ] 429 실제 요청 제한 (수치 미확정, 응답 계약만 정의)
-- [ ] 기존 사용자가 있는 개발 DB의 014 적용 방안 결정 (현재 014는 빈 `users`에서만 적용)
-- [ ] 오류 메시지 문구를 Notion 원문과 대조
+# F-09 산책 완료·평가 TODO
+
+- [x] DB 마이그레이션 (015_f09_walk_review.sql) 및 WalkReview, WalkReviewTag 모델 추가
+- [x] 응답/요청 스키마 (app/walk_review_schemas.py) 정의 (요약, 평가 생성/수정, 평가 응답)
+- [x] 산책 요약 및 평가 서비스 (app/walk_review_service.py) 구현 (요약, 다운샘플링, 보호소 링크, 평가 upsert 및 조회)
+- [x] 산책 요약 및 평가 라우터 (app/routers/walk_reviews.py) 구현 (GET summary, PUT review, GET review)
+- [x] 산책 이력 API 확장 (app/walk_map_schemas.py, app/walk_map_service.py) rating, has_review 반영
+- [x] app/main.py에 walk_reviews.router 등록
+- [x] .env.example에 WALK_SUMMARY_MAX_POINTS=2000 추가
+- [x] 권한 제어 (본인 봉사자만 평가/요약 조회 가능, 타인 403, 미종료 산책 409)
+- [x] F-09 완료 기준 검증 테스트 작성 (tests/test_f09_walk_review.py 14건 통과)
+- [x] test_walk_domain.py DDL/스키마 계약 검증 스냅샷 보정 및 100% 통과
+- [x] F-05~F-08 전체 회귀 테스트 통과 (총 115건 통과)
