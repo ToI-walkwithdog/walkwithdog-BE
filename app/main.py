@@ -9,7 +9,7 @@ from app.database import Base, engine, SessionLocal
 from app.models import Dog
 from app.routers import auth, users, shelter_incidents, shelter_live_walks, shelters, dogs, surveys, matching, public_api, breed_traits, simulation, personality, chat
 from app.routers import walk_requests
-from app.routers import walks, walk_maps
+from app.routers import walks, walk_maps, walk_reviews
 from app.walk_service import close_stale_walks
 
 # Existing DB changes must go through explicit, backed-up migrations.
@@ -69,6 +69,7 @@ app.include_router(public_api.router)
 app.include_router(breed_traits.router)
 app.include_router(simulation.router)
 app.include_router(walk_requests.router)
+app.include_router(walk_reviews.router)
 app.include_router(walks.router)
 app.include_router(walk_maps.router)
 

@@ -9,7 +9,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import NamedTuple
 
 from sqlalchemy import and_, distinct, func, or_
-from sqlalchemy.orm import contains_eager
+from sqlalchemy.orm import contains_eager, joinedload
 
 from app.models import Walk, WalkPoint, WalkRequest
 from app.gps_geometry import distance_m
@@ -39,7 +39,7 @@ def walk_page(db, conditions, limit, offset, order=(Walk.started_at.desc(), Walk
     total = (db.query(func.count(Walk.id)).select_from(Walk)
              .join(WalkRequest, Walk.walk_request_id == WalkRequest.id).filter(*conditions).scalar())
     walks = (db.query(Walk).join(WalkRequest, Walk.walk_request_id == WalkRequest.id)
-             .options(contains_eager(Walk.walk_request).joinedload(WalkRequest.dog))
+             .options(contains_eager(Walk.walk_request).joinedload(WalkRequest.dog), joinedload(Walk.review))
              .filter(*conditions).order_by(*order).limit(limit).offset(offset).all())
     return total, walks
 
@@ -174,5 +174,7 @@ def user_walks(db, user_id, status, limit, offset):
             "status": walk.status, "started_at": walk.started_at, "ended_at": walk.ended_at,
             "total_distance_m": walk.total_distance_m, "duration_seconds": walk.duration_seconds,
             **motion_metrics(walk), "counted_as_volunteer_record": walk.status == "COMPLETED",
+            "rating": walk.review.rating if walk.review is not None else None,
+            "has_review": walk.review is not None,
         } for walk in walks],
     }
