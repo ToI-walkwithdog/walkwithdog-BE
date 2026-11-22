@@ -86,6 +86,8 @@ class UserWalkItem(UTCResponse, MotionMetrics):
     total_distance_m: Decimal | None
     duration_seconds: int | None
     counted_as_volunteer_record: bool  # only COMPLETED walks count toward statistics
+    rating: int | None = None
+    has_review: bool = False
 
 
 class UserWalksResponse(BaseModel):

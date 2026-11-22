@@ -204,5 +204,5 @@ class BreedTrait(Base):
 # Register walk tables whenever the existing models entrypoint is imported.
 from app.walk_models import (  # noqa: E402,F401
     DogWalkSetting, DogWalkSlot, WalkRequest, Walk, WalkPoint, WalkMarker,
-    WalkReview, DogTraitSummary, VolunteerProfile, WalkIncident,
+    WalkReview, WalkReviewTag, DogTraitSummary, VolunteerProfile, WalkIncident,
 )

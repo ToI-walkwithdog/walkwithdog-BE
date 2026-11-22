@@ -64,3 +64,17 @@
 - [x] 보안 규칙 준수 (산책자 전화번호는 IN_PROGRESS 상세에만 노출, 목록/증분 제외)
 - [x] F-08 완료 기준 검증 테스트 작성 (tests/test_f08_live_walk.py 8건 통과)
 - [x] F-05~F-07 및 도메인 회귀 테스트 통과 (총 101건 통과)
+
+# F-09 산책 완료·평가 TODO
+
+- [x] DB 마이그레이션 (015_f09_walk_review.sql) 및 WalkReview, WalkReviewTag 모델 추가
+- [x] 응답/요청 스키마 (app/walk_review_schemas.py) 정의 (요약, 평가 생성/수정, 평가 응답)
+- [x] 산책 요약 및 평가 서비스 (app/walk_review_service.py) 구현 (요약, 다운샘플링, 보호소 링크, 평가 upsert 및 조회)
+- [x] 산책 요약 및 평가 라우터 (app/routers/walk_reviews.py) 구현 (GET summary, PUT review, GET review)
+- [x] 산책 이력 API 확장 (app/walk_map_schemas.py, app/walk_map_service.py) rating, has_review 반영
+- [x] app/main.py에 walk_reviews.router 등록
+- [x] .env.example에 WALK_SUMMARY_MAX_POINTS=2000 추가
+- [x] 권한 제어 (본인 봉사자만 평가/요약 조회 가능, 타인 403, 미종료 산책 409)
+- [x] F-09 완료 기준 검증 테스트 작성 (tests/test_f09_walk_review.py 14건 통과)
+- [x] test_walk_domain.py DDL/스키마 계약 검증 스냅샷 보정 및 100% 통과
+- [x] F-05~F-08 전체 회귀 테스트 통과 (총 115건 통과)
