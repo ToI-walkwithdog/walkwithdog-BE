@@ -1,6 +1,8 @@
+from sqlalchemy import Numeric
 """Walk persistence only. Authorization, transitions and aggregation belong to later issues."""
 
 from sqlalchemy import (
+    Numeric,
     Boolean, CheckConstraint, Column, DateTime, ForeignKey, Index, Integer,
     JSON, Numeric, String, Text, Time, UniqueConstraint, text,
 )
@@ -178,6 +180,7 @@ class Walk(Timestamps, Base):
     points = relationship("WalkPoint", back_populates="walk", passive_deletes="all", order_by="WalkPoint.sequence_no")
     markers = relationship("WalkMarker", back_populates="walk", passive_deletes="all")
     review = relationship("WalkReview", back_populates="walk", uselist=False, passive_deletes="all")
+    volunteer_review = relationship("ShelterVolunteerReview", back_populates="walk", uselist=False, passive_deletes="all")
     incidents = relationship("WalkIncident", back_populates="walk", passive_deletes="all")
 
 
@@ -359,5 +362,58 @@ class WalkIncident(Timestamps, Base):
     reporter = relationship("User", foreign_keys=[reported_by], back_populates="walk_incidents")
 
 
+class ShelterVolunteerReview(Timestamps, Base):
+    __tablename__ = "shelter_volunteer_reviews"
+    __table_args__ = (
+        UniqueConstraint("walk_id", name="uq_shelter_volunteer_reviews_walk"),
+        CheckConstraint(
+            "rating >= 0.5 AND rating <= 5.0 AND CAST(ROUND(rating * 10) AS INTEGER) % 5 = 0",
+            name="ck_shelter_volunteer_review_rating",
+        ),
+        CheckConstraint(
+            "comment IS NULL OR length(comment) <= 500",
+            name="ck_shelter_volunteer_review_comment_len",
+        ),
+        Index("ix_shelter_volunteer_reviews_volunteer", "volunteer_user_id", "created_at"),
+        Index("ix_shelter_volunteer_reviews_shelter", "shelter_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    walk_id = Column(Integer, reference("walks"), nullable=False)
+    shelter_id = Column(Integer, reference("shelters"), nullable=False)
+    volunteer_user_id = Column(Integer, reference("users"), nullable=False)
+    reviewed_by = Column(Integer, reference("users"), nullable=False)
+    rating = Column(Numeric(2, 1), nullable=False)
+    comment = Column(String(500), nullable=True)
+
+    walk = relationship("Walk", back_populates="volunteer_review")
+    shelter = relationship("Shelter")
+    volunteer = relationship("User", foreign_keys=[volunteer_user_id])
+    reviewer = relationship("User", foreign_keys=[reviewed_by])
+    tags = relationship(
+        "ShelterVolunteerReviewTag",
+        back_populates="review",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ShelterVolunteerReviewTag.id",
+    )
+
+
+class ShelterVolunteerReviewTag(Base):
+    __tablename__ = "shelter_volunteer_review_tags"
+    __table_args__ = (
+        UniqueConstraint("review_id", "tag_code", name="uq_shelter_volunteer_review_tags_review_code"),
+        CheckConstraint("tag_code IN ('PUNCTUALITY', 'SAFETY_CARE', 'CONSIDERATE', 'DISAPPOINTING')", name="ck_shelter_volunteer_review_tag_code"),
+        Index("ix_shelter_volunteer_review_tags_review_id", "review_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    review_id = Column(Integer, ForeignKey("shelter_volunteer_reviews.id", ondelete="CASCADE"), nullable=False)
+    tag_code = Column(String(30), nullable=False)
+
+    review = relationship("ShelterVolunteerReview", back_populates="tags")
+
+
 WALK_MODELS = (DogWalkSetting, DogWalkSlot, WalkRequest, Walk, WalkPoint,
-               WalkMarker, WalkReview, DogTraitSummary, VolunteerProfile, WalkIncident)
+               WalkMarker, WalkReview, ShelterVolunteerReview, ShelterVolunteerReviewTag,
+               DogTraitSummary, VolunteerProfile, WalkIncident)

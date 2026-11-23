@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from app.schemas import DogCardResponse
 from app.walk_record_schemas import UTCResponse, WalkIncidentResponse, WalkMarkerResponse, WalkResponse
 from app.walk_request_schemas import VolunteerProfileResponse
+from app.shelter_volunteer_review_schemas import ShelterVolunteerReviewResponse
 from app.walk_review_schemas import WalkReviewResponse
 
 WalkStatus = Literal["IN_PROGRESS", "COMPLETED", "INTERRUPTED", "CANCELLED"]
@@ -91,6 +92,7 @@ class UserWalkItem(UTCResponse, MotionMetrics):
     counted_as_volunteer_record: bool  # only COMPLETED walks count toward statistics
     rating: int | None = None
     has_review: bool = False
+    shelter_review: ShelterVolunteerReviewResponse | None = None
 
 
 class UserWalksResponse(BaseModel):
@@ -126,6 +128,7 @@ class ShelterWalkHistoryItem(UTCResponse, MotionMetrics):
     incident_count: int = 0
     rating: int | None = None
     has_review: bool = False
+    shelter_review: ShelterVolunteerReviewResponse | None = None
 
 
 class ShelterWalkHistoryResponse(BaseModel):

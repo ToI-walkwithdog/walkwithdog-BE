@@ -11,6 +11,7 @@ from app.walk_request_schemas import (
     RequestStatus, ReservationTab, VolunteerProfileResponse,
     WalkRequestAction, WalkRequestCreate, WalkRequestDetailResponse, WalkRequestResponse,
 )
+from app.shelter_volunteer_review_service import get_volunteer_review_summary
 from app.walk_request_service import create_request, get_request_detail, request_list_query, transition_request
 
 router = APIRouter(tags=["walk-requests"])
@@ -101,4 +102,15 @@ def shelter_requests(shelter_id: int, status: RequestStatus | None = None,
 @router.get("/volunteers/me", response_model=VolunteerProfileResponse, tags=["volunteers"])
 def my_volunteer_profile(actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
     profile = db.get(VolunteerProfile, actor.id)
-    return profile if profile is not None else VolunteerProfileResponse(user_id=actor.id)
+    summary = get_volunteer_review_summary(db, actor.id)
+    if profile is None:
+        return VolunteerProfileResponse(user_id=actor.id, review_summary=summary)
+    return VolunteerProfileResponse(
+        user_id=profile.user_id,
+        level=profile.level,
+        total_walk_count=profile.total_walk_count,
+        total_distance_m=profile.total_distance_m,
+        total_duration_seconds=profile.total_duration_seconds,
+        unique_dog_count=profile.unique_dog_count,
+        review_summary=summary,
+    )
