@@ -136,6 +136,8 @@ class Walk(Timestamps, Base):
         CheckConstraint("last_longitude IS NULL OR (last_longitude BETWEEN -180 AND 180)", name="ck_walk_last_longitude"),
         CheckConstraint("last_accuracy_m IS NULL OR last_accuracy_m >= 0", name="ck_walk_last_accuracy"),
         CheckConstraint("end_reason IS NULL OR end_reason IN ('USER', 'STAFF', 'AUTO_TIMEOUT')", name="ck_walk_end_reason"),
+        CheckConstraint("planned_duration_minutes IS NULL OR planned_duration_minutes > 0", name="ck_walk_planned_duration"),
+        CheckConstraint("expected_end_at IS NULL OR expected_end_at > started_at", name="ck_walk_expected_end_order"),
         Index("ix_walks_status_started", "status", "started_at"),
     )
 
@@ -157,6 +159,20 @@ class Walk(Timestamps, Base):
     last_point_recorded_at = Column(DateTime(timezone=True), nullable=True)
     last_point_received_at = Column(DateTime(timezone=True), nullable=True)
     end_reason = Column(String(20), nullable=True)
+    planned_duration_minutes = Column(Integer, nullable=True)
+    expected_end_at = Column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def is_overdue(self) -> bool:
+        from app.walk_service import compute_walk_overdue
+        overdue, _ = compute_walk_overdue(self)
+        return overdue
+
+    @property
+    def overdue_minutes(self) -> int:
+        from app.walk_service import compute_walk_overdue
+        _, minutes = compute_walk_overdue(self)
+        return minutes
 
     walk_request = relationship("WalkRequest", back_populates="walk")
     points = relationship("WalkPoint", back_populates="walk", passive_deletes="all", order_by="WalkPoint.sequence_no")
@@ -190,7 +206,9 @@ class WalkMarker(Base):
     __tablename__ = "walk_markers"
     __table_args__ = (
         *coordinates(),
-        choices("marker_type", "SNIFF POOP DOG_ENCOUNTER PERSON_ENCOUNTER BARKING"),
+        choices("marker_type", "SNIFF POOP DOG_ENCOUNTER PERSON_ENCOUNTER BARKING CROSSWALK_WAIT OTHER"),
+        choices("location_source", "CURRENT LAST_KNOWN"),
+        CheckConstraint("marker_type <> 'OTHER' OR (memo IS NOT NULL AND trim(memo) <> '')", name="ck_marker_other_memo"),
         Index("ix_walk_markers_time", "walk_id", "recorded_at"),
     )
 
@@ -201,6 +219,7 @@ class WalkMarker(Base):
     longitude = Column(Numeric(9, 6), nullable=False)
     recorded_at = Column(DateTime(timezone=True), nullable=False)
     memo = Column(Text, nullable=True)
+    location_source = Column(String(12), nullable=False, default="CURRENT", server_default="CURRENT")
 
     walk = relationship("Walk", back_populates="markers")
 
