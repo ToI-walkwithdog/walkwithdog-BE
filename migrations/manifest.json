@@ -338,6 +338,20 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "025_onboarding_dog_experience.sql",
+      "sha256": "127a0e0712b7d9af39c3488e8cc664eda8ff0ce9adb024360c3b07f6b4eb4e52",
+      "requires": [
+        "024_onboarding_basic_info.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [
@@ -347,14 +361,6 @@
       "source": "origin/feature/f-04-walk-booking",
       "requires": [
         "009_add_f03_walk_register.sql"
-      ]
-    },
-    {
-      "file": "025_onboarding_dog_experience.sql",
-      "state": "unmerged",
-      "source": "https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/57",
-      "requires": [
-        "024_onboarding_basic_info.sql"
       ]
     }
   ]

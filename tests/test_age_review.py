@@ -14,7 +14,8 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.database import Base, get_db
     from app.models import (AuthSession, ChatSession, Dog, MatchingResult, PhoneVerification,
                             PhoneVerificationDailyCount, SessionToken, Shelter, Survey, User, UserConsent,
-                            UserPledgeAcknowledgement, UserRole, VolunteerOnboardingBasic)
+                            UserPledgeAcknowledgement, UserRole, VolunteerExperienceChallenge, VolunteerOnboardingBasic,
+                            VolunteerOnboardingExperience)
     from app.onboarding_common import get_clock
     from app.rate_limit import FailureLimiter
     from app.routers import age_review, auth, onboarding_basic, users
@@ -281,6 +282,22 @@ class ExitTests(AgeReviewTestCase):
         with patch.dict(os.environ, DELETE_RECORDS):
             self.assertEqual(self.exit().status_code, 200)
         self.assertEqual(self.count(VolunteerOnboardingBasic), 0)
+
+    def test_step2_rows_are_removed_in_fk_order_and_kept_when_the_exit_is_refused(self):
+        with self.Session.begin() as db:
+            db.add(VolunteerOnboardingExperience(user_id=1, has_experience=True, experienced_breeds_text="푸들",
+                                                 dog_size_code="SMALL", walking_frequency="DAILY",
+                                                 perceived_difficulty="EASY", completed_at=START, updated_at=START))
+            db.flush()
+            db.add_all([VolunteerExperienceChallenge(user_id=1, challenge_code="LEASH_PULLING"),
+                        VolunteerExperienceChallenge(user_id=1, challenge_code="OTHER_DOG_REACTION")])
+        with patch.dict(os.environ, {"ACCOUNT_EXIT_RECORD_POLICY": "delete", "APP_ENV": "production"}):
+            self.assert_error(self.exit(), 409, "ACCOUNT_HAS_RETAINED_ACTIVITY")  # production keeps everything
+        self.assertEqual((self.count(VolunteerOnboardingExperience), self.count(VolunteerExperienceChallenge)), (1, 2))
+        with patch.dict(os.environ, DELETE_RECORDS):
+            self.assertEqual(self.exit().status_code, 200)
+        self.assertEqual((self.count(VolunteerOnboardingExperience), self.count(VolunteerExperienceChallenge)), (0, 0))
+        self.assertIsNone(self.user(1))
 
     def test_consent_and_pledge_records_are_kept_until_the_retention_policy_is_decided(self):
         settings = [{}, {"ACCOUNT_EXIT_RECORD_POLICY": "delete"},

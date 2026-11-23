@@ -33,7 +33,9 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
                             UserPledgeAcknowledgement, UserRole, VolunteerOnboardingBasic)
     from app.onboarding_common import get_clock
     from app.phone_verification_service import phone_subject
-    from app.routers import age_review, auth, chat, matching, onboarding_basic, surveys, users, walk_requests, walks
+    from app.routers import (age_review, auth, chat, matching, onboarding_basic, onboarding_experience, surveys, users,
+                             walk_requests, walks)
+    from app.models import VolunteerExperienceChallenge, VolunteerOnboardingExperience
     from app.models import ChatMessage, ChatSession, Dog, DogWalkSetting, DogWalkSlot, MatchingResult, Shelter
     from app.walk_models import VolunteerProfile, Walk, WalkRequest
     from app.sms_provider import MockSmsProvider, get_sms_provider
@@ -57,14 +59,17 @@ CONSENT_MIGRATION = (ROOT / "migrations" / "018_user_consents.sql").read_text(en
 GUIDE_MIGRATION = "019_first_walk_guide.sql"
 PLEDGE_MIGRATION = "023_user_pledge_acknowledgements.sql"
 STEP1_MIGRATION = "024_onboarding_basic_info.sql"
+STEP2_MIGRATION = "025_onboarding_dog_experience.sql"
 USER_COLUMNS_AFTER_018 = {
     "first_walk_guide_completed_at": GUIDE_MIGRATION,
     "account_status": STEP1_MIGRATION,
     "age_review_required_at": STEP1_MIGRATION,
 }
-API_MIGRATIONS_AFTER_018 = (GUIDE_MIGRATION, PLEDGE_MIGRATION, STEP1_MIGRATION)
+API_MIGRATIONS_AFTER_018 = (GUIDE_MIGRATION, PLEDGE_MIGRATION, STEP1_MIGRATION, STEP2_MIGRATION)
 GUIDE_COLUMN = ("first_walk_guide_completed_at", "TIMESTAMP", True)
 PLEDGE_VERSION = "pledge-test-v1"  # test-only value; the real version is an undecided server setting
+STEP2_FULL = {"has_experience": True, "experienced_breeds_text": "믹스견", "dog_size_code": "MEDIUM",
+              "walking_frequency": "WEEKLY_3_4", "perceived_difficulty": "NORMAL", "challenge_codes": ["LEASH_PULLING"]}
 HMAC_KEY = "test-only-hmac-key-0123456789abcdef"  # test-only secret
 STEP1_START = datetime(2026, 11, 23, 1, 0, tzinfo=timezone.utc)
 # Real files a dev DB has applied to users and walk tables before 016, in order.
@@ -1361,6 +1366,186 @@ class SignupPostgresTests(unittest.TestCase):
             statuses = [r.status_code for r in pool.map(write, range(workers))]
         self.assertEqual(statuses, [200] * workers)  # share locks do not serialize ACTIVE writers
         self.assertEqual(self.table_count(Survey), workers)
+
+
+    # Onboarding Step 2 dog experience (Issue #42)
+
+    def start_step2_api(self):
+        """User 1 with the current pledge and Step 1 done, on the real routers."""
+        from datetime import date
+        self.start_api()
+        self.client.app.include_router(onboarding_experience.router)
+        with self.Session.begin() as db:
+            db.add(User(id=1, login_id="walker01", nickname="봉사자", password=UNUSABLE_PASSWORD))
+            db.flush()
+            db.add(UserPledgeAcknowledgement(user_id=1, pledge_version=PLEDGE_VERSION, acknowledged_at=STEP1_START))
+            db.add(VolunteerOnboardingBasic(user_id=1, full_name="김민지", birth_date=date(2002, 12, 10),
+                                            phone_e164="+821012345678", phone_verified_at=STEP1_START,
+                                            completed_at=STEP1_START, updated_at=STEP1_START))
+        return self.add_session(1, "step2-token")
+
+    def put_step2(self, headers, body=None):
+        return self.client.put("/users/me/onboarding/dog-experience", json=body or STEP2_FULL, headers=headers)
+
+    def step2_rows(self):
+        return (self.table_count(VolunteerOnboardingExperience), self.table_count(VolunteerExperienceChallenge))
+
+    def test_step2_save_that_locked_first_commits_before_the_status_change(self):
+        headers = self.start_step2_api()
+        entered, release = self.hold("app.dog_experience_service.first_incomplete_step")  # runs under the share lock
+        results = {}
+        save = self.run_in_thread(results, "save", lambda: self.put_step2(headers))
+        self.assertTrue(entered.wait(10))
+
+        def change():
+            with self.Session() as db:
+                change_to_age_review(db, 1, self.now)
+            return "done"
+
+        status_change = self.run_in_thread(results, "change", change)
+        self.wait_for_lock_waiter()
+        self.assertEqual(self.account_status(1), "ACTIVE")
+        release.set()
+        save.join(10)
+        status_change.join(10)
+        self.assertEqual(results["save"].status_code, 200, results["save"].text)
+        self.assertEqual(self.account_status(1), "AGE_REVIEW_REQUIRED")
+        self.assertEqual(self.step2_rows(), (1, 1))
+
+    def test_step2_save_after_the_status_change_is_refused_without_rows(self):
+        headers = self.start_step2_api()
+        response = self.change_status_while(lambda: self.put_step2(headers))
+        self.assertEqual((response.status_code, response.json()["code"]), (403, "AGE_REVIEW_REQUIRED"))
+        self.assertEqual(self.step2_rows(), (0, 0))
+
+    def test_parallel_identical_step2_saves_keep_one_answer_and_one_time(self):
+        headers = self.start_step2_api()
+        workers = 4
+        barrier = Barrier(workers)
+        original = sys.modules["app.dog_experience_service"].first_incomplete_step
+
+        def synchronized(*args, **kwargs):
+            barrier.wait(10)  # every request saw "not completed" before any insert
+            return original(*args, **kwargs)
+
+        with patch("app.dog_experience_service.first_incomplete_step", side_effect=synchronized), \
+                ThreadPoolExecutor(max_workers=workers) as pool:
+            responses = list(pool.map(lambda _: self.put_step2(headers), range(workers)))
+        self.assertEqual([r.status_code for r in responses], [200] * workers, [r.text for r in responses])
+        self.assertEqual(len({r.json()["data"]["completed_at"] for r in responses}), 1)
+        self.assertEqual(self.step2_rows(), (1, 1))
+
+    def test_parallel_different_step2_saves_one_wins_the_other_gets_409(self):
+        headers = self.start_step2_api()
+        barrier = Barrier(2)
+        original = sys.modules["app.dog_experience_service"].first_incomplete_step
+
+        def synchronized(*args, **kwargs):
+            barrier.wait(10)
+            return original(*args, **kwargs)
+
+        bodies = [STEP2_FULL, {"has_experience": False}]
+        with patch("app.dog_experience_service.first_incomplete_step", side_effect=synchronized), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(lambda body: self.put_step2(headers, body), bodies))
+        outcomes = sorted((r.status_code, r.json()["code"]) for r in responses)
+        self.assertEqual(outcomes, [(200, "OK"), (409, "DOG_EXPERIENCE_ALREADY_COMPLETED")])
+        winner = bodies[[r.status_code for r in responses].index(200)]
+        with self.Session() as db:
+            stored = db.get(VolunteerOnboardingExperience, 1)
+            self.assertEqual(stored.has_experience, winner["has_experience"])
+            self.assertEqual(db.query(VolunteerExperienceChallenge).count(), len(winner.get("challenge_codes", [])))
+
+    def test_step2_challenge_failure_rolls_back_on_postgres(self):
+        headers = self.start_step2_api()
+
+        def broken_row(user_id, challenge_code):
+            return VolunteerExperienceChallenge(user_id=user_id, challenge_code="BROKEN")
+
+        with patch("app.dog_experience_service.VolunteerExperienceChallenge", side_effect=broken_row), \
+                self.assertLogs("app.api_contract", "ERROR"):
+            response = self.put_step2(headers)
+        self.assertEqual((response.status_code, response.json()["code"]), (500, "INTERNAL_SERVER_ERROR"))
+        self.assertEqual(self.step2_rows(), (0, 0))
+        self.assertEqual(self.put_step2(headers).status_code, 200)
+
+    def test_step2_database_checks_on_postgres(self):
+        self.start_step2_api()
+        bad_rows = [dict(has_experience=True, experienced_breeds_text="푸들", dog_size_code=None,
+                         walking_frequency="DAILY", perceived_difficulty="EASY"),
+                    dict(has_experience=False, experienced_breeds_text=None, dog_size_code="SMALL",
+                         walking_frequency=None, perceived_difficulty=None)]
+        for values in bad_rows:
+            with self.subTest(values=values), self.assertRaises(IntegrityError), self.Session.begin() as db:
+                db.add(VolunteerOnboardingExperience(user_id=1, completed_at=STEP1_START, updated_at=STEP1_START,
+                                                     **values))
+        with self.Session.begin() as db:
+            db.add(VolunteerOnboardingExperience(user_id=1, has_experience=False, completed_at=STEP1_START,
+                                                 updated_at=STEP1_START))
+        for code in ("BITING",):
+            with self.assertRaises(IntegrityError), self.Session.begin() as db:
+                db.add(VolunteerExperienceChallenge(user_id=1, challenge_code=code))
+
+    def test_migration_025_adds_only_step2_tables_and_step2_works_without_create_all(self):
+        self.migrate_dev_chain_through_016_with_accounts()
+        self.run_sql_file(EMAIL_REMOVAL)
+        self.run_sql_file(CONSENT_MIGRATION)
+        for migration in (GUIDE_MIGRATION, PLEDGE_MIGRATION, STEP1_MIGRATION):
+            self.run_migration(migration)
+        accounts = self.user_rows()
+        before_tables, before_indexes, before_constraints = self.schema_snapshot()
+        self.run_migration(STEP2_MIGRATION)
+        tables, indexes, constraints = self.schema_snapshot()
+        new_tables = {"volunteer_onboarding_experiences", "volunteer_experience_challenges"}
+        self.assertEqual(set(tables) - set(before_tables), new_tables)
+        self.assertEqual({k: v for k, v in tables.items() if k not in new_tables}, before_tables)
+        self.assertEqual([i for i in indexes if i[0] not in new_tables], before_indexes)
+        self.assertEqual([c for c in constraints if c[0] not in new_tables], before_constraints)
+        self.assertIn(("volunteer_onboarding_experiences", "fk_onboarding_experiences_user_id",
+                       "FOREIGN KEY (user_id) REFERENCES users(id)"), constraints)
+        self.assertIn(("volunteer_experience_challenges", "fk_experience_challenges_experience",
+                       "FOREIGN KEY (user_id) REFERENCES volunteer_onboarding_experiences(user_id)"), constraints)
+        self.assertEqual(self.user_rows(), accounts)
+        self.run_migration(STEP2_MIGRATION)  # re-running is a no-op
+        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        # The Step 2 API runs on the migrated tables with no create_all().
+        from datetime import date
+        self.migrate_users_for_current_models(after=STEP2_MIGRATION)
+        self.start_api(create_schema=False)
+        self.client.app.include_router(onboarding_experience.router)
+        with self.Session.begin() as db:
+            db.add(UserPledgeAcknowledgement(user_id=1, pledge_version=PLEDGE_VERSION, acknowledged_at=STEP1_START))
+            db.add(VolunteerOnboardingBasic(user_id=1, full_name="김민지", birth_date=date(2002, 12, 10),
+                                            phone_e164="+821099998888", phone_verified_at=STEP1_START,
+                                            completed_at=STEP1_START, updated_at=STEP1_START))
+        login = self.client.post("/auth/login", json={"identifier": "walker_one", "password": PASSWORD})
+        headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+        self.assertEqual(self.put_step2(headers).status_code, 200)
+        self.assertEqual(self.put_step2(headers, {"has_experience": False}).json()["code"],
+                         "DOG_EXPERIENCE_ALREADY_COMPLETED")
+        self.assertEqual(self.step2_rows(), (1, 1))
+
+    def test_exit_removes_step2_rows_in_fk_order_and_rolls_back_on_failure(self):
+        headers = self.setup_age_review()  # account 1 in AGE_REVIEW_REQUIRED, full schema
+        with self.Session.begin() as db:
+            db.add(VolunteerOnboardingExperience(user_id=1, has_experience=True, experienced_breeds_text="푸들",
+                                                 dog_size_code="SMALL", walking_frequency="DAILY",
+                                                 perceived_difficulty="EASY", completed_at=STEP1_START,
+                                                 updated_at=STEP1_START))
+            db.flush()
+            db.add(VolunteerExperienceChallenge(user_id=1, challenge_code="NONE"))
+        # A failure after the Step 2 rows were deleted rolls them back with everything else.
+        with patch("app.age_review_service.has_retained_activity", return_value=False),                 patch.object(sys.modules["sqlalchemy.orm"].Session, "commit",
+                             side_effect=RuntimeError("commit failed")),                 self.assertLogs("app.api_contract", "ERROR"):
+            failed = self.exit_account(headers)
+        self.assertEqual(failed.status_code, 500)
+        self.assertEqual(self.step2_rows(), (1, 1))
+        self.assertEqual(self.remaining()["users"], 1)
+        response = self.exit_account(headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.step2_rows(), (0, 0))
+        self.assertEqual(self.remaining(), {"users": 0, "auth_sessions": 0, "user_consents": 0,
+                                            "user_pledge_acknowledgements": 0})
 
 
 if __name__ == "__main__":

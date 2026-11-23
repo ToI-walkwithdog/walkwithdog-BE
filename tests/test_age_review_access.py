@@ -41,7 +41,10 @@ ALLOWED = {("POST", "/auth/login"), ("POST", "/auth/logout"), ("GET", "/users/me
            ("PUT", "/users/me/age-review/birth-date"), ("DELETE", "/users/me")}
 CONTRACT_BLOCKED = {("PUT", "/users/me/pledge"), ("GET", "/users/me/onboarding/basic-info"),
                     ("PUT", "/users/me/onboarding/basic-info"), ("POST", "/users/me/phone-verifications"),
-                    ("POST", "/users/me/phone-verifications/confirm")}
+                    ("POST", "/users/me/phone-verifications/confirm"),
+                    ("GET", "/users/me/onboarding/dog-experience"), ("PUT", "/users/me/onboarding/dog-experience")}
+# Contract routes of the general-user onboarding: shelter and admin get this role 403.
+ONBOARDING_ROLE_CODES = {"ONBOARDING_NOT_ALLOWED", "PLEDGE_NOT_ALLOWED"}
 # No user identity: shared, read-only or sign-up data that anyone may request.
 PUBLIC = {("GET", "/"), ("GET", "/db-test"), ("GET", "/dogs/"), ("GET", "/dogs/{dog_id}"),
           ("GET", "/dogs/{dog_id}/personality"), ("GET", "/shelters/{shelter_id}"),
@@ -233,6 +236,16 @@ class AccessControlTests(unittest.TestCase):
         with patch("app.account_status.lock_user", side_effect=AssertionError("staff must not be locked")):
             shelter = self.client.post("/shelters/", json={"name": "새 보호소"}, headers={"Authorization": "Bearer token-4"})
         self.assertEqual(shelter.status_code, 200, shelter.text)
+
+    def test_contract_routes_keep_their_401_and_role_403(self):
+        for method, path in sorted(CONTRACT_BLOCKED):
+            with self.subTest(route=f"{method} {path}"):
+                response = self.call(method, path)
+                self.assertEqual((response.status_code, response.json()["code"]), (401, "AUTHENTICATION_REQUIRED"))
+                for token in ("token-3", "token-4"):
+                    response = self.call(method, path, token)
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertIn(response.json()["code"], ONBOARDING_ROLE_CODES)
 
     def test_role_errors_keep_their_detail_format(self):
         # An ACTIVE general user on an admin route: the existing role 403 is unchanged.
