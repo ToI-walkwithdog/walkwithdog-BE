@@ -1,0 +1,632 @@
+{
+  "version": 1,
+  "source_commit": "f0b0069ef95599da613079829ede8c13183ad6e2",
+  "failures": [
+    {
+      "nodeid": "tests/test_walk_domain.py::WalkMetadataTests::test_all_ten_models_register_with_existing_base_and_relationships",
+      "phase": "call",
+      "subtest": null,
+      "outcome": "failed",
+      "message": "AssertionError: 12 != 10",
+      "issue": 66,
+      "reason": "007의 기존 10개 모델과 비교하는 테스트에 F-15의 020 평가 모델 2개가 함께 등록된다."
+    },
+    {
+      "nodeid": "tests/test_walk_domain.py::WalkMetadataTests::test_checked_in_sql_exactly_matches_orm_postgresql_ddl",
+      "phase": "call",
+      "subtest": null,
+      "outcome": "failed",
+      "message": "AssertionError: Lists differ: ['BEG[…]ISTS walk_incidents (', '\\tid SERIAL NOT NULL,[…]IT;'] != ['BEG[…]ISTS shelter_volunteer_reviews (', '\\tid SERIA[…]IT;']\n\nFirst differing element 135:\n'CREATE TABLE IF NOT EXISTS walk_incidents ('\n'CREATE TABLE IF NOT EXISTS shelter_volunteer_reviews ('\n\nSecond list contains 34 additional elements.\nFirst extra element 223:\n'\\tid SERIAL NOT NULL,'\n\nDiff is 15030 characters long. Set self.maxDiff to None to see it.",
+      "issue": 66,
+      "reason": "007의 기존 10개 모델과 비교하는 테스트에 F-15의 020 평가 모델 2개가 함께 등록된다."
+    },
+    {
+      "nodeid": "tests/test_walk_domain.py::WalkMetadataTests::test_types_nullability_defaults_and_all_constraint_contracts",
+      "phase": "call",
+      "subtest": null,
+      "outcome": "failed",
+      "message": "KeyError: 'shelter_volunteer_reviews'",
+      "issue": 66,
+      "reason": "007의 기존 10개 모델과 비교하는 테스트에 F-15의 020 평가 모델 2개가 함께 등록된다."
+    },
+    {
+      "nodeid": "tests/test_walk_settings_api.py::WalkSettingsAPITests::test_invalid_scalar_types_and_unknown_fields_are_422",
+      "phase": "call",
+      "subtest": {
+        "message": null,
+        "kwargs": {
+          "body": "{'difficulty': 'INTERMEDIATE'}"
+        }
+      },
+      "outcome": "failed",
+      "message": "AssertionError: 200 != 422",
+      "issue": null,
+      "reason": "INTERMEDIATE가 현재 유효한 산책 난이도인데 테스트는 422와 설정 무변경을 기대한다."
+    },
+    {
+      "nodeid": "tests/test_walk_settings_api.py::WalkSettingsAPITests::test_invalid_scalar_types_and_unknown_fields_are_422",
+      "phase": "call",
+      "subtest": null,
+      "outcome": "failed",
+      "message": "AssertionError: Tuples differ: ([(1, 4, True, 'INTERMEDIATE', '기존 주의사항', 30, datetime.datetime(<abbreviated>)]) != ([(1, 4, True, 'BEGINNER', '기존 주의사항', 30, datetime.datetime(<abbreviated>)])\n\nFirst differing element 0:\n[(1, 4, True, 'INTERMEDIATE', '기존 주의사항', 30, datetime.datetime(<abbreviated>)]\n[(1, 4, True, 'BEGINNER', '기존 주의사항', 30, datetime.datetime(<abbreviated>)]\n\n  ([(1,\n     4,\n     True,\n-    'INTERMEDIATE',\n+    'BEGINNER',\n     '기존 주의사항',\n     30,\n     datetime.datetime(<timestamp>),\n     datetime.datetime(<timestamp>)),\n    (2,\n     5,\n     False,\n     'BEGINNER',\n     None,\n     None,\n     datetime.datetime(<timestamp>),\n     datetime.datetime(<timestamp>))],\n   [(1, 1, 0, datetime.time(9, 0), datetime.time(11, 0))])",
+      "issue": null,
+      "reason": "INTERMEDIATE가 현재 유효한 산책 난이도인데 테스트는 422와 설정 무변경을 기대한다."
+    }
+  ],
+  "skips": [
+    {
+      "nodeid": "tests/test_gps_motion_postgres.py::MotionMigrationPostgresTests::test_008_backup_apply_reapply_preserves_every_legacy_value",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: GPS_MOTION_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_gps_motion_postgres.py::MotionMigrationPostgresTests::test_008_incompatible_existing_column_stops_before_backup",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: GPS_MOTION_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_gps_motion_postgres.py::MotionMigrationPostgresTests::test_008_rejects_partial_negative_inconsistent_and_invalid_pace_metrics",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: GPS_MOTION_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_gps_motion_postgres.py::MotionMigrationPostgresTests::test_008_sql_can_complete_compatible_partial_addition",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: GPS_MOTION_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_gps_motion_postgres.py::MotionMigrationPostgresTests::test_008_sql_failure_rolls_back_all_additions",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: GPS_MOTION_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_gps_motion_postgres.py::MotionMigrationPostgresTests::test_008_unknown_only_valid_and_legacy_pace_constraint_preserved",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: GPS_MOTION_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_gps_motion_postgres.py::MotionMigrationPostgresTests::test_008_wrong_default_or_unvalidated_constraint_stops",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: GPS_MOTION_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_backfill_dry_run_apply_idempotence_and_legacy_level_preservation",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_backfill_failure_rolls_back_user_and_can_be_retried",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_backfill_wins_concurrent_end_then_retry_includes_both_walks",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_concurrent_double_end_counts_the_walk_exactly_once",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_end_and_safety_interruption_race_never_counts_an_interrupted_walk",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_end_wins_concurrent_backfill_and_backfill_retry_is_idempotent",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_history_and_profile_match_on_postgresql",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_level_one_experienced_walk_requires_shelter_approval_and_revalidation",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_map_history_serialize_legacy_null_metrics_and_document_pace",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_motion_metrics_reach_map_history_and_elapsed_volunteer_time",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_public_map_hides_return_to_start_without_modifying_owner_route",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_public_rounded_points_and_connectors_stay_outside_endpoint_zones",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_refresh_on_postgresql_is_idempotent_without_changing_level",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_sql_sampling_keeps_endpoints_and_aggregates_on_postgresql",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_statistics_failure_rolls_back_gps_metrics_end_and_profile_together",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_maps_postgres.py::WalkMapPostgresTests::test_two_distinct_walk_ends_for_same_user_are_serialized",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_MAPS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_actual_backup_apply_reapply_and_legacy_content",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_approved_dog_and_volunteer_overlap_block_but_adjacent_allowed",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_booking_range_supports_full_integer_id_domain",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_default_nullable_check_and_index_drift_stop",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_incompatible_parent_pk_and_search_path_stop",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_missing_standalone_index_is_repaired",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_numeric_precision_and_timezone_roundtrip",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_orm_postgresql_create_matches_reviewed_catalog_contract",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_partial_table_conflict_stops_before_backup",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_sql_error_rolls_back_all_new_tables",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_postgres.py::WalkPostgresTests::test_wrong_named_index_owned_by_another_table_stops",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_TEST_DATABASE_URL의 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_actual_end_check_failure_rolls_back_summary_status_and_time",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_actual_point_unique_error_rolls_back_batch_and_preserves_original",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_cancellation_before_start_boundary_wins_and_no_walk_is_created",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_concurrent_append_batches_preserve_contiguous_order",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_concurrent_identical_upload_is_retryable_without_duplicate_rows",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_concurrent_start_creates_exactly_one_walk",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_double_end_cannot_recompute_summary_or_change_terminal_status",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_end_wins_incident_race_and_freezes_all_events",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_end_wins_upload_race_and_rejects_late_points",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_marker_wins_end_race_and_is_preserved",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_motion_analysis_failure_rolls_back_entire_end",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_motion_analysis_quality_does_not_tighten_upload_policy",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_motion_end_and_detail_share_partition_and_moving_pace",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_motion_jitter_preserves_legacy_distance_but_no_moving_pace",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_motion_legacy_completed_record_keeps_nulls_and_old_pace",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_motion_openapi_documents_pace_and_nullable_extension",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_motion_staff_interruption_uses_same_aggregation",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_motion_start_and_detail_fields_are_null",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_points_win_end_race_and_retry_summary_includes_committed_points",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_real_numeric_precision_and_summary_roundtrip",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_real_walk_unique_constraint_remains_final_duplicate_guard",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_settings_off_wins_start_race_and_prevents_start_after_retry",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_start_wins_cancellation_race_request_never_becomes_cancelled",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_recording_postgres.py::WalkRecordingPostgresTests::test_start_wins_settings_race_later_setting_change_does_not_lose_recording",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_RECORDS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_actual_unexpected_check_error_is_500_and_new_profile_rolls_back",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_application_wins_concurrent_setting_change_but_approval_revalidates",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_approval_wins_concurrent_setting_change_history_is_preserved",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_cancellation_wins_concurrent_approval_and_cannot_be_reactivated",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_concurrent_approve_and_cancel_then_cancel_retry_preserves_approval",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_concurrent_approve_and_reject_do_not_mix_review_metadata",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_distinct_volunteers_retry_concurrent_proposals_as_two_pending_requests",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_overlapping_dog_approvals_only_one_commits",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_overlapping_volunteer_approvals_for_different_dogs_only_one_commits",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_profile_row_lock_serializes_but_level_no_longer_blocks_approval",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_real_dog_exclusion_constraint_diagnostic_and_rollback",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_real_partial_unique_constraint_diagnostic_and_rollback",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_real_volunteer_exclusion_constraint_diagnostic_and_rollback",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_request_row_is_locked_not_just_parent_resources",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_same_application_double_approval",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_same_user_partial_overlap_is_serialized_and_remains_rejected_on_retry",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_same_volunteer_concurrent_first_requests_create_one_profile",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_setting_off_wins_concurrent_application_no_profile_is_left",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_requests_postgres.py::WalkRequestPostgresTests::test_setting_off_wins_concurrent_approval",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_REQUESTS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_settings_postgres.py::WalkSettingsPostgresTests::test_actual_database_constraint_error_restores_deleted_slots_and_parent",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_SETTINGS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_settings_postgres.py::WalkSettingsPostgresTests::test_existing_replacement_is_atomic_and_retry_preserves_omitted_slots",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_SETTINGS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_settings_postgres.py::WalkSettingsPostgresTests::test_native_local_time_roundtrip_and_public_filters",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_SETTINGS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_settings_postgres.py::WalkSettingsPostgresTests::test_parent_lock_and_recheck_protect_shelter_transfer",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_SETTINGS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    },
+    {
+      "nodeid": "tests/test_walk_settings_postgres.py::WalkSettingsPostgresTests::test_simultaneous_first_upsert_is_409_then_retry_keeps_single_setting",
+      "phase": "setup",
+      "subtest": null,
+      "outcome": "skipped",
+      "message": "Skipped: WALK_SETTINGS_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다"
+    }
+  ]
+}
