@@ -5,10 +5,10 @@ from app.account_rules import AVAILABILITY_LOGIN_ID_FORMAT_MESSAGE, normalize_lo
 from app.api_contract import ContractErrorResponse, ContractRoute, ok
 from app.database import get_db
 from app.dependencies import require_admin
-from app.auth import get_current_user, require_owner
+from app.auth import get_contract_user, get_current_user, require_owner
 from app.models import Shelter, User, UserRole
 from app.rate_limit import RateLimiter
-from app.schemas import (AvailabilityResponse, SignupRequest, SignupResponse, SignupUserData,
+from app.schemas import (AvailabilityResponse, MeResponse, SignupRequest, SignupResponse, SignupUserData,
                          UserResponse, UserShelterUpdate)
 from app.signup_service import is_taken, register_user
 
@@ -36,10 +36,10 @@ ERROR_RESPONSES = {
 
 
 @onboarding.post("/", response_model=SignupResponse, dependencies=[Depends(SIGNUP_RATE_LIMITER)],
-                 responses={409: {"model": ContractErrorResponse, "description": "아이디, 닉네임, 이메일 중복"},
+                 responses={409: {"model": ContractErrorResponse, "description": "아이디, 닉네임 중복"},
                             **ERROR_RESPONSES})
 def create_user(payload: SignupRequest, db: Session = Depends(get_db)):
-    user = register_user(db, payload.login_id, payload.nickname, payload.email, payload.password)
+    user = register_user(db, payload.login_id, payload.nickname, payload.password)
     data = SignupUserData.model_validate(user, from_attributes=True).model_dump(mode="json")
     return ok(data, "회원가입이 완료되었습니다.")
 
@@ -64,12 +64,20 @@ def login_id_availability(login_id: str | None = Query(default=None, description
     return ok({"available": available}, "사용 가능한 아이디입니다." if available else "이미 사용 중인 아이디입니다.")
 
 
+@onboarding.get("/me", response_model=MeResponse,
+                responses={401: {"model": ContractErrorResponse,
+                                 "description": "AUTHENTICATION_REQUIRED, INVALID_ACCESS_TOKEN, SESSION_EXPIRED, "
+                                                "USER_NOT_FOUND. Cache-Control: no-store"},
+                           500: {"model": ContractErrorResponse, "description": "INTERNAL_SERVER_ERROR"}})
+def get_me(user: User = Depends(get_contract_user)):
+    # Read only: no DB write. Onboarding progress fields are added by Issue #45.
+    data = UserResponse.model_validate(user, from_attributes=True).model_dump(mode="json")
+    response = ok(data, "사용자 정보를 조회했습니다.")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 router.include_router(onboarding)
-
-
-@router.get("/me", response_model=UserResponse)
-def get_me(user=Depends(get_current_user)):
-    return user
 
 
 @router.patch("/{user_id}/shelter", response_model=UserResponse)

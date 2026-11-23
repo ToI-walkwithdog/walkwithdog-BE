@@ -1,4 +1,4 @@
-"""Sign-up uniqueness, concurrency and migration 016 on real PostgreSQL.
+"""Sign-up uniqueness, concurrency and migrations 016 and 017 on real PostgreSQL.
 
 SIGNUP_TEST_DATABASE_URL must name an EMPTY local toi_walk_test_* database.
 Each test works in its own new su_<uuid> schema and drops only that schema
@@ -19,10 +19,10 @@ from uuid import uuid4
 # first. Every test overrides get_db with SIGNUP_TEST_DATABASE_URL.
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app import signup_service
-    from app.auth import UNUSABLE_PASSWORD
+    from app.auth import UNUSABLE_PASSWORD, hash_password
     from app.database import Base, get_db
     from app.models import User
-    from app.routers import users
+    from app.routers import auth, users
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -36,6 +36,7 @@ TEST_URL = os.getenv("SIGNUP_TEST_DATABASE_URL")
 SCHEMA_NAME = re.compile(r"su_[0-9a-f]{32}")
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (ROOT / "migrations" / "016_onboarding_signup.sql").read_text(encoding="utf-8")
+EMAIL_REMOVAL = (ROOT / "migrations" / "017_remove_user_email.sql").read_text(encoding="utf-8")
 # Real files a dev DB has applied to users and walk tables before 016, in order.
 # 014 (F-08) adds users.phone; 015 (F-09) needs walk_reviews from 007.
 DEV_CHAIN_BEFORE_016 = ("005_user_roles.sql", "006_user_shelters.sql", "007_walk_domain.sql",
@@ -44,8 +45,9 @@ USER_REFERENCES = {("surveys", "user_id"), ("volunteer_profiles", "user_id"), ("
                    ("walk_requests", "reviewed_by"), ("walk_incidents", "reported_by")}
 PASSWORD = "WalkTogether2026!"
 INDEXES = {"uq_users_login_id_lower": "lower((login_id)::text)",
-           "uq_users_nickname_lower": "lower((nickname)::text)",
-           "uq_users_email_lower": "lower((email)::text)"}
+           "uq_users_nickname_lower": "lower((nickname)::text)"}
+# 016 also creates the email index; 017 removes it together with the column.
+INDEXES_AFTER_016 = {**INDEXES, "uq_users_email_lower": "lower((email)::text)"}
 
 
 @unittest.skipUnless(TEST_URL, "SIGNUP_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다")
@@ -111,6 +113,7 @@ class SignupPostgresTests(unittest.TestCase):
             Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
         app = FastAPI()
+        app.include_router(auth.router)
         app.include_router(users.router)
 
         def test_db():
@@ -119,13 +122,13 @@ class SignupPostgresTests(unittest.TestCase):
 
         app.dependency_overrides[get_db] = test_db
         # Concurrency tests send more sign-ups than the per-IP limit; limits are tested separately.
-        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER):
+        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER, auth.LOGIN_RATE_LIMITER):
             app.dependency_overrides[limiter] = lambda: None
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
 
     def body(self, suffix, **changes):
-        return {"login_id": f"user_{suffix}", "nickname": f"nick_{suffix}", "email": f"{suffix}@example.com",
+        return {"login_id": "user" + suffix.replace("_", ""), "nickname": f"nick_{suffix}",
                 "password": PASSWORD, **changes}
 
     def count(self):
@@ -209,10 +212,10 @@ class SignupPostgresTests(unittest.TestCase):
                 self.assertIn("CREATE UNIQUE INDEX", rows[name])
                 self.assertIn(f"({expression})", rows[name])
         with self.Session.begin() as db:
-            db.add(User(login_id="walker04", nickname="Walker", email="a@example.com", password=UNUSABLE_PASSWORD))
-        for changes in ({"login_id": "WALKER04"}, {"nickname": "wALKER"}, {"email": "A@Example.com"}):
+            db.add(User(login_id="walker04", nickname="Walker", password=UNUSABLE_PASSWORD))
+        for changes in ({"login_id": "WALKER04"}, {"nickname": "wALKER"}):
             with self.subTest(changes=changes):
-                values = {"login_id": "other", "nickname": "other", "email": "b@example.com", **changes}
+                values = {"login_id": "other", "nickname": "other", **changes}
                 with self.assertRaises(IntegrityError), self.Session.begin() as db:
                     db.add(User(**values, password=UNUSABLE_PASSWORD))
         self.assertEqual(self.count(), 1)
@@ -220,9 +223,8 @@ class SignupPostgresTests(unittest.TestCase):
     def test_constraint_violation_maps_to_the_right_field(self):
         self.start_api()
         self.assertEqual(self.client.post("/users/", json=self.body("a", nickname="Walker_King")).status_code, 200)
-        cases = (({"login_id": "USER_A"}, "LOGIN_ID_ALREADY_EXISTS", "login_id"),
-                 ({"nickname": "walker_king"}, "NICKNAME_ALREADY_EXISTS", "nickname"),
-                 ({"email": "A@EXAMPLE.COM"}, "EMAIL_ALREADY_EXISTS", "email"))
+        cases = (({"login_id": "USERA"}, "LOGIN_ID_ALREADY_EXISTS", "login_id"),
+                 ({"nickname": "walker_king"}, "NICKNAME_ALREADY_EXISTS", "nickname"))
         with patch("app.signup_service.first_taken_field", return_value=None):
             for index, (changes, code, field) in enumerate(cases):
                 with self.subTest(code=code):
@@ -235,8 +237,7 @@ class SignupPostgresTests(unittest.TestCase):
 
     def test_signup_after_another_user_passes_the_pre_check_gets_409_and_rolls_back(self):
         self.start_api()
-        for field, code in (("login_id", "LOGIN_ID_ALREADY_EXISTS"), ("nickname", "NICKNAME_ALREADY_EXISTS"),
-                            ("email", "EMAIL_ALREADY_EXISTS")):
+        for field, code in (("login_id", "LOGIN_ID_ALREADY_EXISTS"), ("nickname", "NICKNAME_ALREADY_EXISTS")):
             with self.subTest(field=field):
                 shared = self.body(f"shared_{field}")[field]
                 first = self.body(f"first_{field}", **{field: shared})
@@ -278,7 +279,7 @@ class SignupPostgresTests(unittest.TestCase):
             barrier.wait(10)  # every request passes the pre-check before any insert
             return result
 
-        bodies = [self.body(f"p{index}", login_id="same_login") for index in range(workers)]
+        bodies = [self.body(f"p{index}", login_id="samelogin") for index in range(workers)]
         with patch("app.signup_service.first_taken_field", side_effect=synchronized), \
                 ThreadPoolExecutor(max_workers=workers) as pool:
             responses = list(pool.map(lambda body: self.client.post("/users/", json=body), bodies))
@@ -297,7 +298,7 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual(columns["nickname"], ("VARCHAR(20)", False))
         self.assertEqual(columns["email"], ("VARCHAR(100)", False))
         self.assertEqual(columns["password"], ("VARCHAR(255)", False))
-        for name, expression in INDEXES.items():
+        for name, expression in INDEXES_AFTER_016.items():
             with self.subTest(index=name):
                 self.assertIn(f"({expression})", indexes[name])
         self.assertIn("users_email_key", indexes)
@@ -340,7 +341,7 @@ class SignupPostgresTests(unittest.TestCase):
                 "SELECT format_type(atttypid, atttypmod) FROM pg_attribute"
                 " WHERE attrelid = 'users'::regclass AND attname = 'role'")).scalar_one()
         self.assertEqual((role_type, columns["role"][1]), ("userrole", False))
-        for name, expression in INDEXES.items():
+        for name, expression in INDEXES_AFTER_016.items():
             with self.subTest(index=name):
                 self.assertIn("CREATE UNIQUE INDEX", user_indexes[name])
                 self.assertIn(f"({expression})", user_indexes[name])
@@ -364,19 +365,22 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertLessEqual(USER_REFERENCES, references)
         self.run_sql_file(MIGRATION)  # re-running on the still-empty migrated table is a no-op
         self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        # The current code no longer writes email, so it ships with 017 (same deployment).
+        self.run_sql_file(EMAIL_REMOVAL)
+        snapshot = self.schema_snapshot()
         # The ORM and sign-up API work on the migrated tables with no create_all().
         self.start_api(create_schema=False)
-        response = self.client.post("/users/", json=self.body("chain", login_id="Chain_User"))
+        response = self.client.post("/users/", json=self.body("chain", login_id="ChainUser1"))
         self.assertEqual(response.status_code, 200, response.text)
-        duplicate = self.client.post("/users/", json=self.body("other", login_id="CHAIN_USER"))
+        duplicate = self.client.post("/users/", json=self.body("other", login_id="CHAINUSER1"))
         self.assertEqual((duplicate.status_code, duplicate.json()["code"]), (409, "LOGIN_ID_ALREADY_EXISTS"))
         with self.engine.connect() as connection:
             row = connection.execute(text("SELECT login_id, role::text, phone FROM users")).one()
-        self.assertEqual(tuple(row), ("chain_user", "USER", None))
+        self.assertEqual(tuple(row), ("chainuser1", "USER", None))
         # Once an account exists, re-applying 016 is refused and changes nothing.
         with self.assertRaisesRegex(Exception, "016: users has existing rows"):
             self.run_sql_file(MIGRATION)
-        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        self.assertEqual(self.schema_snapshot(), snapshot)
 
     def test_migration_016_after_f08_aborts_and_preserves_rows_including_phone(self):
         self.create_dev_schema_before_016()
@@ -395,6 +399,115 @@ class SignupPostgresTests(unittest.TestCase):
             self.assertEqual(tuple(row), ("legacy@example.com", "기존 사용자", None, "010-0000-0000", "USER"))
             for table in ("surveys", "volunteer_profiles"):
                 self.assertEqual(connection.execute(text(f"SELECT count(*) FROM {table}")).scalar_one(), 1)
+
+
+    # Migration 017 (email removal)
+
+    def migrate_dev_chain_through_016_with_accounts(self):
+        """016 on the real dev chain, then accounts of every role as they would exist before 017."""
+        self.create_dev_schema_before_016()
+        # Login sessions (002) exist in every dev DB; the minimal chain above does not need them.
+        self.run_sql_file((ROOT / "migrations" / "002_auth_sessions.sql").read_text(encoding="utf-8"))
+        self.run_sql_file(MIGRATION)
+        self.password_hash = hash_password(PASSWORD)
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("INSERT INTO shelters (id, name) VALUES (1, '보호소')")
+            # login_id values cover the pre-2026-11-23 rule (underscore) and the current one.
+            connection.execute(text(
+                "INSERT INTO users (id, login_id, email, nickname, password, role, shelter_id, phone) VALUES"
+                " (1, 'walker_one', 'one@example.com', '봉사자', :hash, 'USER', NULL, '010-0000-0000'),"
+                " (2, 'shelter01', 'shelter@example.com', '보호소담당', :hash, 'SHELTER', 1, NULL),"
+                " (3, 'admin01', 'admin@example.com', '관리자', :hash, 'ADMIN', NULL, NULL)"),
+                {"hash": self.password_hash})
+            connection.exec_driver_sql("SELECT setval(pg_get_serial_sequence('users', 'id'), 3)")
+            connection.exec_driver_sql("INSERT INTO surveys (user_id) VALUES (1)")
+
+    def user_rows(self):
+        with self.engine.connect() as connection:
+            return [tuple(row) for row in connection.execute(text(
+                "SELECT id, login_id, nickname, password, role::text, shelter_id, phone, created_at"
+                " FROM users ORDER BY id"))]
+
+    def test_migration_017_drops_only_email_and_every_role_logs_in_by_id(self):
+        self.migrate_dev_chain_through_016_with_accounts()
+        before_rows = self.user_rows()
+        before_tables, before_indexes, before_constraints = self.schema_snapshot()
+        self.run_sql_file(EMAIL_REMOVAL)
+        tables, indexes, constraints = self.schema_snapshot()
+        columns, user_indexes, survey_fk, user_fk = self.users_structure()
+        self.assertNotIn("email", columns)
+        self.assertNotIn("uq_users_email_lower", user_indexes)
+        self.assertNotIn("users_email_key", user_indexes)
+        self.assertNotIn("users_email_key", {c[1] for c in constraints})
+        for name, expression in INDEXES.items():
+            with self.subTest(index=name):
+                self.assertIn("CREATE UNIQUE INDEX", user_indexes[name])
+                self.assertIn(f"({expression})", user_indexes[name])
+        self.assertEqual(columns["login_id"], ("VARCHAR(20)", False))
+        self.assertEqual((survey_fk, user_fk), ([(["user_id"], "users")], [(["shelter_id"], "shelters")]))
+        # Only the email column, its index and its constraint changed. Rows are intact.
+        self.assertEqual(sorted(tables["users"]),
+                         sorted(c for c in before_tables["users"] if c[0] != "email"))
+        self.assertEqual({k: v for k, v in tables.items() if k != "users"},
+                         {k: v for k, v in before_tables.items() if k != "users"})
+        self.assertEqual(indexes, [i for i in before_indexes if i[1] not in ("uq_users_email_lower", "users_email_key")])
+        self.assertEqual(constraints, [c for c in before_constraints if c[1] != "users_email_key"])
+        self.assertEqual(self.user_rows(), before_rows)
+        self.run_sql_file(EMAIL_REMOVAL)  # re-running is a no-op
+        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        # The new code runs on this schema without create_all(): every role logs in by ID.
+        self.start_api(create_schema=False)
+        for identifier, user_id, role in (("walker_one", 1, "user"), ("Shelter01", 2, "shelter"),
+                                          (" ADMIN01 ", 3, "admin")):
+            with self.subTest(role=role):
+                login = self.client.post("/auth/login", json={"identifier": identifier, "password": PASSWORD})
+                self.assertEqual(login.status_code, 200, login.text)
+                headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+                me = self.client.get("/users/me", headers=headers).json()["data"]
+                self.assertEqual((me["id"], me["role"]), (user_id, role))
+                self.assertNotIn("email", me)
+        email_login = self.client.post("/auth/login", json={"identifier": "one@example.com", "password": PASSWORD})
+        self.assertEqual((email_login.status_code, email_login.json()["code"]), (401, "INVALID_CREDENTIALS"))
+        # Existing and new accounts share the same case-insensitive ID space.
+        self.assertEqual(self.client.post("/users/", json=self.body("new", login_id="NewWalker")).status_code, 200)
+        clash = self.client.post("/users/", json=self.body("clash", login_id="SHELTER01"))
+        self.assertEqual((clash.status_code, clash.json()["code"]), (409, "LOGIN_ID_ALREADY_EXISTS"))
+        new_login = self.client.post("/auth/login", json={"identifier": "newwalker", "password": PASSWORD})
+        self.assertEqual(new_login.status_code, 200, new_login.text)
+
+    def test_migration_017_aborts_without_changes_before_016(self):
+        self.create_dev_schema_before_016()
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("INSERT INTO users (id, email, nickname) VALUES (1, 'legacy@example.com', '기존 사용자')")
+        before = self.schema_snapshot()
+        with self.assertRaisesRegex(Exception, "017: users.login_id is missing or nullable"):
+            self.run_sql_file(EMAIL_REMOVAL)
+        self.assertEqual(self.schema_snapshot(), before)
+        with self.engine.connect() as connection:
+            self.assertEqual(connection.execute(text("SELECT email FROM users")).scalar_one(), "legacy@example.com")
+
+    def test_migration_017_aborts_without_changes_on_a_blank_login_id(self):
+        self.migrate_dev_chain_through_016_with_accounts()
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("UPDATE users SET login_id = '  ' WHERE id = 2")
+        before, before_rows = self.schema_snapshot(), self.user_rows()
+        with self.assertRaisesRegex(Exception, "017: users has accounts with a blank login_id"):
+            self.run_sql_file(EMAIL_REMOVAL)
+        self.assertEqual((self.schema_snapshot(), self.user_rows()), (before, before_rows))
+
+    def test_migration_017_aborts_without_changes_when_another_object_uses_email(self):
+        self.migrate_dev_chain_through_016_with_accounts()
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("CREATE VIEW user_emails AS SELECT id, email FROM users")
+        before, before_rows = self.schema_snapshot(), self.user_rows()
+        with self.assertRaises(Exception) as caught:
+            self.run_sql_file(EMAIL_REMOVAL)
+        # SQLSTATE, not message text: the server may answer in a localized language.
+        self.assertEqual(getattr(caught.exception, "pgcode", None), "2BP01")  # dependent_objects_still_exist
+        # The index drop before the failing DROP COLUMN was rolled back too.
+        self.assertEqual((self.schema_snapshot(), self.user_rows()), (before, before_rows))
+        with self.engine.connect() as connection:
+            self.assertEqual(connection.execute(text("SELECT count(*) FROM user_emails")).scalar_one(), 3)
 
 
 if __name__ == "__main__":

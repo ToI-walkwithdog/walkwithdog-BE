@@ -45,58 +45,115 @@ class AuthTests(unittest.TestCase):
         for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER):
             limiter.reset()
             self.addCleanup(limiter.reset)
+        # Several tests log in more often than the login limit; it is tested in test_rate_limit.py.
+        app.dependency_overrides[auth.LOGIN_RATE_LIMITER] = lambda: None
         self.client = TestClient(app)
         with self.Session.begin() as db:
-            db.add_all([User(id=1, login_id="user_one", email="one@example.com", nickname="one", password=self.password_hash),
-                        User(id=2, login_id="user_two", email="two@example.com", nickname="two", password=self.password_hash),
-                        User(id=3, login_id="user_demo", email="demo@example.com", nickname="demo", password=UNUSABLE_PASSWORD),
-                        User(id=4, login_id="user_old", email="old@example.com", nickname="old", password=PASSWORD),
+            db.add_all([User(id=1, login_id="user_one", nickname="one", password=self.password_hash),
+                        User(id=2, login_id="user_two", nickname="two", password=self.password_hash),
+                        User(id=3, login_id="user_demo", nickname="demo", password=UNUSABLE_PASSWORD),
+                        User(id=4, login_id="user_old", nickname="old", password=PASSWORD),
                         Dog(id=1, name="테스트", energy_level=3)])
 
     def tearDown(self):
         self.client.close()
         self.engine.dispose()
 
-    def login(self, email="one@example.com", password=PASSWORD):
-        response = self.client.post("/auth/login", json={"email": email, "password": password})
+    def login(self, identifier="user_one", password=PASSWORD):
+        response = self.client.post("/auth/login", json={"identifier": identifier, "password": password})
         self.assertEqual(response.status_code, 200, response.text)
-        token = response.json()["access_token"]
+        token = response.json()["data"]["access_token"]
         self.client.headers["Authorization"] = f"Bearer {token}"
         return token
 
-    def test_registration_hashes_password_and_normalizes_email(self):
-        response = self.client.post("/users/", json={"login_id": "new_user", "email": "New@Example.com",
-                                                    "nickname": " new ", "password": SIGNUP_PASSWORD})
+    def session_count(self):
+        with self.Session() as db:
+            return db.query(AuthSession).count()
+
+    def test_registration_without_email_hashes_password_and_logs_in_by_id(self):
+        response = self.client.post("/users/", json={"login_id": "NewUser", "nickname": " new ",
+                                                    "password": SIGNUP_PASSWORD})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn("password", response.json()["data"])
+        self.assertNotIn("email", response.json()["data"])
         with self.Session() as db:
             user = db.get(User, response.json()["data"]["id"])
-            self.assertEqual(user.email, "new@example.com")
+            self.assertEqual(user.login_id, "newuser")
             self.assertEqual(user.nickname, "new")
             self.assertNotEqual(user.password, SIGNUP_PASSWORD)
             self.assertTrue(verify_password(SIGNUP_PASSWORD, user.password))
-        self.login("NEW@example.com", SIGNUP_PASSWORD)
+        self.login("NEWUSER", SIGNUP_PASSWORD)
+        self.assertEqual(self.client.get("/users/me").json()["data"]["login_id"], "newuser")
 
-    def test_duplicate_email_and_invalid_registration(self):
-        body = {"login_id": "new_user", "email": "new@example.com", "nickname": "new", "password": SIGNUP_PASSWORD}
-        response = self.client.post("/users/", json={**body, "email": "ONE@example.com"})
-        self.assertEqual((response.status_code, response.json()["code"]), (409, "EMAIL_ALREADY_EXISTS"))
-        for changes in ({"password": "short"}, {"email": "invalid"}, {"nickname": " "}):
+    def test_duplicate_login_id_and_invalid_registration(self):
+        body = {"login_id": "newuser", "nickname": "new", "password": SIGNUP_PASSWORD}
+        self.assertEqual(self.client.post("/users/", json=body).status_code, 200)
+        response = self.client.post("/users/", json={**body, "login_id": "NEWUSER", "nickname": "other"})
+        self.assertEqual((response.status_code, response.json()["code"]), (409, "LOGIN_ID_ALREADY_EXISTS"))
+        for changes in ({"password": "short"}, {"login_id": "new_user"}, {"nickname": " "}):
             self.assertEqual(self.client.post("/users/", json={**body, **changes}).status_code, 422)
+
+    def test_login_success_contract(self):
+        response = self.client.post("/auth/login", json={"identifier": "  USER_One ", "password": PASSWORD})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual((body["code"], body["message"]), ("OK", "로그인에 성공했습니다."))
+        self.assertEqual(set(body["data"]), {"access_token", "token_type", "expires_in"})
+        self.assertEqual((body["data"]["token_type"], body["data"]["expires_in"]), ("bearer", 3600))
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(self.session_count(), 1)
+
+    def test_login_input_errors_are_422_and_create_no_session(self):
+        cases = (
+            ({"password": PASSWORD}, "IDENTIFIER_REQUIRED", "identifier", "아이디를 입력해 주세요."),
+            ({"identifier": "   ", "password": PASSWORD}, "IDENTIFIER_REQUIRED", "identifier", None),
+            ({"identifier": None, "password": PASSWORD}, "IDENTIFIER_REQUIRED", "identifier", None),
+            ({"identifier": 1234, "password": PASSWORD}, "IDENTIFIER_REQUIRED", "identifier", None),
+            ({}, "IDENTIFIER_REQUIRED", "identifier", None),
+            # The removed email field is not an alias: the request is missing identifier.
+            ({"email": "one@example.com", "password": PASSWORD}, "IDENTIFIER_REQUIRED", "identifier", None),
+            ({"identifier": "user_one"}, "PASSWORD_REQUIRED", "password", "비밀번호를 입력해 주세요."),
+            ({"identifier": "user_one", "password": ""}, "PASSWORD_REQUIRED", "password", None),
+            ({"identifier": "user_one", "password": "   "}, "PASSWORD_REQUIRED", "password", None),
+            ({"identifier": "a" * 101, "password": PASSWORD}, "INVALID_IDENTIFIER_FORMAT", "identifier",
+             "아이디 형식을 확인해 주세요."),
+        )
+        for body, code, field, message in cases:
+            with self.subTest(body=body):
+                response = self.client.post("/auth/login", json=body)
+                self.assertEqual((response.status_code, response.json()["code"], response.json()["data"]),
+                                 (422, code, {"field": field}))
+                if message:
+                    self.assertEqual(response.json()["message"], message)
+        for raw in (b"", b"not json"):
+            with self.subTest(raw=raw):
+                response = self.client.post("/auth/login", content=raw, headers={"Content-Type": "application/json"})
+                self.assertEqual((response.status_code, response.json()["code"]), (422, "IDENTIFIER_REQUIRED"))
+        # 100 characters is still a lookup, not a format error; no such account exists.
+        response = self.client.post("/auth/login", json={"identifier": "a" * 100, "password": PASSWORD})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.session_count(), 0)
 
     def test_login_and_only_hashed_token_is_persisted(self):
         token = self.login()
-        self.assertEqual(self.client.get("/users/me").json()["id"], 1)
+        self.assertEqual(self.client.get("/users/me").json()["data"]["id"], 1)
         with self.Session() as db:
             session = db.query(AuthSession).one()
             self.assertEqual(session.token_hash, token_digest(token))
             self.assertNotEqual(session.token_hash, token)
 
     def test_bad_credentials_and_legacy_accounts_are_rejected_unchanged(self):
-        for email, password in (("missing@example.com", PASSWORD), ("one@example.com", "wrong"),
-                                ("demo@example.com", PASSWORD), ("old@example.com", PASSWORD)):
-            response = self.client.post("/auth/login", json={"email": email, "password": password})
-            self.assertEqual(response.status_code, 401)
+        expected = {"code": "INVALID_CREDENTIALS", "data": {}, "message": "아이디와 비밀번호를 확인해 주세요."}
+        # Unknown ID, wrong password, unusable hash, plaintext legacy password, an email
+        # address (email login was removed) and an over-long password all look the same.
+        for identifier, password in (("missing", PASSWORD), ("user_one", "wrong"), ("user_demo", PASSWORD),
+                                     ("user_old", PASSWORD), ("one@example.com", PASSWORD),
+                                     ("user_one", PASSWORD + "x" * 129)):
+            with self.subTest(identifier=identifier):
+                response = self.client.post("/auth/login", json={"identifier": identifier, "password": password})
+                self.assertEqual((response.status_code, response.json()), (401, expected))
+                self.assertEqual(response.headers["www-authenticate"], "Bearer")
+        self.assertEqual(self.session_count(), 0)
         with self.Session() as db:
             self.assertEqual(db.get(User, 4).password, PASSWORD)
             self.assertEqual(db.get(User, 3).password, UNUSABLE_PASSWORD)
@@ -121,8 +178,79 @@ class AuthTests(unittest.TestCase):
 
     def test_logout_revokes_session(self):
         self.login()
-        self.assertEqual(self.client.post("/auth/logout").status_code, 204)
+        response = self.client.post("/auth/logout")
+        self.assertEqual((response.status_code, response.json()),
+                         (200, {"code": "OK", "data": {}, "message": "로그아웃이 완료되었습니다."}))
+        self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertEqual(self.client.get("/users/me").status_code, 401)
+
+    def test_logout_contract_errors_and_retry(self):
+        first = self.login()
+        second = self.login()
+        self.client.headers["Authorization"] = f"Bearer {first}"
+        self.assertEqual(self.client.post("/auth/logout").status_code, 200)
+        # A retried logout (e.g. the first response was lost) gets 401 and changes nothing.
+        retry = self.client.post("/auth/logout")
+        self.assertEqual((retry.status_code, retry.json()["code"]), (401, "INVALID_ACCESS_TOKEN"))
+        self.assertEqual(retry.json()["message"], "유효하지 않은 인증 정보입니다.")
+        # Only the current token was revoked; the other session still works.
+        self.client.headers["Authorization"] = f"Bearer {second}"
+        self.assertEqual(self.client.get("/users/me").status_code, 200)
+        with self.Session.begin() as db:
+            db.get(AuthSession, token_digest(second)).expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        expired = self.client.post("/auth/logout")
+        self.assertEqual((expired.status_code, expired.json()["code"]), (401, "SESSION_EXPIRED"))
+        self.client.headers.pop("Authorization")
+        missing = self.client.post("/auth/logout")
+        self.assertEqual((missing.status_code, missing.json()),
+                         (401, {"code": "AUTHENTICATION_REQUIRED", "data": {}, "message": "로그인이 필요합니다."}))
+
+    def test_users_me_contract(self):
+        self.login()
+        response = self.client.get("/users/me")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.json(), {
+            "code": "OK", "message": "사용자 정보를 조회했습니다.",
+            "data": {"id": 1, "login_id": "user_one", "nickname": "one", "role": "user", "shelter_id": None}})
+
+    def test_users_me_401_codes_and_no_db_write(self):
+        token = self.login()
+        cases = [(None, "AUTHENTICATION_REQUIRED", "로그인이 필요합니다."),
+                 ("Basic " + token, "AUTHENTICATION_REQUIRED", "로그인이 필요합니다."),
+                 ("Bearer forged-token", "INVALID_ACCESS_TOKEN", "유효하지 않은 인증 정보입니다."),
+                 ("Bearer " + "a" * 257, "INVALID_ACCESS_TOKEN", "유효하지 않은 인증 정보입니다.")]
+        for header, code, message in cases:
+            with self.subTest(code=code, header=(header or "")[:12]):
+                headers = {"Authorization": header} if header else {}
+                self.client.headers.pop("Authorization", None)
+                response = self.client.get("/users/me", headers=headers)
+                self.assertEqual((response.status_code, response.json()), (401, {"code": code, "data": {}, "message": message}))
+                self.assertEqual(response.headers["cache-control"], "no-store")
+                self.assertEqual(response.headers["www-authenticate"], "Bearer")
+        self.client.headers["Authorization"] = f"Bearer {token}"
+        with self.Session.begin() as db:
+            db.get(AuthSession, token_digest(token)).expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        response = self.client.get("/users/me")
+        self.assertEqual((response.status_code, response.json()["code"]), (401, "SESSION_EXPIRED"))
+        self.assertEqual(response.json()["message"], "로그인 세션이 만료되었습니다.")
+        self.assertEqual(self.session_count(), 1)  # GET never deletes the expired session
+        token = self.login()
+        with self.Session.begin() as db:
+            db.query(AuthSession).filter(AuthSession.user_id == 1).delete()
+            db.add(AuthSession(token_hash=token_digest(token), user_id=999,
+                               expires_at=datetime.now(timezone.utc) + timedelta(hours=1)))
+        response = self.client.get("/users/me")
+        self.assertEqual((response.status_code, response.json()),
+                         (401, {"code": "USER_NOT_FOUND", "data": {}, "message": "로그인이 필요합니다."}))
+
+    def test_auth_me_is_removed_and_other_routes_keep_detail_401(self):
+        self.login()
+        self.assertEqual(self.client.get("/auth/me").status_code, 404)
+        self.client.headers["Authorization"] = "Bearer forged-token"
+        for path in ("/users/1", "/surveys/1"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).json(), {"detail": "로그인이 필요하거나 세션이 만료되었습니다."})
 
     def test_other_users_private_routes_forbidden(self):
         self.login()
@@ -158,8 +286,8 @@ class AuthTests(unittest.TestCase):
         first_token = self.login()
         survey = self.client.post("/surveys/", json={"user_id": 1}).json()
         self.client.post(f"/matching/{survey['id']}")
-        self.login("two@example.com")
-        self.assertEqual(self.client.get("/users/me").json()["id"], 2)
+        self.login("user_two")
+        self.assertEqual(self.client.get("/users/me").json()["data"]["id"], 2)
         self.assertEqual(self.client.get("/surveys/2").json(), [])
         self.assertEqual(self.client.get("/matching/history/2").json(), [])
         self.assertEqual(self.client.post(f"/matching/{survey['id']}").status_code, 404)
@@ -177,7 +305,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.client.get("/users/me").status_code, 401)
 
     def test_role_defaults_cannot_be_selected_during_registration(self):
-        response = self.client.post("/users/", json={"login_id": "role_user", "email": "role@example.com", "nickname": "role",
+        response = self.client.post("/users/", json={"login_id": "roleuser", "nickname": "role",
                                                     "password": SIGNUP_PASSWORD, "role": "admin"})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["data"]["role"], "user")
@@ -192,8 +320,7 @@ class AuthTests(unittest.TestCase):
             db.get(User, 1).shelter_id = 1
             db.get(Dog, 1).shelter_id = 1
         self.login()
-        self.assertEqual(self.client.get("/users/me").json(), self.client.get("/auth/me").json())
-        self.assertEqual(self.client.get("/auth/me").json()["role"], "shelter")
+        self.assertEqual(self.client.get("/users/me").json()["data"]["role"], "shelter")
         self.assertEqual(self.client.post("/dogs/", json={"name": "권한 검증", "shelter_id": 1}).status_code, 200)
         self.assertEqual(self.client.put("/dogs/1/traits", json={"description": "관찰"}).status_code, 200)
         self.assertEqual(self.client.post("/breed-traits/", json={"breed_name": "권한 검증"}).status_code, 403)
@@ -232,12 +359,31 @@ class AuthTests(unittest.TestCase):
                 self.assertEqual(self.client.get("/public-api/test").status_code, 403)
                 fetch.assert_not_called()
 
+    def test_user_shelter_and_admin_log_in_by_id_and_user_views_have_no_email(self):
+        with self.Session.begin() as db:
+            db.add(Shelter(id=1, name="담당 보호소"))
+            db.add_all([User(id=5, login_id="shelter01", nickname="보호소", password=self.password_hash,
+                             role=UserRole.SHELTER, shelter_id=1),
+                        User(id=6, login_id="admin01", nickname="관리자", password=self.password_hash,
+                             role=UserRole.ADMIN)])
+        for identifier, user_id, role in (("user_one", 1, "user"), ("SHELTER01", 5, "shelter"), ("Admin01", 6, "admin")):
+            with self.subTest(role=role):
+                self.login(identifier)
+                expected = {"id": user_id, "login_id": identifier.lower(), "role": role}
+                for path in ("/users/me", f"/users/{user_id}"):
+                    body = self.client.get(path).json()
+                    body = body["data"] if path == "/users/me" else body
+                    self.assertNotIn("email", body, path)
+                    self.assertEqual({key: body[key] for key in expected}, expected, path)
+                self.client.post("/auth/logout")
+        self.assertEqual(self.session_count(), 0)
+
     def test_legacy_plaintext_session_is_not_a_second_authentication_path(self):
         with self.Session.begin() as db:
             db.add(SessionToken(user_id=1, token="legacy-token", is_active=True,
                                 expires_at=datetime.now(timezone.utc) + timedelta(hours=1)))
         self.client.headers["Authorization"] = "Bearer legacy-token"
-        self.assertEqual(self.client.get("/auth/me").status_code, 401)
+        self.assertEqual(self.client.get("/users/me").status_code, 401)
         self.assertEqual(self.client.post("/dogs/", json={"name": "차단"}).status_code, 401)
 
 

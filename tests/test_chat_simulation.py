@@ -45,8 +45,8 @@ class ChatSimulationTests(unittest.TestCase):
         self.settings.start()
         self.addCleanup(self.settings.stop)
         with self.Session.begin() as db:
-            db.add_all([User(id=1, login_id="private_user", email="private@example.com", nickname="private", password=UNUSABLE_PASSWORD),
-                        User(id=2, login_id="other_user", email="other@example.com", nickname="other", password=UNUSABLE_PASSWORD),
+            db.add_all([User(id=1, login_id="private_user", nickname="private", password=UNUSABLE_PASSWORD),
+                        User(id=2, login_id="other_user", nickname="other", password=UNUSABLE_PASSWORD),
                         Dog(id=1, name="강아지", energy_level=5, separation_anxiety_level=5, trait_source="shelter_text_parsed"),
                         Survey(id=1, user_id=1, housing_type="studio", outing_frequency="daily", daily_walk_time="0.5", walk_duration="under_20_minutes"),
                         Survey(id=2, user_id=2), Survey(id=3, user_id=1, outing_frequency="mostly_home", daily_walk_time="2")])

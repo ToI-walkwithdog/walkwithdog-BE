@@ -22,7 +22,7 @@ import time
 
 from fastapi import Request
 
-from app.api_contract import too_many_requests
+from app.api_contract import TOO_MANY_REQUESTS_MESSAGE, too_many_requests
 
 logger = logging.getLogger(__name__)
 
@@ -88,29 +88,33 @@ class RateLimiter:
     Routes that share one instance share one budget per client.
     """
 
-    def __init__(self, name: str, limit: int, window_seconds: int, store=None):
+    def __init__(self, name: str, limit: int, window_seconds: int, store=None,
+                 message: str = TOO_MANY_REQUESTS_MESSAGE):
         if limit < 1 or window_seconds < 1:
             raise ValueError("limit and window_seconds must be positive")
         self.name = name
         self.limit = limit
         self.window_seconds = window_seconds
         self.store = store if store is not None else MemoryWindowStore()
+        self.message = message
 
     @classmethod
-    def from_env(cls, name: str, prefix: str, default_limit: int, default_window_seconds: int):
+    def from_env(cls, name: str, prefix: str, default_limit: int, default_window_seconds: int,
+                 message: str = TOO_MANY_REQUESTS_MESSAGE):
         return cls(name, positive_int_env(f"{prefix}_RATE_LIMIT_REQUESTS", default_limit),
-                   positive_int_env(f"{prefix}_RATE_LIMIT_WINDOW_SECONDS", default_window_seconds))
+                   positive_int_env(f"{prefix}_RATE_LIMIT_WINDOW_SECONDS", default_window_seconds),
+                   message=message)
 
     def __call__(self, request: Request) -> None:
         try:
             retry_after = self.store.hit(client_key(request), self.limit, self.window_seconds)
         except Exception as exc:
-            # Fail open: a broken limiter must not block sign-up. Unique indexes still
-            # guard the data. Log no client address or request values.
+            # Fail open: a broken limiter must not block sign-up or login. Unique indexes
+            # and password checks still guard the data. Log no client address or values.
             logger.error("rate limit %s unavailable, request allowed: %s", self.name, type(exc).__name__)
             return
         if retry_after:
-            raise too_many_requests(retry_after)
+            raise too_many_requests(retry_after, self.message)
 
     def reset(self):
         self.store.clear()

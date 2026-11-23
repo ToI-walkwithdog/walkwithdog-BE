@@ -10,15 +10,11 @@ from app.models import User, UserRole
 DUPLICATE_ERRORS = {
     "login_id": ("LOGIN_ID_ALREADY_EXISTS", "이미 사용 중인 아이디입니다."),
     "nickname": ("NICKNAME_ALREADY_EXISTS", "이미 사용 중인 닉네임입니다."),
-    "email": ("EMAIL_ALREADY_EXISTS", "이미 사용 중인 이메일입니다."),
 }
-# Index and constraint names from app.models and migration 016. users_email_key is
-# the pre-existing column constraint that PostgreSQL created for email.
+# Index names from app.models and migration 016. Migration 017 drops the email ones.
 UNIQUE_CONSTRAINT_FIELDS = {
     "uq_users_login_id_lower": "login_id",
     "uq_users_nickname_lower": "nickname",
-    "uq_users_email_lower": "email",
-    "users_email_key": "email",
 }
 
 
@@ -46,12 +42,12 @@ def conflicted_field(exc: IntegrityError) -> str | None:
     for constraint, field in UNIQUE_CONSTRAINT_FIELDS.items():
         if constraint in detail:
             return field
-    return "email" if "users.email" in detail else None
+    return None
 
 
-def register_user(db: Session, login_id: str, nickname: str, email: str, password: str) -> User:
+def register_user(db: Session, login_id: str, nickname: str, password: str) -> User:
     """Insert one account in a single transaction; values are already normalized."""
-    values = {"login_id": login_id, "nickname": nickname, "email": email}
+    values = {"login_id": login_id, "nickname": nickname}
     taken = first_taken_field(db, values)
     if taken:
         raise duplicate_error(taken)

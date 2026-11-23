@@ -3,12 +3,13 @@
 import argparse
 import json
 
-from sqlalchemy import func, or_, text
+from sqlalchemy import func, text
 
 from app.auth import UNUSABLE_PASSWORD
 from app.models import User, Shelter, Dog
 
-EMAIL = "api-demo@example.invalid"
+# The demo user is found by this ID. It predates the current sign-up rule and is
+# kept so existing demo rows are still recognized; the account can never log in.
 LOGIN_ID = "api_demo_seed"
 NICKNAME = "[DEMO] API 시연 사용자"
 SHELTER_KEY = "DEMO-API-SHELTER-V1"
@@ -26,13 +27,12 @@ FIXTURES = (
 def seed(db, apply=False):
     if apply and db.bind.dialect.name == "postgresql":
         db.execute(text("SELECT pg_advisory_xact_lock(724931001)"))
-    user = db.query(User).filter(User.email == EMAIL).first()
+    user = db.query(User).filter(func.lower(User.login_id) == LOGIN_ID).first()
     shelter = db.query(Shelter).filter(Shelter.desertion_no == SHELTER_KEY).first()
-    if user and (user.nickname != NICKNAME or user.login_id != LOGIN_ID or user.password != UNUSABLE_PASSWORD):
-        raise ValueError("시연 사용자 이메일이 기존 다른 사용자와 충돌합니다.")
-    if user is None and db.query(User).filter(or_(func.lower(User.login_id) == LOGIN_ID,
-                                                  func.lower(User.nickname) == func.lower(NICKNAME))).first():
-        raise ValueError("시연 사용자 아이디 또는 닉네임이 기존 다른 사용자와 충돌합니다.")
+    if user and (user.nickname != NICKNAME or user.password != UNUSABLE_PASSWORD):
+        raise ValueError("시연 사용자 아이디가 기존 다른 사용자와 충돌합니다.")
+    if user is None and db.query(User).filter(func.lower(User.nickname) == func.lower(NICKNAME)).first():
+        raise ValueError("시연 사용자 닉네임이 기존 다른 사용자와 충돌합니다.")
     if shelter and shelter.name != SHELTER_NAME:
         raise ValueError("시연 보호소 식별자가 기존 다른 보호소와 충돌합니다.")
     dogs = []
@@ -49,7 +49,7 @@ def seed(db, apply=False):
     if apply:
         if user is None:
             # Never a login account: UNUSABLE_PASSWORD always fails verification.
-            user = User(email=EMAIL, login_id=LOGIN_ID, nickname=NICKNAME, password=UNUSABLE_PASSWORD)
+            user = User(login_id=LOGIN_ID, nickname=NICKNAME, password=UNUSABLE_PASSWORD)
             db.add(user)
         if shelter is None:
             shelter = Shelter(desertion_no=SHELTER_KEY, name=SHELTER_NAME,
@@ -68,7 +68,7 @@ def seed(db, apply=False):
             "shelter_id": shelter.id if shelter else None,
             "dog_ids": [row.id for row in db.query(Dog).filter(
                 Dog.desertion_no.in_([key for key, _, _, _ in dogs])).order_by(Dog.desertion_no)],
-            "email": EMAIL}
+            "login_id": LOGIN_ID}
 
 
 def main(argv=None):

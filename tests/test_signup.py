@@ -23,17 +23,16 @@ from sqlalchemy.schema import CreateIndex
 
 ROOT = Path(__file__).resolve().parents[1]
 PASSWORD = "WalkTogether2026!"
-VALID = {"login_id": "walker04", "nickname": "산책왕", "email": "walker@example.com", "password": PASSWORD}
+VALID = {"login_id": "walker04", "nickname": "산책왕", "password": PASSWORD}
 # Messages are copied from the Notion API spec, not imported from app code, so a
 # changed string in the app fails here instead of silently updating the expectation.
 REQUIRED = ("REQUIRED_FIELD", "필수 입력 항목을 확인해 주세요.")
 MESSAGES = {
     "INVALID_LOGIN_ID_LENGTH": "아이디는 4~20자로 입력해 주세요.",
     # Sign-up wording; GET /users/id-availability uses AVAILABILITY_LOGIN_ID_FORMAT.
-    "INVALID_LOGIN_ID_FORMAT": "아이디에는 영문 소문자, 숫자, 밑줄만 사용할 수 있습니다.",
+    "INVALID_LOGIN_ID_FORMAT": "아이디에는 영문과 숫자만 사용할 수 있습니다.",
     "INVALID_NICKNAME_LENGTH": "닉네임은 3~20자로 입력해 주세요.",
     "INVALID_NICKNAME_FORMAT": "닉네임에 사용할 수 없는 문자가 포함되어 있습니다.",
-    "INVALID_EMAIL": "올바른 이메일을 입력해 주세요.",
     "INVALID_PASSWORD_LENGTH": "비밀번호는 15~128자로 입력해 주세요.",
     "PASSWORD_UPPERCASE_REQUIRED": "비밀번호에 영문 대문자를 1개 이상 포함해 주세요.",
     "PASSWORD_LOWERCASE_REQUIRED": "비밀번호에 영문 소문자를 1개 이상 포함해 주세요.",
@@ -41,7 +40,6 @@ MESSAGES = {
     "PASSWORD_SPECIAL_REQUIRED": "비밀번호에 특수문자를 1개 이상 포함해 주세요.",
     "LOGIN_ID_ALREADY_EXISTS": "이미 사용 중인 아이디입니다.",
     "NICKNAME_ALREADY_EXISTS": "이미 사용 중인 닉네임입니다.",
-    "EMAIL_ALREADY_EXISTS": "이미 사용 중인 이메일입니다.",
     "LOGIN_ID_REQUIRED": "아이디를 입력해 주세요.",
     "NICKNAME_REQUIRED": "닉네임을 입력해 주세요.",
 }
@@ -68,7 +66,7 @@ class SignupTests(unittest.TestCase):
 
         app.dependency_overrides[get_db] = test_db
         # These tests send many requests per test on purpose; limits are covered in test_rate_limit.py.
-        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER):
+        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER, auth.LOGIN_RATE_LIMITER):
             app.dependency_overrides[limiter] = lambda: None
         self.client = TestClient(app)
 
@@ -94,13 +92,13 @@ class SignupTests(unittest.TestCase):
     # Sign-up success and storage
 
     def test_signup_returns_contract_and_stores_normalized_values_with_scrypt_hash(self):
-        response = self.signup(login_id="  Walker04 ", email=" Walker@Example.COM ", nickname="  산책왕 ")
+        response = self.signup(login_id="  Walker04 ", nickname="  산책왕 ")
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         self.assertEqual(body["code"], "OK")
         self.assertEqual(body["message"], "회원가입이 완료되었습니다.")
         self.assertEqual(body["data"], {"id": body["data"]["id"], "login_id": "walker04", "nickname": "산책왕",
-                                        "email": "walker@example.com", "role": "user", "shelter_id": None})
+                                        "role": "user", "shelter_id": None})
         self.assertNotIn(PASSWORD, response.text)
         self.assertNotIn("scrypt$", response.text)
         self.assertNotIn("access_token", response.text)
@@ -123,8 +121,18 @@ class SignupTests(unittest.TestCase):
     def test_role_and_shelter_cannot_be_chosen_and_new_account_can_log_in(self):
         response = self.signup(role="admin", shelter_id=1)
         self.assertEqual((response.json()["data"]["role"], response.json()["data"]["shelter_id"]), ("user", None))
-        login = self.client.post("/auth/login", json={"email": VALID["email"], "password": PASSWORD})
+        login = self.client.post("/auth/login", json={"identifier": "WALKER04", "password": PASSWORD})
         self.assertEqual(login.status_code, 200, login.text)
+
+    def test_email_is_not_collected_and_a_leftover_email_field_is_ignored(self):
+        self.assertNotIn("email", User.__table__.columns)
+        response = self.signup(email="walker@example.com")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("email", response.json()["data"])
+        self.assertNotIn("walker@example.com", response.text)
+        # Malformed or duplicate email values are irrelevant now: the field is not read.
+        self.assertEqual(self.signup(login_id="walker05", nickname="산책왕2", email="not-an-email").status_code, 200)
+        self.assertEqual(self.user_count(), 2)
 
     def test_unicode_nickname_is_stored_in_nfc(self):
         decomposed = unicodedata.normalize("NFD", "산책왕")
@@ -142,7 +150,7 @@ class SignupTests(unittest.TestCase):
                                 ("number", {**VALID, field: 1234})):
                 with self.subTest(field=field, case=label):
                     self.assert_contract(self.client.post("/users/", json=body), 422, "REQUIRED_FIELD", {"field": field})
-        for field in ("login_id", "nickname", "email"):
+        for field in ("login_id", "nickname"):
             with self.subTest(field=field, case="blank"):
                 self.assert_contract(self.signup(**{field: "   "}), 422, "REQUIRED_FIELD", {"field": field})
         for label, kwargs in (("no body", {}), ("broken json", {"content": b"{bad",
@@ -153,7 +161,7 @@ class SignupTests(unittest.TestCase):
         self.assertEqual(self.user_count(), 0)
 
     def test_first_invalid_field_in_request_order_is_reported(self):
-        response = self.client.post("/users/", json={"login_id": "ab", "email": "bad"})
+        response = self.client.post("/users/", json={"login_id": "ab", "nickname": "no"})
         self.assert_contract(response, 422, "INVALID_LOGIN_ID_LENGTH", LOGIN_ID_LENGTH)
         response = self.signup(nickname="no", password="short")
         self.assert_contract(response, 422, "INVALID_NICKNAME_LENGTH", NICKNAME_LENGTH)
@@ -162,10 +170,11 @@ class SignupTests(unittest.TestCase):
         for value in ("abc", "a" * 21, " abc "):
             with self.subTest(value=value):
                 self.assert_contract(self.signup(login_id=value), 422, "INVALID_LOGIN_ID_LENGTH", LOGIN_ID_LENGTH)
-        for value in ("walker-04", "walker 04", "walker.04", "산책아이디", "walker!", "Kelvin1"):
+        # Underscore was allowed before 2026-11-23; the rule is now ^[A-Za-z0-9]{4,20}$.
+        for value in ("walker_04", "____", "walker-04", "walker 04", "walker.04", "산책아이디", "walker!", "Kelvin1"):
             with self.subTest(value=value):
                 self.assert_contract(self.signup(login_id=value), 422, "INVALID_LOGIN_ID_FORMAT", {"field": "login_id"})
-        for value in ("abcd", "a" * 20, "____", "1234", "WALKER_04"):
+        for value in ("abcd", "a" * 20, "1234", "WALKER04", "Walker04"):
             with self.subTest(value=value):
                 self.assertEqual(self.client.get("/users/id-availability", params={"login_id": value}).status_code, 200)
 
@@ -180,12 +189,6 @@ class SignupTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(self.client.get("/users/nickname-availability", params={"nickname": value}).status_code, 200)
 
-    def test_email_format_and_length(self):
-        too_long = "a" * 64 + "@" + "b" * 40 + ".com"
-        for value in ("walker", "walker@", "@example.com", "walker@@example.com", "walker example@test.com", too_long):
-            with self.subTest(value=value):
-                self.assert_contract(self.signup(email=value), 422, "INVALID_EMAIL", {"field": "email"})
-
     def test_password_length_and_character_rules(self):
         for value in ("Walk2026!short", "Aa1!" + "a" * 125):
             with self.subTest(length=len(value)):
@@ -198,8 +201,8 @@ class SignupTests(unittest.TestCase):
                 self.assert_contract(self.signup(password=value), 422, code, {"field": "password", "rule": rule})
         for value in ("Walk2026!abcdef", "Aa1!" + "a" * 124):
             with self.subTest(length=len(value)):
-                self.assertEqual(self.signup(password=value, login_id=f"len_{len(value)}",
-                                             nickname=f"len_{len(value)}", email=f"len{len(value)}@example.com").status_code, 200)
+                self.assertEqual(self.signup(password=value, login_id=f"len{len(value)}",
+                                             nickname=f"len_{len(value)}").status_code, 200)
         self.assertEqual(self.user_count(), 2)
 
     # Duplicates
@@ -208,9 +211,8 @@ class SignupTests(unittest.TestCase):
         self.assertEqual(self.signup(nickname="Walker_King").status_code, 200)
         cases = (
             ({"login_id": "WALKER04"}, "LOGIN_ID_ALREADY_EXISTS", "login_id"),
-            ({"login_id": "other_id", "nickname": "walker_KING"}, "NICKNAME_ALREADY_EXISTS", "nickname"),
-            ({"login_id": "other_id", "nickname": "other_nick", "email": "WALKER@example.com"},
-             "EMAIL_ALREADY_EXISTS", "email"),
+            ({"login_id": "Walker04", "nickname": "other_nick"}, "LOGIN_ID_ALREADY_EXISTS", "login_id"),
+            ({"login_id": "otherid", "nickname": "walker_KING"}, "NICKNAME_ALREADY_EXISTS", "nickname"),
         )
         for changes, code, field in cases:
             with self.subTest(code=code):
@@ -219,21 +221,19 @@ class SignupTests(unittest.TestCase):
 
     def test_nfc_equivalent_nickname_is_a_duplicate(self):
         self.assertEqual(self.signup().status_code, 200)
-        response = self.signup(login_id="other_id", email="other@example.com",
-                               nickname=unicodedata.normalize("NFD", "산책왕"))
+        response = self.signup(login_id="otherid", nickname=unicodedata.normalize("NFD", "산책왕"))
         self.assert_contract(response, 409, "NICKNAME_ALREADY_EXISTS", {"field": "nickname"})
 
     def test_duplicate_fields_are_reported_in_request_order(self):
         self.assertEqual(self.signup().status_code, 200)
         self.assert_contract(self.signup(), 409, "LOGIN_ID_ALREADY_EXISTS", {"field": "login_id"})
-        self.assert_contract(self.signup(login_id="other_id"), 409, "NICKNAME_ALREADY_EXISTS", {"field": "nickname"})
+        self.assert_contract(self.signup(login_id="otherid"), 409, "NICKNAME_ALREADY_EXISTS", {"field": "nickname"})
 
     def test_unique_index_violation_reports_the_conflicting_field_and_rolls_back(self):
         self.assertEqual(self.signup(nickname="Walker_King").status_code, 200)
         cases = (
-            ({"login_id": "Walker04", "nickname": "n_one", "email": "one@example.com"}, "LOGIN_ID_ALREADY_EXISTS", "login_id"),
-            ({"login_id": "id_two", "nickname": "WALKER_king", "email": "two@example.com"}, "NICKNAME_ALREADY_EXISTS", "nickname"),
-            ({"login_id": "id_three", "nickname": "n_three", "email": "Walker@Example.com"}, "EMAIL_ALREADY_EXISTS", "email"),
+            ({"login_id": "Walker04", "nickname": "n_one"}, "LOGIN_ID_ALREADY_EXISTS", "login_id"),
+            ({"login_id": "idtwo", "nickname": "WALKER_king"}, "NICKNAME_ALREADY_EXISTS", "nickname"),
         )
         # Skip the pre-check so only the database constraint can stop the insert.
         with patch("app.signup_service.first_taken_field", return_value=None):
@@ -241,7 +241,7 @@ class SignupTests(unittest.TestCase):
                 with self.subTest(code=code):
                     self.assert_contract(self.signup(**changes), 409, code, {"field": field})
         self.assertEqual(self.user_count(), 1)
-        self.assertEqual(self.signup(login_id="after_race", nickname="after_race", email="after@example.com").status_code, 200)
+        self.assertEqual(self.signup(login_id="afterrace", nickname="after_race").status_code, 200)
 
     def test_unrecognized_constraint_name_falls_back_to_a_fresh_lookup(self):
         self.assertEqual(self.signup().status_code, 200)
@@ -297,7 +297,7 @@ class SignupTests(unittest.TestCase):
         response = self.client.get("/users/nickname-availability", params={"nickname": "Walker_King"})
         self.assert_contract(response, 200, "OK", {"available": True}, "사용 가능한 닉네임입니다.")
         self.assertEqual(self.signup(nickname="Walker_King").status_code, 200)
-        self.assertEqual(self.signup(login_id="second", nickname="산책왕", email="second@example.com").status_code, 200)
+        self.assertEqual(self.signup(login_id="second", nickname="산책왕").status_code, 200)
         for value in ("walker_king", " WALKER_KING ", unicodedata.normalize("NFD", "산책왕")):
             with self.subTest(value=value):
                 response = self.client.get("/users/nickname-availability", params={"nickname": value})
@@ -322,7 +322,7 @@ class SignupTests(unittest.TestCase):
     def test_login_id_format_error_wording_depends_on_the_api_but_the_rule_does_not(self):
         # One validator, two messages: same inputs fail with the same code and data on both APIs.
         # "K" is the Kelvin sign, which must not fold into an ASCII "k".
-        for value in ("walker-04", "walker 04", "walker.04", "산책아이디", "walker!", "Kelvin1"):
+        for value in ("walker_04", "walker-04", "walker 04", "walker.04", "산책아이디", "walker!", "Kelvin1"):
             with self.subTest(value=value):
                 self.assert_contract(self.signup(login_id=value), 422, "INVALID_LOGIN_ID_FORMAT",
                                      {"field": "login_id"}, MESSAGES["INVALID_LOGIN_ID_FORMAT"])
@@ -339,10 +339,9 @@ class SignupTests(unittest.TestCase):
         self.assertTrue(self.client.get("/users/id-availability", params=params).json()["data"]["available"])
         self.assertTrue(self.client.get("/users/nickname-availability", params={"nickname": "산책왕"}).json()["data"]["available"])
         # Someone else registers both values after the first person checked them.
-        self.assertEqual(self.signup(email="first@example.com").status_code, 200)
-        self.assert_contract(self.signup(email="second@example.com"), 409, "LOGIN_ID_ALREADY_EXISTS", {"field": "login_id"})
-        self.assert_contract(self.signup(login_id="second_id", email="second@example.com"), 409,
-                             "NICKNAME_ALREADY_EXISTS", {"field": "nickname"})
+        self.assertEqual(self.signup().status_code, 200)
+        self.assert_contract(self.signup(), 409, "LOGIN_ID_ALREADY_EXISTS", {"field": "login_id"})
+        self.assert_contract(self.signup(login_id="secondid"), 409, "NICKNAME_ALREADY_EXISTS", {"field": "nickname"})
         self.assertEqual(self.user_count(), 1)
 
     def test_availability_is_public_and_does_not_clash_with_user_id_routes(self):
@@ -358,29 +357,34 @@ class SignupTests(unittest.TestCase):
         # Other /users routes keep FastAPI's default error format.
         self.assertEqual(self.client.get("/users/1").json(), {"detail": "로그인이 필요하거나 세션이 만료되었습니다."})
         self.assertIn("detail", self.client.get("/users/not-a-number").json())
-        login = self.client.post("/auth/login", json={"email": VALID["email"], "password": PASSWORD})
-        self.client.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
-        own_id = self.client.get("/users/me").json()["id"]
+        login = self.client.post("/auth/login", json={"identifier": VALID["login_id"], "password": PASSWORD})
+        self.client.headers["Authorization"] = f"Bearer {login.json()['data']['access_token']}"
+        own_id = self.client.get("/users/me").json()["data"]["id"]
         self.assertEqual(self.client.get(f"/users/{own_id}").status_code, 200)
 
     # Schema and contract details
 
-    def test_unique_indexes_match_migration_016(self):
+    def test_unique_indexes_match_migrations_016_and_017(self):
         migration = (ROOT / "migrations" / "016_onboarding_signup.sql").read_text(encoding="utf-8")
+        removal = (ROOT / "migrations" / "017_remove_user_email.sql").read_text(encoding="utf-8")
         indexes = {index.name: index for index in User.__table__.indexes}
-        for name, column in (("uq_users_login_id_lower", "login_id"), ("uq_users_nickname_lower", "nickname"),
-                             ("uq_users_email_lower", "email")):
+        self.assertEqual(set(indexes) & {"uq_users_email_lower"}, set())
+        for statement in ("DROP INDEX IF EXISTS uq_users_email_lower;",
+                          "ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;",
+                          "ALTER TABLE users DROP COLUMN IF EXISTS email;"):
+            self.assertIn(statement, removal)
+        for name, column in (("uq_users_login_id_lower", "login_id"), ("uq_users_nickname_lower", "nickname")):
             with self.subTest(index=name):
                 self.assertTrue(indexes[name].unique)
                 ddl = str(CreateIndex(indexes[name]).compile(dialect=postgresql.dialect()))
                 self.assertEqual(ddl, f"CREATE UNIQUE INDEX {name} ON users (lower({column}))")
                 self.assertIn(f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON users (lower({column}));", migration)
         columns = User.__table__.columns
-        for name, length in (("login_id", 20), ("nickname", 20), ("email", 100), ("password", 255)):
+        for name, length in (("login_id", 20), ("nickname", 20), ("password", 255)):
             with self.subTest(column=name):
                 self.assertFalse(columns[name].nullable)
                 self.assertEqual(columns[name].type.length, length)
-        self.assertTrue(columns["email"].unique)
+        self.assertNotIn("email", columns)
 
     def test_existing_foreign_keys_to_users_are_kept(self):
         references = {(fk.parent.table.name, fk.parent.name) for table in Base.metadata.tables.values()
@@ -392,10 +396,10 @@ class SignupTests(unittest.TestCase):
 
     def test_database_unique_indexes_ignore_case(self):
         with self.Session.begin() as db:
-            db.add(User(login_id="walker04", nickname="Walker", email="a@example.com", password=UNUSABLE_PASSWORD))
-        for changes in ({"login_id": "WALKER04"}, {"nickname": "WALKER"}, {"email": "A@EXAMPLE.COM"}):
+            db.add(User(login_id="walker04", nickname="Walker", password=UNUSABLE_PASSWORD))
+        for changes in ({"login_id": "WALKER04"}, {"nickname": "WALKER"}):
             with self.subTest(changes=changes):
-                values = {"login_id": "other", "nickname": "other", "email": "b@example.com", **changes}
+                values = {"login_id": "other", "nickname": "other", **changes}
                 with self.assertRaises(IntegrityError), self.Session.begin() as db:
                     db.add(User(**values, password=UNUSABLE_PASSWORD))
         self.assertEqual(self.user_count(), 1)

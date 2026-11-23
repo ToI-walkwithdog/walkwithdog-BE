@@ -20,6 +20,7 @@ from sqlalchemy.pool import StaticPool
 
 PASSWORD = "WalkTogether2026!"
 TOO_MANY = "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."
+LOGIN_TOO_MANY = "로그인 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."
 ID, NICK = "/users/id-availability", "/users/nickname-availability"
 
 
@@ -41,6 +42,7 @@ class RateLimitApiTests(unittest.TestCase):
         self.clock = FakeClock()
         self.signup_limiter = RateLimiter("signup", 5, 600, MemoryWindowStore(self.clock))
         self.availability_limiter = RateLimiter("availability", 30, 60, MemoryWindowStore(self.clock))
+        self.login_limiter = RateLimiter("login", 10, 60, MemoryWindowStore(self.clock), message=LOGIN_TOO_MANY)
         self.app = FastAPI()
         self.app.include_router(auth.router)
         self.app.include_router(users.router)
@@ -52,6 +54,7 @@ class RateLimitApiTests(unittest.TestCase):
         self.app.dependency_overrides[get_db] = test_db
         self.app.dependency_overrides[users.SIGNUP_RATE_LIMITER] = self.signup_limiter
         self.app.dependency_overrides[users.AVAILABILITY_RATE_LIMITER] = self.availability_limiter
+        self.app.dependency_overrides[auth.LOGIN_RATE_LIMITER] = self.login_limiter
         self.client = self.client_for("198.51.100.7")
         self.sequence = 0
 
@@ -65,8 +68,8 @@ class RateLimitApiTests(unittest.TestCase):
 
     def signup(self, client=None, **changes):
         self.sequence += 1
-        body = {"login_id": f"walker_{self.sequence}", "nickname": f"nick_{self.sequence}",
-                "email": f"walker{self.sequence}@example.com", "password": PASSWORD, **changes}
+        body = {"login_id": f"walker{self.sequence}", "nickname": f"nick_{self.sequence}",
+                "password": PASSWORD, **changes}
         return (client or self.client).post("/users/", json=body)
 
     def check(self, path, client=None, value="walker04"):
@@ -141,7 +144,7 @@ class RateLimitApiTests(unittest.TestCase):
 
     def test_id_and_nickname_checks_share_one_budget(self):
         for index in range(30):
-            self.assertEqual(self.check(ID if index % 2 else NICK, value=f"value_{index}").status_code, 200)
+            self.assertEqual(self.check(ID if index % 2 else NICK, value=f"value{index}").status_code, 200)
         self.clock.now += 15
         self.assert_limited(self.check(ID), 45)
         self.assert_limited(self.check(NICK), 45)
@@ -168,8 +171,8 @@ class RateLimitApiTests(unittest.TestCase):
         # A spoofed header from a direct client neither changes its bucket nor frees it.
         for header in ("203.0.113.50", "10.0.0.1, 203.0.113.51"):
             response = self.client.post("/users/", headers={"X-Forwarded-For": header, "X-Real-IP": header},
-                                        json={"login_id": "spoof_id", "nickname": "spoof_nick",
-                                              "email": "spoof@example.com", "password": PASSWORD})
+                                        json={"login_id": "spoofid", "nickname": "spoof_nick",
+                                              "password": PASSWORD})
             self.assert_limited(response, 600)
         self.assertEqual(self.signup(client=other).status_code, 200)
 
@@ -177,7 +180,35 @@ class RateLimitApiTests(unittest.TestCase):
         for _ in range(40):
             self.check(ID)
         self.assertEqual(self.client.get("/users/me").status_code, 401)
-        self.assertEqual(self.client.post("/auth/login", json={"email": "a@example.com", "password": "x"}).status_code, 401)
+        self.assertEqual(self.client.post("/auth/login", json={"identifier": "nobody", "password": "x"}).status_code, 401)
+
+    # Login
+
+    def login(self, client=None, **body):
+        return (client or self.client).post("/auth/login", json=body)
+
+    def test_login_allows_the_limit_then_answers_429_before_checking_credentials(self):
+        self.assertEqual(self.signup(login_id="walker04").status_code, 200)
+        statuses = [self.login(identifier="walker04", password="wrong-password").status_code for _ in range(9)]
+        statuses.append(self.login().status_code)  # 422 attempts count too
+        self.assertEqual(statuses, [401] * 9 + [422])
+        # Even the correct password is refused once the limit is reached: no session is made.
+        response = self.login(identifier="walker04", password=PASSWORD)
+        self.assertEqual((response.status_code, response.json()),
+                         (429, {"code": "TOO_MANY_REQUESTS", "data": {"retry_after_seconds": 60}, "message": LOGIN_TOO_MANY}))
+        self.assertEqual(response.headers["Retry-After"], "60")
+        self.clock.now += 59
+        self.assertEqual(self.login(identifier="walker04", password=PASSWORD).json()["data"]["retry_after_seconds"], 1)
+        self.clock.now += 1
+        self.assertEqual(self.login(identifier="walker04", password=PASSWORD).status_code, 200)
+
+    def test_login_limit_is_per_client_and_separate_from_signup(self):
+        for _ in range(10):
+            self.login(identifier="nobody", password="x")
+        self.assertEqual(self.login(identifier="nobody", password="x").status_code, 429)
+        self.assertEqual(self.login(client=self.client_for("203.0.113.9"), identifier="nobody", password="x").status_code, 401)
+        self.assertEqual(self.signup().status_code, 200)
+        self.assertEqual(self.check(ID).status_code, 200)
 
     # Concurrency and failures
 
@@ -187,7 +218,7 @@ class RateLimitApiTests(unittest.TestCase):
 
         def request(index):
             barrier.wait(10)
-            return self.check(ID if index % 2 else NICK, value=f"value_{index}").status_code
+            return self.check(ID if index % 2 else NICK, value=f"value{index}").status_code
 
         # The fixture's single shared SQLite connection is not safe for 45 threads, so
         # stub the lookup: this test is about the limiter, not the database.
@@ -219,6 +250,7 @@ class ProductionWiringTests(unittest.TestCase):
         Base.metadata.create_all(self.engine)
         Session = sessionmaker(bind=self.engine)
         app = FastAPI()
+        app.include_router(auth.router)
         app.include_router(users.router)
 
         def test_db():
@@ -228,7 +260,7 @@ class ProductionWiringTests(unittest.TestCase):
         app.dependency_overrides[get_db] = test_db
         self.app = app
         self.client = TestClient(app)
-        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER):
+        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER, auth.LOGIN_RATE_LIMITER):
             limiter.reset()
             self.addCleanup(limiter.reset)
 
@@ -239,10 +271,13 @@ class ProductionWiringTests(unittest.TestCase):
     def test_default_policy(self):
         self.assertEqual((users.SIGNUP_RATE_LIMITER.limit, users.SIGNUP_RATE_LIMITER.window_seconds), (5, 600))
         self.assertEqual((users.AVAILABILITY_RATE_LIMITER.limit, users.AVAILABILITY_RATE_LIMITER.window_seconds), (30, 60))
+        self.assertEqual((auth.LOGIN_RATE_LIMITER.limit, auth.LOGIN_RATE_LIMITER.window_seconds), (10, 60))
+        self.assertEqual(auth.LOGIN_RATE_LIMITER.message, LOGIN_TOO_MANY)
 
     def test_routes_use_the_shipped_limiters(self):
         expected = {("POST", "/users/"): users.SIGNUP_RATE_LIMITER,
-                    ("GET", ID): users.AVAILABILITY_RATE_LIMITER, ("GET", NICK): users.AVAILABILITY_RATE_LIMITER}
+                    ("GET", ID): users.AVAILABILITY_RATE_LIMITER, ("GET", NICK): users.AVAILABILITY_RATE_LIMITER,
+                    ("POST", "/auth/login"): auth.LOGIN_RATE_LIMITER}
         found = {}
         for route in self.app.routes:
             for method in getattr(route, "methods", ()):
@@ -251,22 +286,32 @@ class ProductionWiringTests(unittest.TestCase):
         for key, limiter in expected.items():
             with self.subTest(route=key):
                 self.assertIs(found[key][0], limiter)  # first, so it runs before validation and the DB
-        unlimited = [route for route in self.app.routes if route.path in ("/users/me", "/users/{user_id}")]
+        unlimited = [route for route in self.app.routes
+                     if route.path in ("/users/me", "/users/{user_id}", "/auth/logout")]
+        self.assertEqual(len(unlimited), 3)
         for route in unlimited:
-            self.assertFalse({users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER}
+            self.assertFalse({users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER, auth.LOGIN_RATE_LIMITER}
                              & {d.call for d in route.dependant.dependencies})
 
     def test_real_signup_limiter_returns_429_with_real_clock(self):
         for index in range(5):
-            response = self.client.post("/users/", json={"login_id": f"real_{index}", "nickname": f"real_{index}",
-                                                         "email": f"real{index}@example.com", "password": PASSWORD})
+            response = self.client.post("/users/", json={"login_id": f"real{index}", "nickname": f"real_{index}",
+                                                         "password": PASSWORD})
             self.assertEqual(response.status_code, 200, response.text)
-        response = self.client.post("/users/", json={"login_id": "real_6", "nickname": "real_6",
-                                                     "email": "real6@example.com", "password": PASSWORD})
+        response = self.client.post("/users/", json={"login_id": "real6", "nickname": "real_6",
+                                                     "password": PASSWORD})
         self.assertEqual(response.status_code, 429)
         retry_after = response.json()["data"]["retry_after_seconds"]
         self.assertTrue(590 <= retry_after <= 600, retry_after)
         self.assertEqual(response.headers["Retry-After"], str(retry_after))
+
+    def test_real_login_limiter_returns_429_with_real_clock(self):
+        for _ in range(10):  # 422 without a body is cheap and still counts
+            self.assertEqual(self.client.post("/auth/login", json={}).status_code, 422)
+        response = self.client.post("/auth/login", json={})
+        self.assertEqual((response.status_code, response.json()["message"]), (429, LOGIN_TOO_MANY))
+        retry_after = response.json()["data"]["retry_after_seconds"]
+        self.assertTrue(50 <= retry_after <= 60, retry_after)
 
     def test_real_availability_limiter_is_shared_with_real_clock(self):
         for index in range(30):
@@ -313,10 +358,13 @@ class MemoryWindowStoreTests(unittest.TestCase):
 
 class ConfigurationTests(unittest.TestCase):
     def test_limits_come_from_environment(self):
-        values = {"SIGNUP_RATE_LIMIT_REQUESTS": "3", "SIGNUP_RATE_LIMIT_WINDOW_SECONDS": "120"}
+        values = {"SIGNUP_RATE_LIMIT_REQUESTS": "3", "SIGNUP_RATE_LIMIT_WINDOW_SECONDS": "120",
+                  "LOGIN_RATE_LIMIT_REQUESTS": "4", "LOGIN_RATE_LIMIT_WINDOW_SECONDS": "30"}
         with patch.dict(os.environ, values):
             limiter = RateLimiter.from_env("signup", "SIGNUP", 5, 600)
+            login = RateLimiter.from_env("login", "LOGIN", 10, 60, message=LOGIN_TOO_MANY)
         self.assertEqual((limiter.limit, limiter.window_seconds), (3, 120))
+        self.assertEqual((login.limit, login.window_seconds, login.message), (4, 30, LOGIN_TOO_MANY))
         with patch.dict(os.environ, {"SIGNUP_RATE_LIMIT_REQUESTS": ""}):
             self.assertEqual(positive_int_env("SIGNUP_RATE_LIMIT_REQUESTS", 5), 5)
 

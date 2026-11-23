@@ -42,7 +42,7 @@ class MotionMigrationPostgresTests(unittest.TestCase):
                 if statement and statement.upper() not in ('BEGIN', 'COMMIT'):
                     c.exec_driver_sql(statement)
             c.exec_driver_sql("INSERT INTO shelters(id,name) VALUES (1,'보호소')")
-            c.exec_driver_sql("INSERT INTO users(id,login_id,email,nickname,password) VALUES (1,'motion_user','motion@example.com','봉사자','!')")
+            c.exec_driver_sql("INSERT INTO users(id,login_id,nickname,password) VALUES (1,'motion_user','봉사자','!')")
             c.exec_driver_sql("INSERT INTO dogs(id,name,shelter_id) VALUES (1,'강아지',1)")
             c.exec_driver_sql("INSERT INTO walk_requests(id,user_id,dog_id,shelter_id,requested_start_at,requested_end_at) VALUES (1,1,1,1,'2030-01-07 00:00Z','2030-01-07 01:00Z')")
             c.exec_driver_sql("INSERT INTO walks(id,walk_request_id,status,started_at,ended_at,total_distance_m,duration_seconds,average_pace) VALUES (1,1,'COMPLETED','2030-01-07 00:00Z','2030-01-07 00:02Z',200,120,600)")
