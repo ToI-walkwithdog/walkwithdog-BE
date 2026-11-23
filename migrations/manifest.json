@@ -298,6 +298,18 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "022_regions.sql",
+      "sha256": "15502297302ef579b5a6b5e1f4faceefd8233a7aba5067cfedebb3e3dbd1d29f",
+      "requires": [],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [
@@ -332,12 +344,6 @@
       "requires": [
         "020_onboarding_basic_info.sql"
       ]
-    },
-    {
-      "file": "022_regions.sql",
-      "state": "unmerged",
-      "source": "https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/64",
-      "requires": []
     }
   ]
 }

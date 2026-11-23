@@ -1,0 +1,25 @@
+{
+  "description": "행정안전부 행정표준코드 법정동코드 전체자료, 내려받은 zip을 바꾸지 않고 보관",
+  "source_page": "https://www.code.go.kr/stdcode/regCodeL.do",
+  "download_request": "POST https://www.code.go.kr/etc/codeFullDown.do, form codeseId=00002, 인증키 없음",
+  "downloaded_at": "2026-11-23T14:19:26Z",
+  "zip_file": "legal_dong_code_full_20261123.zip",
+  "zip_sha256": "44a3fe4cacf88ce98e35fb883807d2725b589f427ff4d73ee40b914d1286bacd",
+  "zip_member_time": "2026-10-01T09:06:34",
+  "text_encoding": "cp949",
+  "text_sha256": "962fd4cdfb6ccf2887b745eb97db55f71112b9f9a32c1f8fbd7692fb069b1df0",
+  "columns": ["법정동코드", "법정동명", "폐지여부"],
+  "rows": 53403,
+  "live_rows": 20560,
+  "abolished_rows": 32843,
+  "converted": {
+    "active_sido": 16,
+    "selectable_sigungu": 255,
+    "special_selectable": 1,
+    "intermediate_cities": 13
+  },
+  "notes": [
+    "zip_member_time은 zip 안 파일의 시각이다. 공식 사이트는 자료의 기준일을 따로 표시하지 않는다.",
+    "같은 시점 사이트 목록의 현존 건수 20560건과 live_rows가 같다."
+  ]
+}
