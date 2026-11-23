@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.account_rules import PASSWORD_MAX_LENGTH
@@ -64,7 +65,12 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     token = secrets.token_urlsafe(32)
     db.add(AuthSession(token_hash=token_digest(token), user_id=user.id,
                        expires_at=datetime.now(timezone.utc) + timedelta(seconds=SESSION_SECONDS)))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # The account was deleted (sign-up exit, Issue #41) after the password check.
+        db.rollback()
+        raise invalid_credentials() from None
     data = TokenResponse(access_token=token, expires_in=SESSION_SECONDS).model_dump()
     response = ok(data, "로그인에 성공했습니다.")
     response.headers["Cache-Control"] = "no-store"

@@ -1,4 +1,5 @@
-"""Sign-up, consents, pledge, onboarding Step 1, concurrency and migrations 016 to 020 on real PostgreSQL.
+"""Sign-up, consents, pledge, onboarding Step 1, age review and exit, concurrency and migrations 016 to 020
+on real PostgreSQL.
 
 SIGNUP_TEST_DATABASE_URL must name an EMPTY local toi_walk_test_* database.
 Each test works in its own new su_<uuid> schema and drops only that schema
@@ -10,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import re as regex
+import sys
 from threading import Barrier, Event, Thread
 import time
 import unittest
@@ -21,15 +23,15 @@ from uuid import uuid4
 # named in DATABASE_URL or .env, and does not depend on another test importing app
 # first. Every test overrides get_db with SIGNUP_TEST_DATABASE_URL.
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
-    from app import basic_info_service, pledge_service, signup_service
+    from app import age_review_service, basic_info_service, pledge_service, signup_service
     from app.account_status import change_to_age_review
     from app.auth import UNUSABLE_PASSWORD, hash_password, token_digest
     from app.database import Base, get_db
-    from app.models import (AuthSession, PhoneVerification, PhoneVerificationDailyCount, User, UserConsent,
+    from app.models import (AuthSession, PhoneVerification, PhoneVerificationDailyCount, Survey, User, UserConsent,
                             UserPledgeAcknowledgement, UserRole, VolunteerOnboardingBasic)
     from app.onboarding_common import get_clock
     from app.phone_verification_service import phone_subject
-    from app.routers import auth, onboarding_basic, users
+    from app.routers import age_review, auth, onboarding_basic, users
     from app.sms_provider import MockSmsProvider, get_sms_provider
 
 from fastapi import FastAPI
@@ -137,6 +139,7 @@ class SignupPostgresTests(unittest.TestCase):
         app.include_router(auth.router)
         app.include_router(users.router)
         app.include_router(onboarding_basic.router)
+        app.include_router(age_review.router)
         self.now = STEP1_START
         self.sms = MockSmsProvider()
         app.dependency_overrides[get_clock] = lambda: (lambda: self.now)
@@ -951,6 +954,160 @@ class SignupPostgresTests(unittest.TestCase):
             pledge.join(10)
         self.assertEqual((results["pledge"].status_code, results["pledge"].json()["code"]), (403, "AGE_REVIEW_REQUIRED"))
         self.assertEqual(self.pledge_rows(), [])
+
+
+    # Age review correction and sign-up exit (Issue #41)
+
+    def age_review_user(self, user_id=1):
+        """An AGE_REVIEW_REQUIRED account with a pledge and a consent, two sessions."""
+        with self.Session.begin() as db:
+            db.add(User(id=user_id, login_id=f"minor{user_id:02d}", nickname=f"연령{user_id}",
+                        password=self.exit_hash, account_status="AGE_REVIEW_REQUIRED",
+                        age_review_required_at=STEP1_START))
+            db.flush()
+            db.add(UserPledgeAcknowledgement(user_id=user_id, pledge_version=PLEDGE_VERSION, acknowledged_at=STEP1_START))
+            db.add(UserConsent(user_id=user_id, consent_type="PRIVACY_COLLECTION_USE", document_version="privacy-test-v1",
+                               action="AGREE", recorded_at=STEP1_START))
+        self.add_session(user_id, f"second-device-{user_id}")
+        return self.add_session(user_id, f"age-token-{user_id}")
+
+    def setup_age_review(self):
+        if not hasattr(type(self), "_exit_hash"):
+            type(self)._exit_hash = hash_password(PASSWORD)
+        self.exit_hash = type(self)._exit_hash
+        records = patch.dict(os.environ, {"ACCOUNT_EXIT_RECORD_POLICY": "delete", "APP_ENV": "test"})
+        records.start()
+        self.addCleanup(records.stop)
+        self.start_api()
+        return self.age_review_user()
+
+    def correct(self, headers):
+        return self.client.put("/users/me/age-review/birth-date", json={"birth_date": "2006-05-17"}, headers=headers)
+
+    def exit_account(self, headers):
+        return self.client.request("DELETE", "/users/me", json={"password": PASSWORD}, headers=headers)
+
+    def remaining(self, user_id=1):
+        with self.engine.connect() as connection:
+            return {table: connection.execute(text(f"SELECT count(*) FROM {table} WHERE {column} = :id"),
+                                              {"id": user_id}).scalar_one()
+                    for table, column in (("users", "id"), ("auth_sessions", "user_id"),
+                                          ("user_consents", "user_id"), ("user_pledge_acknowledgements", "user_id"))}
+
+    def hold(self, target):
+        """Patch `target` so the first call blocks until released; returns (entered, release)."""
+        entered, release = Event(), Event()
+        module, name = target.rsplit(".", 1)
+        original = getattr(sys.modules[module], name)
+
+        def held(*args, **kwargs):
+            if not entered.is_set():
+                entered.set()
+                release.wait(10)
+            return original(*args, **kwargs)
+
+        patcher = patch(target, side_effect=held)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return entered, release
+
+    def run_in_thread(self, results, key, call):
+        thread = Thread(target=lambda: results.setdefault(key, call()))
+        thread.start()
+        return thread
+
+    def test_correction_holding_the_lock_makes_a_concurrent_exit_see_active(self):
+        headers = self.setup_age_review()
+        entered, release = self.hold("app.age_review_service.step1_completed")  # runs under the FOR UPDATE lock
+        results = {}
+        correction = self.run_in_thread(results, "correction", lambda: self.correct(headers))
+        self.assertTrue(entered.wait(10))
+        exit_thread = self.run_in_thread(results, "exit", lambda: self.exit_account(headers))
+        time.sleep(0.5)
+        self.assertTrue(exit_thread.is_alive())  # waits for the correction's row lock
+        release.set()
+        correction.join(10)
+        exit_thread.join(10)
+        self.assertEqual(results["correction"].status_code, 200, results["correction"].text)
+        self.assertEqual((results["exit"].status_code, results["exit"].json()["code"]), (409, "AGE_REVIEW_NOT_REQUIRED"))
+        self.assertEqual(self.remaining(), {"users": 1, "auth_sessions": 2, "user_consents": 1,
+                                            "user_pledge_acknowledgements": 1})
+        self.assertEqual(self.account_status(1), "ACTIVE")
+
+    def test_exit_holding_the_lock_makes_a_concurrent_correction_fail(self):
+        headers = self.setup_age_review()
+        entered, release = self.hold("app.age_review_service.has_retained_activity")
+        results = {}
+        exit_thread = self.run_in_thread(results, "exit", lambda: self.exit_account(headers))
+        self.assertTrue(entered.wait(10))
+        correction = self.run_in_thread(results, "correction", lambda: self.correct(headers))
+        time.sleep(0.5)
+        self.assertTrue(correction.is_alive())
+        release.set()
+        exit_thread.join(10)
+        correction.join(10)
+        self.assertEqual(results["exit"].status_code, 200, results["exit"].text)
+        self.assertEqual((results["correction"].status_code, results["correction"].json()["code"]),
+                         (401, "USER_NOT_FOUND"))
+        self.assertEqual(self.remaining(), {"users": 0, "auth_sessions": 0, "user_consents": 0,
+                                            "user_pledge_acknowledgements": 0})
+
+    def test_parallel_identical_exits_and_corrections(self):
+        headers = self.setup_age_review()
+        workers = 4
+        barrier = Barrier(workers)
+
+        def corrected(_):
+            barrier.wait(10)
+            return self.correct(headers)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            outcomes = sorted((r.status_code, r.json()["code"]) for r in pool.map(corrected, range(workers)))
+        self.assertEqual(outcomes, [(200, "OK")] + [(409, "AGE_REVIEW_NOT_REQUIRED")] * (workers - 1))
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("UPDATE users SET account_status = 'AGE_REVIEW_REQUIRED' WHERE id = 1")
+        barrier = Barrier(workers)
+
+        def exited(_):
+            barrier.wait(10)
+            return self.exit_account(headers)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            responses = list(pool.map(exited, range(workers)))
+        codes = sorted((r.status_code, r.json()["code"]) for r in responses)
+        self.assertEqual(codes[0], (200, "OK"), codes)
+        self.assertTrue(all(status == 401 for status, _ in codes[1:]), codes)
+        self.assertEqual(self.remaining(), {"users": 0, "auth_sessions": 0, "user_consents": 0,
+                                            "user_pledge_acknowledgements": 0})
+
+    def test_login_racing_an_exit_leaves_no_session(self):
+        headers = self.setup_age_review()
+        entered, release = self.hold("app.age_review_service.has_retained_activity")
+        results = {}
+        exit_thread = self.run_in_thread(results, "exit", lambda: self.exit_account(headers))
+        self.assertTrue(entered.wait(10))
+        login = self.run_in_thread(results, "login", lambda: self.client.post(
+            "/auth/login", json={"identifier": "minor01", "password": PASSWORD}))
+        time.sleep(1.0)  # the password check passes; the session insert waits on the users row lock
+        release.set()
+        exit_thread.join(10)
+        login.join(10)
+        self.assertEqual(results["exit"].status_code, 200, results["exit"].text)
+        self.assertEqual((results["login"].status_code, results["login"].json()["code"]), (401, "INVALID_CREDENTIALS"))
+        self.assertEqual(self.remaining()["auth_sessions"], 0)
+        self.assertEqual(self.client.get("/users/me", headers=headers).status_code, 401)
+
+    def test_fk_error_during_exit_rolls_back_on_postgres(self):
+        headers = self.setup_age_review()
+        with self.Session.begin() as db:
+            db.add(Survey(user_id=1))
+        with patch("app.age_review_service.has_retained_activity", return_value=False), \
+                self.assertLogs("app.api_contract", "ERROR"):
+            response = self.exit_account(headers)
+        self.assertEqual((response.status_code, response.json()["code"]), (500, "INTERNAL_SERVER_ERROR"))
+        self.assertEqual(self.remaining(), {"users": 1, "auth_sessions": 2, "user_consents": 1,
+                                            "user_pledge_acknowledgements": 1})
+        self.assertEqual(self.client.get("/users/me", headers=headers).status_code, 200)
 
 
 if __name__ == "__main__":

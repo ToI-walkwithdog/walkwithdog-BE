@@ -10,7 +10,7 @@ from app.models import Dog
 from app.routers import auth, users, shelter_incidents, shelter_live_walks, shelters, dogs, surveys, matching, public_api, breed_traits, simulation, personality, chat
 from app.routers import walk_requests
 from app.routers import walks, walk_maps, walk_reviews
-from app.routers import onboarding_basic
+from app.routers import onboarding_basic, age_review
 from app.walk_service import close_stale_walks
 
 # Existing DB changes must go through explicit, backed-up migrations.
@@ -59,6 +59,7 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(onboarding_basic.router)
+app.include_router(age_review.router)
 app.include_router(shelter_incidents.router)
 app.include_router(shelter_live_walks.router)
 app.include_router(shelters.router)
