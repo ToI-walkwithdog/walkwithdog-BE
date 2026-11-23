@@ -22,3 +22,11 @@
 - [x] `docs/handoff/LATEST.md` 테스트 결과 및 인수인계 내용 반영
 - [ ] `feature/f-12-walk-history` 커밋·push 후 PR 생성 (`feature/f-12-walk-history` → `dev`)
 - [ ] (앱) SC-09 / SC-16 Android RecyclerView 목록·상세 UI 연동
+
+## F-13 예약 내역 (마이페이지, SC-10)
+- [x] 마이페이지 예약 내역 5개 탭(`ALL`/`PENDING`/`APPROVED`/`REJECTED`/`COMPLETED`) 조회 확장 (`GET /walk-requests/my`)
+- [x] 응답 항목 보호소명(`shelter_name`), 화면 표시 상태(`display_status`), 취소 가능 여부(`can_cancel`) 및 산책 시작 이후 취소 차단(`409`) 검증
+- [x] 인수 테스트 작성 및 통과 (`tests/test_f13_walk_reservations.py`, `tests/test_walk_requests.py` — 36 passed)
+- [x] `docs/handoff/LATEST.md` 테스트 결과 및 인수인계 내용 반영
+- [ ] `feature/f-13-mypage-reservations` 커밋·push 후 PR 생성 (`feature/f-13-mypage-reservations` → `dev`)
+- [ ] (앱) SC-10 마이페이지 `TabLayout` + `RecyclerView` 및 예약 취소 UI 연동

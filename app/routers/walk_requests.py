@@ -8,8 +8,8 @@ from app.database import get_db
 from app.dependencies import require_role, require_shelter, require_shelter_access
 from app.models import Shelter, User, UserRole, VolunteerProfile, WalkRequest
 from app.walk_request_schemas import (
-    RequestStatus, VolunteerProfileResponse, WalkRequestAction, WalkRequestCreate,
-    WalkRequestDetailResponse, WalkRequestResponse,
+    RequestStatus, ReservationTab, VolunteerProfileResponse,
+    WalkRequestAction, WalkRequestCreate, WalkRequestDetailResponse, WalkRequestResponse,
 )
 from app.walk_request_service import create_request, get_request_detail, request_list_query, transition_request
 
@@ -60,10 +60,22 @@ def review_or_cancel(request_id: int, payload: WalkRequestAction,
 
 
 @router.get("/walk-requests/my", response_model=list[WalkRequestResponse])
-def my_requests(status: RequestStatus | None = None, limit: int = Query(20, ge=1, le=100),
-                offset: int = Query(0, ge=0), actor: User = Depends(get_current_user),
-                db: Session = Depends(get_db)):
-    return request_list_query(db, status).filter(WalkRequest.user_id == actor.id).limit(limit).offset(offset).all()
+def my_requests(
+    status: RequestStatus | None = None,
+    tab: ReservationTab | None = Query(None, description="마이페이지 탭 (ALL/PENDING/APPROVED/REJECTED/COMPLETED)"),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """F-13 SC-10: 마이페이지 내 예약 내역 및 보호소 승인 상태 조회."""
+    return (
+        request_list_query(db, status=status, tab=tab)
+        .filter(WalkRequest.user_id == actor.id)
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
 
 
 @router.get("/walk-requests/{request_id}", response_model=WalkRequestDetailResponse)
