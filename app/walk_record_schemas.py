@@ -66,9 +66,49 @@ class WalkPointsBatch(BaseModel):
     points: list[WalkPointInput] = Field(min_length=1, max_length=500)
 
 
-class WalkMarkerCreate(PositionEvent):
-    marker_type: Literal["SNIFF", "POOP", "DOG_ENCOUNTER", "PERSON_ENCOUNTER", "BARKING"]
+MARKER_MEMO_MAX_LENGTH = 100
+
+
+class WalkMarkerCreate(Coordinates):
+    """행동마커. 좌표는 선택(없거나 GPS가 약하면 서버가 마지막 위치를 쓴다)."""
+    marker_type: Literal[
+        "POOP", "CROSSWALK_WAIT", "SNIFF", "OTHER",
+        "DOG_ENCOUNTER", "PERSON_ENCOUNTER", "BARKING",
+    ]
     memo: str | None = None
+    latitude: Latitude | None = None
+    longitude: Longitude | None = None
+    accuracy_m: Annotated[Decimal, Field(ge=0, le=Decimal("99999999.99"), allow_inf_nan=False)] | None = None
+    recorded_at: AwareDatetime
+
+    @field_validator("recorded_at", mode="before")
+    @classmethod
+    def iso_time(cls, value):
+        return WalkRequestCreate.iso_datetime(value)
+
+    @field_validator("accuracy_m", mode="before")
+    @classmethod
+    def numeric_accuracy(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("정확도에는 유한한 숫자가 필요합니다.")
+        return value
+
+    @field_validator("accuracy_m")
+    @classmethod
+    def accuracy_precision(cls, value):
+        return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if value is not None else None
+
+    @model_validator(mode="after")
+    def location_pair_and_memo(self):
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("위도와 경도는 함께 입력해야 합니다.")
+        memo = self.memo.strip() if self.memo is not None else None
+        if len(memo or "") > MARKER_MEMO_MAX_LENGTH:
+            raise ValueError(f"내용은 {MARKER_MEMO_MAX_LENGTH}자 이하로 입력해야 합니다.")
+        if self.marker_type == "OTHER" and not memo:
+            raise ValueError("기타를 선택한 경우 내용을 입력해야 합니다.")
+        self.memo = memo or None
+        return self
 
 
 class WalkIncidentCreate(Coordinates):
@@ -108,8 +148,9 @@ class UTCResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     @field_validator(
-        "started_at", "ended_at", "created_at", "updated_at", "recorded_at", "occurred_at",
-        "last_point_recorded_at", "last_point_received_at", check_fields=False,
+        "started_at", "ended_at", "expected_end_at", "created_at", "updated_at",
+        "recorded_at", "occurred_at", "last_point_recorded_at", "last_point_received_at",
+        check_fields=False,
     )
     @classmethod
     def utc_time(cls, value):
@@ -135,6 +176,10 @@ class WalkResponse(UTCResponse):
     last_point_recorded_at: datetime | None = None
     last_point_received_at: datetime | None = None
     end_reason: Literal["USER", "STAFF", "AUTO_TIMEOUT"] | None = None
+    planned_duration_minutes: int | None = None
+    expected_end_at: datetime | None = None
+    is_overdue: bool = False
+    overdue_minutes: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -142,6 +187,10 @@ class WalkResponse(UTCResponse):
 class ActiveWalkResponse(UTCResponse):
     walk_id: int
     started_at: datetime
+    planned_duration_minutes: int | None = None
+    expected_end_at: datetime | None = None
+    is_overdue: bool = False
+    overdue_minutes: int = 0
     last_latitude: Decimal | None = None
     last_longitude: Decimal | None = None
     last_accuracy_m: Decimal | None = None
@@ -168,6 +217,7 @@ class WalkMarkerResponse(UTCResponse):
     longitude: Decimal
     recorded_at: datetime
     memo: str | None
+    location_source: str
 
 
 class WalkIncidentResponse(UTCResponse):

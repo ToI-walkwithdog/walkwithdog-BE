@@ -1,6 +1,8 @@
+from sqlalchemy import Numeric
 """Walk persistence only. Authorization, transitions and aggregation belong to later issues."""
 
 from sqlalchemy import (
+    Numeric,
     Boolean, CheckConstraint, Column, DateTime, ForeignKey, Index, Integer,
     JSON, Numeric, String, Text, Time, UniqueConstraint, text,
 )
@@ -136,6 +138,8 @@ class Walk(Timestamps, Base):
         CheckConstraint("last_longitude IS NULL OR (last_longitude BETWEEN -180 AND 180)", name="ck_walk_last_longitude"),
         CheckConstraint("last_accuracy_m IS NULL OR last_accuracy_m >= 0", name="ck_walk_last_accuracy"),
         CheckConstraint("end_reason IS NULL OR end_reason IN ('USER', 'STAFF', 'AUTO_TIMEOUT')", name="ck_walk_end_reason"),
+        CheckConstraint("planned_duration_minutes IS NULL OR planned_duration_minutes > 0", name="ck_walk_planned_duration"),
+        CheckConstraint("expected_end_at IS NULL OR expected_end_at > started_at", name="ck_walk_expected_end_order"),
         Index("ix_walks_status_started", "status", "started_at"),
     )
 
@@ -157,11 +161,26 @@ class Walk(Timestamps, Base):
     last_point_recorded_at = Column(DateTime(timezone=True), nullable=True)
     last_point_received_at = Column(DateTime(timezone=True), nullable=True)
     end_reason = Column(String(20), nullable=True)
+    planned_duration_minutes = Column(Integer, nullable=True)
+    expected_end_at = Column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def is_overdue(self) -> bool:
+        from app.walk_service import compute_walk_overdue
+        overdue, _ = compute_walk_overdue(self)
+        return overdue
+
+    @property
+    def overdue_minutes(self) -> int:
+        from app.walk_service import compute_walk_overdue
+        _, minutes = compute_walk_overdue(self)
+        return minutes
 
     walk_request = relationship("WalkRequest", back_populates="walk")
     points = relationship("WalkPoint", back_populates="walk", passive_deletes="all", order_by="WalkPoint.sequence_no")
     markers = relationship("WalkMarker", back_populates="walk", passive_deletes="all")
     review = relationship("WalkReview", back_populates="walk", uselist=False, passive_deletes="all")
+    volunteer_review = relationship("ShelterVolunteerReview", back_populates="walk", uselist=False, passive_deletes="all")
     incidents = relationship("WalkIncident", back_populates="walk", passive_deletes="all")
 
 
@@ -190,7 +209,9 @@ class WalkMarker(Base):
     __tablename__ = "walk_markers"
     __table_args__ = (
         *coordinates(),
-        choices("marker_type", "SNIFF POOP DOG_ENCOUNTER PERSON_ENCOUNTER BARKING"),
+        choices("marker_type", "SNIFF POOP DOG_ENCOUNTER PERSON_ENCOUNTER BARKING CROSSWALK_WAIT OTHER"),
+        choices("location_source", "CURRENT LAST_KNOWN"),
+        CheckConstraint("marker_type <> 'OTHER' OR (memo IS NOT NULL AND trim(memo) <> '')", name="ck_marker_other_memo"),
         Index("ix_walk_markers_time", "walk_id", "recorded_at"),
     )
 
@@ -201,6 +222,7 @@ class WalkMarker(Base):
     longitude = Column(Numeric(9, 6), nullable=False)
     recorded_at = Column(DateTime(timezone=True), nullable=False)
     memo = Column(Text, nullable=True)
+    location_source = Column(String(12), nullable=False, default="CURRENT", server_default="CURRENT")
 
     walk = relationship("Walk", back_populates="markers")
 
@@ -340,5 +362,58 @@ class WalkIncident(Timestamps, Base):
     reporter = relationship("User", foreign_keys=[reported_by], back_populates="walk_incidents")
 
 
+class ShelterVolunteerReview(Timestamps, Base):
+    __tablename__ = "shelter_volunteer_reviews"
+    __table_args__ = (
+        UniqueConstraint("walk_id", name="uq_shelter_volunteer_reviews_walk"),
+        CheckConstraint(
+            "rating >= 0.5 AND rating <= 5.0 AND CAST(ROUND(rating * 10) AS INTEGER) % 5 = 0",
+            name="ck_shelter_volunteer_review_rating",
+        ),
+        CheckConstraint(
+            "comment IS NULL OR length(comment) <= 500",
+            name="ck_shelter_volunteer_review_comment_len",
+        ),
+        Index("ix_shelter_volunteer_reviews_volunteer", "volunteer_user_id", "created_at"),
+        Index("ix_shelter_volunteer_reviews_shelter", "shelter_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    walk_id = Column(Integer, reference("walks"), nullable=False)
+    shelter_id = Column(Integer, reference("shelters"), nullable=False)
+    volunteer_user_id = Column(Integer, reference("users"), nullable=False)
+    reviewed_by = Column(Integer, reference("users"), nullable=False)
+    rating = Column(Numeric(2, 1), nullable=False)
+    comment = Column(String(500), nullable=True)
+
+    walk = relationship("Walk", back_populates="volunteer_review")
+    shelter = relationship("Shelter")
+    volunteer = relationship("User", foreign_keys=[volunteer_user_id])
+    reviewer = relationship("User", foreign_keys=[reviewed_by])
+    tags = relationship(
+        "ShelterVolunteerReviewTag",
+        back_populates="review",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ShelterVolunteerReviewTag.id",
+    )
+
+
+class ShelterVolunteerReviewTag(Base):
+    __tablename__ = "shelter_volunteer_review_tags"
+    __table_args__ = (
+        UniqueConstraint("review_id", "tag_code", name="uq_shelter_volunteer_review_tags_review_code"),
+        CheckConstraint("tag_code IN ('PUNCTUALITY', 'SAFETY_CARE', 'CONSIDERATE', 'DISAPPOINTING')", name="ck_shelter_volunteer_review_tag_code"),
+        Index("ix_shelter_volunteer_review_tags_review_id", "review_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    review_id = Column(Integer, ForeignKey("shelter_volunteer_reviews.id", ondelete="CASCADE"), nullable=False)
+    tag_code = Column(String(30), nullable=False)
+
+    review = relationship("ShelterVolunteerReview", back_populates="tags")
+
+
 WALK_MODELS = (DogWalkSetting, DogWalkSlot, WalkRequest, Walk, WalkPoint,
-               WalkMarker, WalkReview, DogTraitSummary, VolunteerProfile, WalkIncident)
+               WalkMarker, WalkReview, ShelterVolunteerReview, ShelterVolunteerReviewTag,
+               DogTraitSummary, VolunteerProfile, WalkIncident)

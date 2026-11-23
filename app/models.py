@@ -29,6 +29,8 @@ class User(Base):
     # the birth date is validated later in onboarding Step 1. NULL for accounts made
     # before #31; never back-filled.
     age_14_plus_confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    # F-14: Timestamp when the user tapped 'confirmed' on the last slide of the first-walk guide.
+    first_walk_guide_completed_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -252,5 +254,6 @@ class BreedTrait(Base):
 # Register walk tables whenever the existing models entrypoint is imported.
 from app.walk_models import (  # noqa: E402,F401
     DogWalkSetting, DogWalkSlot, WalkRequest, Walk, WalkPoint, WalkMarker,
-    WalkReview, WalkReviewTag, DogTraitSummary, VolunteerProfile, WalkIncident,
+    WalkReview, WalkReviewTag, ShelterVolunteerReview, ShelterVolunteerReviewTag,
+    DogTraitSummary, VolunteerProfile, WalkIncident,
 )
