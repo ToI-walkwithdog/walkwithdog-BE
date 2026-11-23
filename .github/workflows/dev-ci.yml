@@ -26,14 +26,11 @@ jobs:
           --health-cmd "pg_isready -U toi_ci -d postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
         ports:
-          - 5432/tcp
+          - 5432
     env:
       DATABASE_URL: sqlite://
       PYTHONUTF8: '1'
-      SIGNUP_TEST_DATABASE_URL: postgresql+psycopg2://toi_ci:toi_ci_ephemeral@127.0.0.1:${{ job.services.postgres.ports[5432] }}/toi_walk_test_ci_signup
-      REGION_TEST_DATABASE_URL: postgresql+psycopg2://toi_ci:toi_ci_ephemeral@127.0.0.1:${{ job.services.postgres.ports[5432] }}/toi_walk_test_ci_regions
       PGHOST: 127.0.0.1
-      PGPORT: ${{ job.services.postgres.ports[5432] }}
       PGUSER: toi_ci
       PGPASSWORD: toi_ci_ephemeral
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -67,6 +64,16 @@ jobs:
           python "$RUNNER_TEMP/trusted/dev_gate.py" scope "$GITHUB_EVENT_PATH"
           python scripts/check_migrations.py --check-reservations
           python -m unittest discover -s tests -p 'test_dev_delivery.py'
+      - name: Configure disposable PostgreSQL connections
+        env:
+          SERVICE_PORT: ${{ job.services.postgres.ports[5432] }}
+        run: |
+          [[ "$SERVICE_PORT" =~ ^[0-9]+$ ]]
+          {
+            printf 'PGPORT=%s\n' "$SERVICE_PORT"
+            printf 'SIGNUP_TEST_DATABASE_URL=postgresql+psycopg2://toi_ci:toi_ci_ephemeral@127.0.0.1:%s/toi_walk_test_ci_signup\n' "$SERVICE_PORT"
+            printf 'REGION_TEST_DATABASE_URL=postgresql+psycopg2://toi_ci:toi_ci_ephemeral@127.0.0.1:%s/toi_walk_test_ci_regions\n' "$SERVICE_PORT"
+          } >> "$GITHUB_ENV"
       - name: Run complete suite against disposable PostgreSQL
         id: pytest
         run: |
