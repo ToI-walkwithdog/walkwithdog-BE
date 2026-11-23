@@ -47,11 +47,13 @@ class WalkMetadataTests(unittest.TestCase):
             "last_accuracy_m", "last_point_recorded_at", "last_point_received_at",
             "end_reason", "client_report_id", "acknowledged_at", "acknowledged_by",
             "rating", "comment", "location_source",
+            "planned_duration_minutes", "expected_end_at",
         }
         post_007_constraints = {n for n in motion["constraints"]} | {
             "ck_walk_last_coordinate_pair", "ck_walk_last_latitude", "ck_walk_last_longitude",
             "ck_walk_last_accuracy", "ck_walk_end_reason", "ck_incident_acknowledgement",
             "ck_walk_review_rating", "ck_location_source", "ck_marker_other_memo",
+            "ck_walk_planned_duration", "ck_walk_expected_end_order",
         }
         post_007_indexes = {
             "uq_walk_incidents_reported_client_report_id", "ix_walk_incidents_unacknowledged",
@@ -128,6 +130,8 @@ class WalkMetadataTests(unittest.TestCase):
                     {"name": "last_point_recorded_at", "type": "timestamp with time zone", "not_null": False, "default": None},
                     {"name": "last_point_received_at", "type": "timestamp with time zone", "not_null": False, "default": None},
                     {"name": "end_reason", "type": "character varying(20)", "not_null": False, "default": None},
+                    {"name": "planned_duration_minutes", "type": "integer", "not_null": False, "default": None},
+                    {"name": "expected_end_at", "type": "timestamp with time zone", "not_null": False, "default": None},
                 ])
                 snapshot["constraints"].update({
                     "ck_walk_last_coordinate_pair": None,
@@ -135,6 +139,8 @@ class WalkMetadataTests(unittest.TestCase):
                     "ck_walk_last_longitude": None,
                     "ck_walk_last_accuracy": None,
                     "ck_walk_end_reason": None,
+                    "ck_walk_planned_duration": None,
+                    "ck_walk_expected_end_order": None,
                 })
             expected_columns = {c["name"]: c for c in snapshot["columns"]}
             self.assertEqual(set(expected_columns), set(table.columns.keys()))

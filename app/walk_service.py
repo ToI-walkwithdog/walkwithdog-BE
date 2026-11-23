@@ -4,7 +4,7 @@ Provisional GPS policy: known accuracy <=50m, segment speed <=5m/s, no distance
 bridge over sampling gaps >300s. Rejected batches never partially persist.
 """
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import HTTPException
@@ -14,6 +14,7 @@ from sqlalchemy.orm import joinedload
 
 from app.dependencies import require_shelter_access
 from app.models import Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest
+from app.walk_models import DogWalkSetting
 from app.volunteer_stats import refresh_volunteer_profile
 from app.gps_geometry import EARTH_RADIUS_M, distance_m
 from app.gps_motion_analysis import analyze_motion
@@ -37,6 +38,36 @@ def get_auto_end_after_seconds():
 def is_walk_expired(walk, now):
     last_active = as_utc(walk.last_point_received_at or walk.started_at)
     return (now - last_active).total_seconds() > get_auto_end_after_seconds()
+
+
+def get_walk_overdue_grace_minutes() -> int:
+    val = os.getenv("WALK_OVERDUE_GRACE_MINUTES", "0")
+    try:
+        minutes = int(val)
+    except ValueError:
+        return 0
+    return minutes if minutes >= 0 else 0
+
+
+def compute_walk_overdue(walk, now=None) -> tuple[bool, int]:
+    """진행 중인 산책이 예정 종료 시각(+ 유예 시간)을 초과했는지 계산한다."""
+    if walk.status != "IN_PROGRESS" or walk.expected_end_at is None:
+        return False, 0
+    current = as_utc(now) if now is not None else utc_now()
+    deadline = as_utc(walk.expected_end_at) + timedelta(minutes=get_walk_overdue_grace_minutes())
+    if current <= deadline:
+        return False, 0
+    overdue_seconds = (current - deadline).total_seconds()
+    return True, max(0, int(overdue_seconds // 60))
+
+
+def resolve_planned_duration_minutes(db, request) -> int:
+    """강아지 산책 설정의 권장 산책 시간(분)을 우선 사용하고, 없으면 예약 소요시간(분)을 쓴다."""
+    setting = db.query(DogWalkSetting).filter(DogWalkSetting.dog_id == request.dog_id).first()
+    if setting is not None and setting.recommended_duration_minutes is not None:
+        return setting.recommended_duration_minutes
+    fallback = int((as_utc(request.requested_end_at) - as_utc(request.requested_start_at)).total_seconds() // 60)
+    return max(1, fallback)
 
 
 INCIDENT_TYPE_LABELS = {
@@ -81,7 +112,15 @@ def start_walk(db, actor, payload):
     ).first()
     if active:
         raise HTTPException(409, "강아지 또는 봉사자가 이미 산책 중입니다.")
-    walk = Walk(walk_request_id=request.id, status="IN_PROGRESS", started_at=now)
+    planned_duration_minutes = resolve_planned_duration_minutes(db, request)
+    expected_end_at = now + timedelta(minutes=planned_duration_minutes)
+    walk = Walk(
+        walk_request_id=request.id,
+        status="IN_PROGRESS",
+        started_at=now,
+        planned_duration_minutes=planned_duration_minutes,
+        expected_end_at=expected_end_at,
+    )
     db.add(walk)
     db.flush()
     return walk
@@ -425,9 +464,14 @@ def get_active_walk(db, actor):
         raise HTTPException(404, "진행 중인 산책이 없습니다.")
     last_seq = db.query(func.max(WalkPoint.sequence_no)).filter_by(walk_id=walk.id).scalar()
     elapsed_seconds = int((now - as_utc(walk.started_at)).total_seconds())
+    is_overdue, overdue_minutes = compute_walk_overdue(walk, now=now)
     return {
         "walk_id": walk.id,
         "started_at": walk.started_at,
+        "planned_duration_minutes": walk.planned_duration_minutes,
+        "expected_end_at": walk.expected_end_at,
+        "is_overdue": is_overdue,
+        "overdue_minutes": overdue_minutes,
         "last_latitude": walk.last_latitude,
         "last_longitude": walk.last_longitude,
         "last_accuracy_m": walk.last_accuracy_m,
