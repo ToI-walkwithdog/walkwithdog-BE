@@ -4,7 +4,7 @@
 
 [manifest](../../migrations/manifest.json)는 매 기능 PR과 함께 갱신하는 관리 파일이다. 처음 등록한 SQL 21개는 `origin/dev`의 `0936933005c895947e256e735e9c4c9615c6c10f` 기준이다. `migrations` 배열에는 해당 Git 트리의 정식 SQL을 실행 순서대로 기록한다. `reservations`에는 아직 병합되지 않은 번호와 파일을 추적한다. `requires`는 선행 파일의 전체 이름이다. 기본 스키마처럼 이 저장소의 SQL이 만들지 않는 전제와 SQL이 직접 요구하지 않는 배포 순서는 아래에 명시한다. `environments`는 적용 대상 범위를 나타낸다.
 
-**번호 예약, 정식 등록, DB 적용 이력은 별개다.** 예약은 병렬 작업의 번호를 확보한다. 정식 등록은 검수한 SQL이 병합 후보와 `dev`에 포함됐음을 나타낸다. 실제 적용은 대상 DB별 검증 증빙과 전체 파일명, 체크섬으로 기록한다. 기능 PR 병합, manifest 등록, 격리 PostgreSQL 테스트는 개발 DB의 적용 이력을 생성하지 않는다.
+**번호 예약, 정식 등록, DB 적용 이력은 별개다.** 예약은 병렬 작업의 번호를 확보한다. 정식 등록은 검수한 SQL이 해당 병합 후보의 적용 목록에 포함됐음을 나타낸다. 실제 적용은 대상 DB별 검증 증빙과 전체 파일명, 체크섬으로 기록한다. 기능 PR 병합, manifest 등록, 격리 PostgreSQL 테스트는 개발 DB의 적용 이력을 생성하지 않는다.
 
 - [prepare_demo_db.py](../../scripts/prepare_demo_db.py)는 데모 DB의 `001_matching_snapshot.sql` 전후를 확인한다. [migrate_backend.py](../../scripts/migrate_backend.py)는 `002`부터 `008`까지만 파일명과 매핑한다. 기존 도구의 기본 점검도 DB에 연결하며, 적용 경로는 대상 스키마 검사, 잠금, 백업 절차를 사용한다. `007_walk_domain.schema.json`과 `008_gps_motion_analysis.schema.json`은 그 경로의 카탈로그 계약이다.
 - [check_migrations.py](../../scripts/check_migrations.py)는 Python 표준 라이브러리로 로컬 파일만 읽는다. 배포 자동화나 기존 도구의 실행 범위를 늘리지 않는다.
@@ -62,31 +62,18 @@
 
 - `017_f10_behavior_marker.sql`은 산책 마커를 바꾸고 `017_remove_user_email.sql`은 사용자 이메일을 제거한다. 두 파일 간 직접 스키마 의존성이 없다. 이메일 제거는 `016_onboarding_signup.sql` 또는 검증한 계정 전환에 의존한다. [PR #47](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/47)
 - `018_f11_walk_overtime.sql`은 `walks`에 시간 컬럼과 CHECK를 더하고 `018_user_consents.sql`은 사용자 자기확인 시각과 동의 테이블을 추가한다. 동의용 SQL은 출시 순서상 이메일 제거 뒤에 둔다. F-11은 동의 적용의 선행 SQL이 아니다. [PR #48](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/48)
-- 기존 번호 예외는 위 두 쌍의 정확한 전체 파일명에만 적용한다. `019`와 `020`은 병합된 기능과 미병합 온보딩이 같은 번호를 사용한다. 각 온보딩 PR을 병합하기 전에 번호와 참조를 확정한다.
+- 기존 번호 예외는 위 두 쌍의 전체 파일명에만 적용한다. 이미 병합된 019, 020과 022는 보존하고, 온보딩용으로 023~025를 배정했다.
 
-| 번호, 상태 | 관측 위치 | SQL 범위 및 병합 전 확인 |
+| 번호와 파일 | 대상 | SQL 범위 |
 | --- | --- | --- |
-| 010, 원격 기능 브랜치에만 존재 | `origin/feature/f-04-walk-booking`, `c36fe99`의 파일 | `010_add_f04_walk_booking.sql`은 009 날짜 슬롯을 `walk_requests.date_slot_id`의 FK와 인덱스로 연결한다. 자체 트랜잭션과 재실행 가드가 없다. 일부 적용 후 파일을 다시 실행하면 오류가 날 수 있다. 현재 실행 목록에서 제외한다. |
-| 019, 서약과 산책 안내 충돌 | #50 `9c94caf`에서 추가, #52/#53/#57에 상속. 기준 dev에는 `019_first_walk_guide.sql` | 서약은 동의 뒤 배포하며 `user_pledge_acknowledgements`의 사용자 FK와 버전별 고유 기록을 확인한다. 내부 트랜잭션과 존재 가드가 있다. 미병합 파일의 최종 이름을 확정한 뒤 서약 API와 문서를 재검증한다. [PR #50](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/50) |
-| 020, 기본 정보와 보호소 평가 충돌 | #52 `a8cd897`에서 추가, #53/#57에 상속. 기준 dev에는 `020_shelter_volunteer_reviews.sql` | 서약 뒤 `users.account_status`, `age_review_required_at`, `volunteer_onboarding_basics`, `phone_verifications`, `phone_verification_daily_counts`를 확인한다. 내부 트랜잭션과 존재 가드가 있으며 기존 계정의 상태 기본값은 `ACTIVE`다. 컬럼이 있어야 새 로그인 코드가 동작한다. [PR #52](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/52) |
-| 추가 SQL 없음 | #53 `02494c3`, Base #52 브랜치 | 서약과 기본 정보 SQL을 상속한다. #41 가입 종료와 연령 제한의 전체 동작은 #42의 Step 2 테이블까지 갖춘 배포 후보에서 확인한다. [PR #53](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/53) |
-| 021, 반려견 경험 미병합 | #57 `657813a`, Base #53 브랜치 | 기본 정보 뒤 `volunteer_onboarding_experiences`와 `volunteer_experience_challenges`의 FK, 선택 코드 및 경험 상세 CHECK를 확인한다. 내부 트랜잭션과 존재 가드가 있다. Step 2 저장과 가입 종료를 같이 검증한다. [PR #57](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/57) |
-| 022, 지역 마스터 미병합 | #43의 Draft PR #64 `c9c594e` | `022_regions.sql`은 `regions`를 만들며 앞선 마이그레이션을 요구하지 않는다. 자체 트랜잭션을 사용한다. 병합 전 최종 SQL 및 지역 데이터 로더의 중복과 일부 실패 복구를 검증한 뒤 정식 등록한다. [PR #64](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/64) |
+| 010, `010_add_f04_walk_booking.sql` | 원격 기능 브랜치, 실행 목록 제외 | 009 날짜 슬롯을 `walk_requests.date_slot_id`에 연결한다. 자체 트랜잭션과 재실행 가드가 없다. |
+| 022, `022_regions.sql` | #64, `dev` | 지역 조회용 `regions`를 생성한다. 선행 SQL은 없다. |
+| 023, `023_user_pledge_acknowledgements.sql` | #50 | 018 동의 다음에 적용한다. 서약 기록의 사용자 FK와 버전별 고유성을 검증한다. |
+| 024, `024_onboarding_basic_info.sql` | #52 | 023 다음에 적용한다. 계정 상태와 연령 확인 시각, 기본 정보와 휴대전화 인증 테이블을 추가한다. 새 로그인 코드는 이 컬럼을 조회한다. |
+| 추가 SQL 없음 | #53 | 서약과 기본 정보 SQL을 상속한다. #57 통합 후보에서는 가입 종료 시 반려견 경험 행도 정리되는지 검증한다. |
+| 025, `025_onboarding_dog_experience.sql` | #57 | 024 다음에 적용한다. 반려견 경험과 어려웠던 상황 선택을 저장하는 두 테이블을 추가한다. |
 
-관측 시 #50의 Base는 `dev`, #52는 #50 브랜치, #53은 #52 브랜치, #57은 #53 브랜치다. 당시 온보딩 브랜치 트리에는 `017_f10_behavior_marker.sql`, `018_f11_walk_overtime.sql`, `019_first_walk_guide.sql`, `020_shelter_volunteer_reviews.sql`이 아직 없었다. 선행 PR 병합 후 뒤쪽 PR을 최신 `dev`와 다시 비교하고, 범위와 SQL 순서를 재검증한다. #44는 #42와 #43을 통합한 DB에서 지역과 온보딩 흐름을 검증한다. #44용 SQL 번호는 아직 배정하지 않았다. [Issue #44](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/44)
-
-### 온보딩 019/020 충돌을 해결할 때
-
-**미병합 서약 SQL과 기본 정보 SQL에 새 번호를 배정하는 편이 안전하다.** 이미 병합된 산책 안내와 보호소 평가의 파일명 및 체크섬을 보존한다. 온보딩의 두 파일을 바꾸기 전에 기존 실행 기록이 있는지 확인하고, 새 번호 두 개는 최신 원격에서 다시 조회한 뒤 배정한다. 반려견 경험용 `021`은 번호가 고유하므로 유지할 수 있다. 번호의 크기와 관계없이 명시적 순서에는 **개인정보 동의 → 서약 → 기본 정보 → 반려견 경험**을 반영한다.
-
-두 파일에 번호 예외를 추가하면 현재 경로 참조는 유지할 수 있다. 대신 이후의 검증기와 운영 도구가 예외를 계속 관리해야 하고, 번호로만 적힌 과거 기록이나 작업 로그에서 서로 다른 파일을 오인할 여지가 남는다. 재번호 전 이미 적용됐다는 증빙이 발견되면 같은 SQL을 새 파일로 다시 적용하지 않도록 기존 파일명, 해시와 대상 DB를 먼저 대조한다. 예외가 필요하다면 근거와 두 전체 파일명을 별도로 검토한다.
-
-| 확인한 참조 | 관련 기능 PR에서 반영할 범위 |
-| --- | --- |
-| SQL 경로와 순서 | #50의 서약과 #52의 기본 정보 파일명, 각 파일 헤더의 실행 명령, 기본 정보 헤더의 서약 경로, #57의 `021_onboarding_dog_experience.sql` 헤더의 기본 정보 경로 및 기존 재번호 안내 |
-| 테스트 | `tests/test_signup_postgres.py`의 `PLEDGE_MIGRATION`, `STEP1_MIGRATION` 경로를 새 이름과 맞추고 #50 → #52 → #53 → #57에서 상속된 변경을 확인. 격리 PostgreSQL에서 서약, 기본 정보, 연령 상태 및 Step 2와 가입 종료를 순서대로 검증 |
-| 문서와 메타데이터 | `docs/issues/33/HANDOFF.md`, `docs/issues/40/HANDOFF.md`와 #50, #52, #53, #57 본문의 파일명 및 번호 범위. manifest의 예약과 `requires` 참조를 함께 바꾸고 병합할 파일의 체크섬을 등록 |
-| 런타임과 적용 도구 | 확인한 네 브랜치에서 두 파일명을 직접 읽는 런타임 코드는 발견되지 않았다. 기존 `scripts/migrate_backend.py`의 범위는 002~008이다. 병합 후보의 전체 트리에서 참조를 다시 검색한다. |
+#50 → #52 → #53 → #57 순서로 병합한다. 부모를 병합한 뒤 자식의 Base와 변경 범위를 다시 확인한다. 각 PR은 자신의 SQL을 정식 목록에 등록하고, 후속 PR의 SQL은 해당 PR까지 예약으로 둔다. #44는 #42와 #43을 합친 DB에서 지역 선택과 온보딩 흐름을 검증한다. [Issue #44](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/44)
 
 ### 신규 번호를 배정할 때
 
@@ -100,14 +87,14 @@
    gh pr diff <number> --name-only
    ```
 
-2. 이미 사용한 번호와 미병합 예약을 모두 보존한다. 다른 신규 예약이 없으면 다음 번호는 `023`이다. `010` 같은 이력상의 빈자리를 재사용하지 않는다. 병렬 작업에서는 번호와 전체 파일명을 이슈나 PR에 남기고, 배정과 병합 직전에 각각 최신 원격을 다시 확인한다.
+2. 이미 사용한 번호와 미병합 예약을 모두 보존한다. `010` 같은 이력상의 빈자리를 재사용하지 않는다. 병렬 작업에서는 번호와 전체 파일명을 이슈나 PR에 남기고, 배정과 병합 직전에 각각 최신 원격을 다시 확인한다.
 3. 미병합 파일은 전체 파일명과 출처, 알려진 선행 파일을 `reservations`에 등록한다. 예약 항목에 개발 DB 적용 상태를 적지 않는다.
 4. 파일을 변경하기 전에 병합 또는 적용 여부를 확인한다. 병합된 파일은 이름과 내용을 보존하고, 변경이 필요한 스키마는 새 번호의 후속 SQL로 처리한다.
 
 ### 기능 PR을 dev에 병합할 때
 
 1. 최신 `dev`와 합친 후보에서 추가되거나 바뀐 SQL과 예약을 확인한다. 충돌을 해소할 때 예약 파일명의 변경과 후속 항목의 `requires` 참조를 같이 검토한다.
-2. 함께 병합하는 SQL을 같은 PR의 `migrations` 배열에 정식 등록한다. 예약했던 파일은 `reservations`에서 제거하되 아직 미병합인 다른 예약은 유지한다. 의존 파일의 전체 이름과 위치, 트랜잭션 방식, 적용 대상 환경, 사전 검사, 최종 SQL의 SHA-256을 검토한다. #43도 최종 파일과 적재 절차를 검증한 뒤 이 단계에서 등록한다.
+2. 함께 병합하는 SQL을 같은 PR의 `migrations` 배열에 정식 등록한다. 예약했던 파일은 `reservations`에서 제거하되 아직 미병합인 다른 예약은 유지한다. 의존 파일의 전체 이름과 위치, 트랜잭션 방식, 적용 대상 환경, 사전 검사, 최종 SQL의 SHA-256을 검토한다.
 3. 병합 전에 후보에서 아래 기본 검사를 실행하고 추가 및 변경한 SQL과 예약 이름을 모두 `--check-reservations-for`로 검사한다. 반복 옵션으로 각 파일을 지정한다. 병합 후보에서 새 SQL이 예약에만 있거나 정식 목록에서 빠졌거나 두 곳에 중복되면 실패한다. 해당 PR의 번호 충돌도 해소한 뒤 병합한다.
 4. 실제 병합 뒤 최신 `dev` 체크아웃에서 기본 검사를 다시 실행한다. 검증기는 `migrations/`의 SQL을 모두 열거해 manifest와 양방향으로 대조한다. 전후 검사가 모두 성공해야 병합 과정에서 파일이나 등록 정보가 누락되지 않았음을 확인할 수 있다. 다른 기능 PR이 이 관리 기준보다 먼저 병합되면 관리 PR을 최신 `dev`에 맞춰 누락 SQL을 등록한 뒤 검증한다.
 
@@ -123,10 +110,10 @@ python scripts/check_migrations.py --propose 023_example.sql
 python -m pytest -q tests/test_check_migrations.py
 ```
 
-기본 명령은 SQL 누락, 미등록 파일, 허용되지 않은 중복, 체크섬 불일치, 검사 스크립트 누락, 선행 SQL 누락, 순환과 순서 오류에 종료 코드 1을 반환한다. 현재의 미병합 `019/020` 충돌은 `BLOCKED FUTURE MIGRATION`으로 항상 보인다.
+기본 명령은 SQL 누락, 미등록 파일, 허용되지 않은 중복, 체크섬 불일치, 검사 스크립트 누락, 선행 SQL 누락, 순환과 순서 오류에 종료 코드 1을 반환한다. 미병합 예약의 번호 충돌은 `BLOCKED FUTURE MIGRATION`으로 표시한다.
 
 - `--check-reservations-for`의 예시 파일명은 병합 후보에서 추가하거나 변경한 실제 이름으로 바꾼다. 정식 항목 또는 예약에 없는 이름과 선택한 파일의 예약 충돌은 종료 코드 1이다. 선택한 파일과 관계없는 예약 충돌은 출력되며 해당 PR의 검사를 실패시키지 않는다. 기본 검사가 찾는 정식 목록 오류는 이 옵션을 사용해도 모두 실패한다.
-- `--check-reservations`는 전체 예약을 점검하며, 현재 `019/020` 충돌이 남아 있어 종료 코드 1이다.
+- `--check-reservations`는 전체 예약을 점검하며 충돌이 있으면 종료 코드 1을 반환한다.
 - `--propose`는 목록에 등록하기 전에 다음 번호를 확인하는 명령이다. 최신 원격 브랜치와 PR도 함께 조회한다.
 
 SHA-256은 SQL 바이트에서 CRLF만 LF로 통일해 계산한다. BOM, 공백, 내용 변경은 해시를 바꾼다. 후보의 해시가 다른 경우 배포를 멈추고, 검수한 Git 커밋에서 파일을 다시 가져와 차이를 확인한다. 새 파일의 체크섬을 확인하는 예시다.

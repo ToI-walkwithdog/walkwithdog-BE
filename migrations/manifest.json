@@ -310,6 +310,20 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "023_user_pledge_acknowledgements.sql",
+      "sha256": "0074ee97ec83ed6f1b932b3020e60f860d381d04f55717f3be79b9f76e0f9e00",
+      "requires": [
+        "018_user_consents.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [
@@ -322,27 +336,19 @@
       ]
     },
     {
-      "file": "019_user_pledge_acknowledgements.sql",
-      "state": "unmerged",
-      "source": "https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/50",
-      "requires": [
-        "018_user_consents.sql"
-      ]
-    },
-    {
-      "file": "020_onboarding_basic_info.sql",
+      "file": "024_onboarding_basic_info.sql",
       "state": "unmerged",
       "source": "https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/52",
       "requires": [
-        "019_user_pledge_acknowledgements.sql"
+        "023_user_pledge_acknowledgements.sql"
       ]
     },
     {
-      "file": "021_onboarding_dog_experience.sql",
+      "file": "025_onboarding_dog_experience.sql",
       "state": "unmerged",
       "source": "https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/57",
       "requires": [
-        "020_onboarding_basic_info.sql"
+        "024_onboarding_basic_info.sql"
       ]
     }
   ]
