@@ -1,9 +1,9 @@
 # 인수인계: 행정구역 지역 마스터와 시도, 시군구 목록 조회 (Issue #43)
 
 - 작성: 2026-11-23 (KST)
-- 브랜치: `feature/regions-master` (`origin/dev` `0936933`에서 분기), [Draft PR #64](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/64) → `dev`
+- 브랜치: `feature/regions-master` (`origin/dev` `0936933`에서 분기, 2026-11-24 `ae1b114` 병합 반영), [Draft PR #64](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/64) → `dev`
 - 근거: [Issue #43](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/43), Notion [시도 지역 목록 조회](https://app.notion.com/p/420b7bbac8c7819691a9c52404a7ef63), [시군구 지역 목록 조회](https://app.notion.com/p/420b7bbac8c781b8b028e6bc5cf7c3d1)
-- 갱신: 2026-11-24 마이그레이션 운영 정책(11절)과 #63 연동 조건(12절) 반영. 기능 코드와 SQL은 바꾸지 않았다.
+- 갱신: 2026-11-24 마이그레이션 운영 정책(11절)과 #63 병합 후 manifest 정식 등록(12절) 반영. 기능 코드와 SQL은 바꾸지 않았다.
 - 상태: `dev` 미병합, 개발 DB에 022 미적용, 지역 데이터 미적재. 개발 DB 적용은 전체 기능 개발과 PR 병합이 끝난 뒤 통합 마이그레이션으로 진행한다(11절).
 
 ## 1. 구현 범위
@@ -188,6 +188,7 @@ python -m scripts.sync_regions --download <폴더>
 | `tests/test_regions_postgres.py` | 6 passed, 12 subtests, 3회 반복 통과, 테스트 DB 정리 확인 |
 | `tests/` 전체 (두 테스트 DB 변수 설정) | 509 passed, 11 failed, 82 skipped |
 | `origin/dev` `0936933` 기준(같은 설정) | 477 passed, 11 failed, 82 skipped |
+| `dev` `ae1b114`(#63) 병합과 manifest 등록 후 `tests/` 전체 | 528 passed, 11 failed, 82 skipped. 늘어난 19건은 `tests/test_check_migrations.py`, 실패 목록은 위와 같음 |
 | 보호소, 강아지 관련 4개 파일 | 64 passed, 2 failed(기존 산책 설정 테스트) |
 
 - 실패 11건(하위 테스트 포함)은 `dev` 기준과 목록이 같다. 새 실패는 없고 통과는 32건(지역 테스트) 늘었다.
@@ -241,18 +242,29 @@ python -m scripts.sync_regions --download <폴더>
 - 이 코드를 022 없는 DB에 배포하면 두 지역 API가 500이다(테이블 없음). 022만 적용하고 적재하지 않으면 두 API가 503이다. 다른 API는 영향이 없다. 그래서 공용 서버 배포는 통합 마이그레이션과 적재 뒤로 미룬다.
 - 022는 다른 마이그레이션과 SQL 의존성이 없다(`requires` 없음).
 - 개발 DB 적용과 적재는 하지 않았다.
-- 마이그레이션 번호: `dev`에는 017, 018 번호가 각각 두 파일이고, `019_first_walk_guide.sql`, `020_shelter_volunteer_reviews.sql`이 #50, #52의 019, 020과 같은 번호다. 022는 겹치지 않는다. 번호 정리는 #63에서 다룬다.
+- 마이그레이션 번호: `dev`에는 017, 018 번호가 각각 두 파일이고, `019_first_walk_guide.sql`, `020_shelter_volunteer_reviews.sql`이 #50, #52의 019, 020과 같은 번호다. 022는 겹치지 않는다. 019, 020 충돌 정리는 #63의 관리 기준에 따라 온보딩 스택에서 다룬다.
 
 ## 12. 마이그레이션 관리 PR #63과의 통합
 
-- 2026-11-24 확인: [PR #63](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/63)(`chore/migration-management`, Draft, 미병합)은 `migrations/manifest.json`에 `022_regions.sql`을 예약 항목(`state: unmerged`, 출처 PR #64, `requires: []`)으로 두고 있다. 이 브랜치에서는 #63을 수정하지 않았다.
-- #63이 `dev`에 병합되면 #64에서 할 일
-  1. 최신 `dev`를 이 브랜치에 반영한다.
-  2. `022_regions.sql`을 manifest의 예약 항목에서 빼고 정식 `migrations` 항목으로 등록한다. 파일명, SHA-256, `requires`, 트랜잭션 방식, 적용 대상 환경, 사전 검사를 #63 문서 기준으로 채운다.
-  3. `python scripts/check_migrations.py`와 `--check-reservations-for 022_regions.sql`을 실행해 체크섬, 의존성, 예약 중복이 없는지 확인한다.
-- 등록할 체크섬(#63 방식, CRLF만 LF로 바꾼 SHA-256, 커밋 `c9c594e` 기준): `15502297302ef579b5a6b5e1f4faceefd8233a7aba5067cfedebb3e3dbd1d29f`. SQL을 바꾸면 다시 계산한다.
-- 트랜잭션 방식: 파일 안에 `BEGIN`/`COMMIT`이 있다. 의존 SQL은 없다.
-- #63이 #64보다 늦게 병합되면 #63 쪽에서 예약을 정식 항목으로 바꿔야 한다. 어느 PR에서 할지는 병합 순서에 따라 정한다.
+- [PR #63](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/63)은 2026-11-23 15:04 UTC에 `dev`로 병합됐다(`ae1b114`). 병합 전 manifest는 `022_regions.sql`을 예약 항목(`state: unmerged`, 출처 PR #64, `requires: []`)으로 두고 있었다.
+- 이 브랜치의 처리(2026-11-24)
+  1. 최신 `dev`(`ae1b114`)를 일반 병합으로 반영했다. 충돌은 없었다.
+  2. `migrations/manifest.json`에서 `022_regions.sql` 예약을 지우고 정식 `migrations` 항목으로 등록했다. 다른 예약 4개(`010`, `019`, `020`, `021`)는 그대로 두었다.
+
+| 필드 | 값 | 근거 |
+|---|---|---|
+| `sha256` | `15502297302ef579b5a6b5e1f4faceefd8233a7aba5067cfedebb3e3dbd1d29f` | `scripts/check_migrations.py`의 `checksum()`(CRLF만 LF로 통일) |
+| `requires` | `[]` | 022는 `regions`만 만들고 다른 SQL의 객체를 쓰지 않는다 |
+| `transaction` | `file` | 파일 안에 `BEGIN`/`COMMIT`이 있다(`018_user_consents.sql`과 같은 방식) |
+| `environments` | `local-test`, `dev`, `production` | 기존 항목과 같다 |
+| `prechecks` | `[]` | 새 테이블만 추가하므로 기존 데이터 사전 검사가 없다 |
+
+- 검증 결과
+  - 등록 전 병합 후보: `python scripts/check_migrations.py`가 종료 코드 1(`BLOCKED FUTURE MIGRATION: reserved number 022`)
+  - 등록 후: 기본 검사와 `--check-reservations-for 022_regions.sql` 모두 종료 코드 0
+  - 출력에 남는 `019`, `020`의 `BLOCKED FUTURE MIGRATION`은 온보딩 스택(#50, #52)의 기존 번호 충돌이고 이 PR과 무관하다.
+  - `tests/test_check_migrations.py`도 통과했다(8절 전체 결과에 포함).
+- SQL을 바꾸면 체크섬을 다시 계산해 manifest를 고쳐야 한다. 병합 직전에는 최신 `dev`에서 같은 검사를 다시 실행하고, 실제 병합 뒤 `dev`에서도 한 번 더 실행한다(#63 문서의 절차).
 
 ## 13. #44 연동
 

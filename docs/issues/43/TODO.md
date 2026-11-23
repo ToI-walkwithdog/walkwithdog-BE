@@ -34,9 +34,9 @@
 마이그레이션 운영 정책(2026-11-24): 모든 기능 개발과 관련 PR 병합이 끝난 뒤 개발 DB에 통합 마이그레이션을 적용한다. 개발 DB 적용은 PR #64 병합 조건이 아니다.
 
 - [x] 격리 PostgreSQL에서 022 적용, 재실행, 지역 적재와 재적재 검증(HANDOFF 8절)
-- [ ] #63이 `dev`에 먼저 병합되면: 최신 `dev` 반영, `022_regions.sql`을 manifest 예약에서 정식 항목으로 변경, 체크섬과 `requires` 등록, `scripts/check_migrations.py` 검사 통과(HANDOFF 12절)
-- [ ] #63이 아직 병합되지 않았으면 #63은 건드리지 않고 이 항목을 후속 조건으로 유지
-- [ ] 병합 직전 최신 원격에서 022 번호와 예약을 다시 확인
+- [x] #63 병합(`ae1b114`) 반영, `022_regions.sql`을 manifest 예약에서 정식 항목으로 변경, 체크섬과 `requires` 등록, `scripts/check_migrations.py` 기본 검사와 `--check-reservations-for 022_regions.sql` 통과(HANDOFF 12절)
+- [ ] 병합 직전 최신 `dev`를 다시 반영하고 `scripts/check_migrations.py` 재실행. 병합 뒤 `dev`에서도 재실행
+- [ ] 병합 직전 최신 원격에서 022 번호를 다시 확인
 - [ ] 리뷰 완료 후 Draft 해제는 별도 승인으로 진행(자동 병합 사용 안 함)
 
 ## 통합 조건
