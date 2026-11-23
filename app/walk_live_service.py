@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app import walk_service
 from app.dependencies import require_shelter_access
-from app.models import Dog, User, UserRole, Walk, WalkIncident, WalkPoint, WalkRequest
+from app.models import Dog, User, UserRole, Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest
 from app.walk_live_schemas import (
     LiveWalkCardResponse,
     LiveWalkDetailResponse,
@@ -67,24 +67,41 @@ def build_live_walk_markers(
             )
         )
 
-    # 2. INCIDENT markers from walk_incidents
+    # 2. INCIDENT markers (walk_incidents) and BEHAVIOR markers (walk_markers), merged by time
     incidents = (
         db.query(WalkIncident)
         .filter(WalkIncident.walk_id == walk.id)
         .order_by(WalkIncident.occurred_at.asc(), WalkIncident.id.asc())
         .all()
     )
-    for inc in incidents:
-        markers.append(
-            LiveWalkMarkerResponse(
-                marker_type="INCIDENT",
-                latitude=inc.latitude,
-                longitude=inc.longitude,
-                occurred_at=inc.occurred_at,
-                incident_type=inc.incident_type,
-                description=inc.description,
-            )
-        )
+    behaviors = (
+        db.query(WalkMarker)
+        .filter(WalkMarker.walk_id == walk.id)
+        .order_by(WalkMarker.recorded_at.asc(), WalkMarker.id.asc())
+        .all()
+    )
+    events = [
+        (walk_service.as_utc(inc.occurred_at), 0, inc.id, LiveWalkMarkerResponse(
+            marker_type="INCIDENT",
+            latitude=inc.latitude,
+            longitude=inc.longitude,
+            occurred_at=inc.occurred_at,
+            incident_type=inc.incident_type,
+            description=inc.description,
+        ))
+        for inc in incidents
+    ] + [
+        (walk_service.as_utc(mk.recorded_at), 1, mk.id, LiveWalkMarkerResponse(
+            marker_type="BEHAVIOR",
+            latitude=mk.latitude,
+            longitude=mk.longitude,
+            occurred_at=mk.recorded_at,
+            behavior_type=mk.marker_type,
+            description=mk.memo,
+        ))
+        for mk in behaviors
+    ]
+    markers.extend(item[3] for item in sorted(events, key=lambda item: item[:3]))
 
     return markers
 
@@ -125,6 +142,7 @@ def get_live_walks(
     cards = []
     for walk, req, dog, walker in rows:
         elapsed_seconds, last_location_at, is_stale = compute_walk_live_status(walk, now, stale_sec)
+        is_overdue, overdue_minutes = walk_service.compute_walk_overdue(walk, now=now)
         scheduled_duration_minutes = int(
             (walk_service.as_utc(req.requested_end_at) - walk_service.as_utc(req.requested_start_at)).total_seconds() // 60
         )
@@ -139,6 +157,9 @@ def get_live_walks(
                 elapsed_seconds=elapsed_seconds,
                 scheduled_duration_minutes=scheduled_duration_minutes,
                 scheduled_end_at=req.requested_end_at,
+                expected_end_at=walk.expected_end_at,
+                is_overdue=is_overdue,
+                overdue_minutes=overdue_minutes,
                 last_latitude=walk.last_latitude,
                 last_longitude=walk.last_longitude,
                 last_location_at=last_location_at,
@@ -191,6 +212,7 @@ def get_live_walk_detail(
     now = walk_service.utc_now()
     stale_sec = get_live_walk_stale_seconds()
     elapsed_seconds, last_location_at, is_stale = compute_walk_live_status(walk, now, stale_sec)
+    is_overdue, overdue_minutes = walk_service.compute_walk_overdue(walk, now=now)
     scheduled_duration_minutes = int(
         (walk_service.as_utc(req.requested_end_at) - walk_service.as_utc(req.requested_start_at)).total_seconds() // 60
     )
@@ -205,6 +227,9 @@ def get_live_walk_detail(
         elapsed_seconds=elapsed_seconds,
         scheduled_duration_minutes=scheduled_duration_minutes,
         scheduled_end_at=req.requested_end_at,
+        expected_end_at=walk.expected_end_at,
+        is_overdue=is_overdue,
+        overdue_minutes=overdue_minutes,
         last_latitude=walk.last_latitude,
         last_longitude=walk.last_longitude,
         last_location_at=last_location_at,
@@ -256,10 +281,14 @@ def get_live_walk_updates(
     now = walk_service.utc_now()
     stale_sec = get_live_walk_stale_seconds()
     _, last_location_at, is_stale = compute_walk_live_status(walk, now, stale_sec)
+    is_overdue, overdue_minutes = walk_service.compute_walk_overdue(walk, now=now)
 
     return LiveWalkUpdatesResponse(
         walk_id=walk.id,
         is_stale=is_stale,
+        expected_end_at=walk.expected_end_at,
+        is_overdue=is_overdue,
+        overdue_minutes=overdue_minutes,
         last_location_at=last_location_at,
         last_latitude=walk.last_latitude,
         last_longitude=walk.last_longitude,

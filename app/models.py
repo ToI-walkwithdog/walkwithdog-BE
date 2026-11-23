@@ -33,7 +33,9 @@ class User(Base):
     # the birth date is validated later in onboarding Step 1. NULL for accounts made
     # before #31; never back-filled.
     age_14_plus_confirmed_at = Column(DateTime(timezone=True), nullable=True)
-    # Issue #40 (migration 020). AGE_REVIEW_REQUIRED is set when Step 1 finds an age
+    # F-14: Timestamp when the user tapped 'confirmed' on the last slide of the first-walk guide.
+    first_walk_guide_completed_at = Column(DateTime(timezone=True), nullable=True)
+    # Issue #40 (migration 024). AGE_REVIEW_REQUIRED is set when Step 1 finds an age
     # under 14; only the age review flow (Issue #41) sets it back to ACTIVE.
     account_status = Column(String(24), nullable=False, default="ACTIVE", server_default="ACTIVE")
     age_review_required_at = Column(DateTime(timezone=True), nullable=True)
@@ -87,7 +89,7 @@ class UserPledgeAcknowledgement(Base):
 
 
 class VolunteerOnboardingBasic(Base):
-    """Onboarding Step 1 (Issue #40, migration 020). A row means Step 1 is complete."""
+    """Onboarding Step 1 (Issue #40, migration 024). A row means Step 1 is complete."""
     __tablename__ = "volunteer_onboarding_basics"
 
     user_id = Column(Integer, ForeignKey("users.id", name="fk_onboarding_basics_user_id"), primary_key=True)
@@ -153,7 +155,7 @@ class VolunteerExperienceChallenge(Base):
 
 
 class PhoneVerification(Base):
-    """SMS code requests (Issue #40, migration 020). Only an HMAC of the code is stored."""
+    """SMS code requests (Issue #40, migration 024). Only an HMAC of the code is stored."""
     __tablename__ = "phone_verifications"
     __table_args__ = (
         CheckConstraint("send_status IN ('PENDING', 'SENDING', 'SENT', 'UNKNOWN', 'FAILED')",
@@ -374,5 +376,6 @@ class BreedTrait(Base):
 # Register walk tables whenever the existing models entrypoint is imported.
 from app.walk_models import (  # noqa: E402,F401
     DogWalkSetting, DogWalkSlot, WalkRequest, Walk, WalkPoint, WalkMarker,
-    WalkReview, WalkReviewTag, DogTraitSummary, VolunteerProfile, WalkIncident,
+    WalkReview, WalkReviewTag, ShelterVolunteerReview, ShelterVolunteerReviewTag,
+    DogTraitSummary, VolunteerProfile, WalkIncident,
 )

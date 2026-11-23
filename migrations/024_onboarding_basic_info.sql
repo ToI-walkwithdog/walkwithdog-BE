@@ -6,12 +6,13 @@
 -- New tables: volunteer_onboarding_basics, phone_verifications,
 --   phone_verification_daily_counts. They start empty.
 --
--- Order: after 019_user_pledge_acknowledgements.sql. The code from this change reads
+-- Order: after 023_user_pledge_acknowledgements.sql. The code from this change reads
 -- users.account_status on every user lookup, so login fails until this file is
--- applied: stop the API, apply 016 to 020 in order, then start the new code.
+-- applied. Before starting the new API, apply the active files through this file in
+-- manifest order, including 019_first_walk_guide.sql.
 --
 -- Run with psql so an error rolls the transaction back:
---   psql -v ON_ERROR_STOP=1 -d <DB_NAME> -f migrations/020_onboarding_basic_info.sql
+--   psql -v ON_ERROR_STOP=1 -d <DB_NAME> -f migrations/024_onboarding_basic_info.sql
 -- Re-running after a successful apply is a no-op.
 --
 -- Rollback (only before any account changed state or saved Step 1; takes a backup first):

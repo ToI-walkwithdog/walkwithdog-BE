@@ -7,7 +7,7 @@
 -- rest of the API keeps working; PUT /users/me/pledge fails until it is applied.
 --
 -- Run with psql so an error rolls the transaction back:
---   psql -v ON_ERROR_STOP=1 -d <DB_NAME> -f migrations/019_user_pledge_acknowledgements.sql
+--   psql -v ON_ERROR_STOP=1 -d <DB_NAME> -f migrations/023_user_pledge_acknowledgements.sql
 -- Re-running after a successful apply is a no-op.
 BEGIN;
 

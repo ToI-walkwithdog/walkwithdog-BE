@@ -27,7 +27,7 @@
 | `app/onboarding_common.py` | `first_incomplete_step()`에 `PET_EXPERIENCE` 판정 |
 | `app/age_review_service.py` | 가입 종료 삭제 순서에 Step 2 테이블 추가 |
 | `app/main.py` | 라우터 등록 |
-| `migrations/021_onboarding_dog_experience.sql` | 새 테이블 2개 |
+| `migrations/025_onboarding_dog_experience.sql` | 새 테이블 2개 |
 | `tests/test_dog_experience.py`, `tests/test_age_review.py`, `tests/test_age_review_access.py`, `tests/test_signup_postgres.py` | 테스트 |
 
 ## 3. API 계약
@@ -73,7 +73,7 @@
 
 ## 5. DB와 마이그레이션
 
-`migrations/021_onboarding_dog_experience.sql` (한 트랜잭션, 새 테이블 2개만 추가, 재실행 시 변경 없음, 되돌리는 SQL은 파일 주석)
+`migrations/025_onboarding_dog_experience.sql` (한 트랜잭션, 새 테이블 2개만 추가, 재실행 시 변경 없음, 되돌리는 SQL은 파일 주석)
 
 `volunteer_onboarding_experiences` (행이 있으면 Step 2 완료)
 
@@ -119,7 +119,7 @@
 - Step 2 기록은 동의, 서약처럼 보존 정책 대기 대상이 아니라 기본 정보와 같은 온보딩 기록으로 분류했다.
 - 운영 환경의 가입 종료 차단(`ACCOUNT_EXIT_RECORD_POLICY`, `APP_ENV`)과 보존 정책은 바꾸지 않았다.
 - 정상 흐름에서 연령 확인 필요 계정은 Step 2 기록을 가질 수 없다(Step 2는 `ACTIVE`와 Step 1 완료가 전제). 예외적으로 있으면 FK 순서로 삭제한다.
-- 021 적용 전에는 Step 2 API와 함께 가입 종료도 실패한다(삭제 대상 테이블이 없음).
+- 025 적용 전에는 Step 2 API와 함께 가입 종료도 실패한다(삭제 대상 테이블이 없음).
 
 ## 9. 접근 제어 자동 테스트
 
@@ -142,7 +142,7 @@
 | `tests/test_age_review_access.py` | 8 passed, 303 subtests |
 
 - 실패 2건은 선행 브랜치에서도 실패하는 `test_walk_settings_api.py::test_invalid_scalar_types_and_unknown_fields_are_422`다. 건너뛴 82건은 각자 빈 DB가 필요한 산책 PostgreSQL 테스트로 실행하지 않았다.
-- PostgreSQL: Step 2 저장이 먼저 잠그면 상태 전환이 기다린 뒤 완료, 상태 전환이 먼저면 403과 기록 없음, 같은 답 동시 4건 모두 200과 같은 시각과 1행, 다른 답 동시 2건은 200과 409, 상황 저장 실패 시 전체 롤백, CHECK 제약, 016~020 뒤 021 적용과 재실행, `create_all()` 없이 동작, 가입 종료의 Step 2 행 삭제와 커밋 실패 시 롤백
+- PostgreSQL: Step 2 저장이 먼저 잠그면 상태 전환이 기다린 뒤 완료, 상태 전환이 먼저면 403과 기록 없음, 같은 답 동시 4건 모두 200과 같은 시각과 1행, 다른 답 동시 2건은 200과 409, 상황 저장 실패 시 전체 롤백, CHECK 제약, 019 첫 산책 가이드와 023, 024 적용 뒤 025 적용과 재실행, `create_all()` 없이 동작, 가입 종료의 Step 2 행 삭제와 커밋 실패 시 롤백
 - SQLite: 경험 없음, 경험 있음, 조회 3가지, 재요청, 409, 선행 단계 409(본문 검증보다 먼저), 역할과 상태 403, 401, 422 21가지, 경험 없음과 상세 값, 잠금 직전 상태 변경, DB 제약
 - 미실행: 개발 DB 검증, FE 실연동
 
@@ -176,10 +176,10 @@
 
 ## 14. 개발 DB와 배포 대기
 
-- 021은 016~020 다음에 적용한다. 실제 개발 DB 적용 여부는 확인하지 못했다. 적용은 승인 후 진행한다.
-- 마이그레이션 번호: `origin/dev`에 `017_f10_behavior_marker.sql`, `018_f11_walk_overtime.sql`이 들어와 017, 018 번호가 각각 두 파일이다. 021 자체는 `dev`와 겹치지 않지만 온보딩 파일 전체의 번호 정리가 병합 전 과제로 남아 있다. 이 문서 작성 시점에 파일 이름과 SQL은 바꾸지 않았다.
+- 025는 024 기본 정보 다음에 적용한다. 실제 개발 DB 적용 여부는 확인하지 못했다. 적용은 승인 후 진행한다.
+- 반려견 경험 SQL을 025로 배정했다. 023 서약, 024 기본 정보와 순서대로 적용한다.
 - `dev`의 F-10~F-12 새 경로 3개: 2026-11-23 로컬 시험 병합(`dev` `baafada`와 `188da56`, Push하지 않음)에서 접근 제어 자동 테스트의 `detail` 차단 검사에 자동으로 포함되어 통과했다. 시험 병합 전체 결과는 592 passed, 2 failed(기존 산책 설정 테스트), 82 skipped다. 실제 병합 후 다시 확인해야 한다.
-- 기존 대기 사항 유지: #41 가입 종료의 개인정보 보존 정책, 제한 계정의 산책 취소, 종료와 보호소 승인 정책, 개발 DB 016~020 사전 검사와 적용 승인, 산책 PostgreSQL 테스트 82건 미실행, 산책 설정 테스트 실패 2건
+- 기존 대기 사항 유지: #41 가입 종료의 개인정보 보존 정책, 제한 계정의 산책 취소, 종료와 보호소 승인 정책, 개발 DB 사전 검사와 manifest 순서에 따른 025까지의 적용 승인, 산책 PostgreSQL 테스트 82건 미실행, 산책 설정 테스트 실패 2건
 
 ## 15. 후속 Issue와 의존 관계
 

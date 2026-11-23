@@ -141,8 +141,16 @@ def locked_request(db, request_id, actor, action):
 
 
 def ensure_not_started(db, request):
-    if db.query(Walk.id).filter_by(walk_request_id=request.id).first():
-        raise HTTPException(409, "이미 산책 기록이 생성된 신청입니다.")
+    started_walk = (
+        db.query(Walk.id)
+        .filter(
+            Walk.walk_request_id == request.id,
+            Walk.status.in_(("IN_PROGRESS", "COMPLETED", "INTERRUPTED")),
+        )
+        .first()
+    )
+    if started_walk:
+        raise HTTPException(409, "이미 산책이 시작되어 취소할 수 없습니다.")
 
 
 def transition_request(db, request_id, actor, payload):
@@ -183,7 +191,11 @@ def transition_request(db, request_id, actor, payload):
 def get_request_detail(db, request_id, actor):
     request = (
         db.query(WalkRequest)
-        .options(joinedload(WalkRequest.dog))
+        .options(
+            joinedload(WalkRequest.dog),
+            joinedload(WalkRequest.shelter),
+            joinedload(WalkRequest.walk),
+        )
         .filter(WalkRequest.id == request_id)
         .first()
     )
@@ -211,10 +223,13 @@ def get_request_detail(db, request_id, actor):
         "user_id": request.user_id,
         "dog_id": request.dog_id,
         "shelter_id": request.shelter_id,
+        "shelter_name": request.shelter.name if request.shelter is not None else None,
         "dog": request.dog,
         "requested_start_at": request.requested_start_at,
         "requested_end_at": request.requested_end_at,
         "status": request.status,
+        "walk_id": request.walk.id if request.walk is not None else None,
+        "walk_status": request.walk.status if request.walk is not None else None,
         "reviewed_by": request.reviewed_by,
         "reviewed_at": request.reviewed_at,
         "rejection_reason": request.rejection_reason,
@@ -247,8 +262,27 @@ def validate_walk_start(db, request_id, actor):
     return request
 
 
-def request_list_query(db, status=None):
-    query = db.query(WalkRequest).options(joinedload(WalkRequest.dog))
-    if status is not None:
-        query = query.filter(WalkRequest.status == status)
+FINISHED_WALK_STATUSES = ("COMPLETED", "INTERRUPTED")
+
+
+def request_list_query(db, status=None, tab=None):
+    query = db.query(WalkRequest).options(
+        joinedload(WalkRequest.dog),
+        joinedload(WalkRequest.shelter),
+        joinedload(WalkRequest.walk),
+    )
+    effective = tab if tab is not None else status
+    if effective not in (None, "ALL"):
+        if effective == "COMPLETED":
+            query = query.filter(
+                WalkRequest.status == "APPROVED",
+                WalkRequest.walk.has(Walk.status.in_(FINISHED_WALK_STATUSES)),
+            )
+        elif effective == "APPROVED":
+            query = query.filter(
+                WalkRequest.status == "APPROVED",
+                ~WalkRequest.walk.has(Walk.status.in_(FINISHED_WALK_STATUSES)),
+            )
+        else:
+            query = query.filter(WalkRequest.status == effective)
     return query.order_by(WalkRequest.created_at.desc(), WalkRequest.id.desc())

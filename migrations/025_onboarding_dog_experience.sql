@@ -5,14 +5,12 @@
 --   volunteer_experience_challenges   "어려웠던 상황" choices, one row per code
 -- No size link table (2026-11-23 decision: one dog_size_code per answer).
 --
--- Order: after 020_onboarding_basic_info.sql in this branch stack. Note: origin/dev
--- now also has 017_f10_behavior_marker.sql and 018_f11_walk_overtime.sql, so the
--- onboarding files 017 to 021 must be renumbered before they reach dev (see the PR).
+-- Order: after 024_onboarding_basic_info.sql.
 -- Without this file the rest of the API keeps working; the Step 2 routes fail, and so
 -- does the sign-up exit (#41), which deletes from these tables.
 --
 -- Run with psql so an error rolls the transaction back:
---   psql -v ON_ERROR_STOP=1 -d <DB_NAME> -f migrations/021_onboarding_dog_experience.sql
+--   psql -v ON_ERROR_STOP=1 -d <DB_NAME> -f migrations/025_onboarding_dog_experience.sql
 -- Re-running after a successful apply is a no-op.
 -- Rollback (only before any Step 2 answer is stored, after a backup):
 --   DROP TABLE IF EXISTS volunteer_experience_challenges, volunteer_onboarding_experiences;

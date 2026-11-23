@@ -21,6 +21,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.main import app
     from app.models import AuthSession, User, UserPledgeAcknowledgement, UserRole
     from app.onboarding_common import get_clock
+    from app.region_models import LEVEL_SIDO, LEVEL_SIGUNGU, Region
     from app.routers import auth, dogs, shelters, users
     from app.sms_provider import MockSmsProvider, get_sms_provider
 
@@ -48,7 +49,8 @@ ONBOARDING_ROLE_CODES = {"ONBOARDING_NOT_ALLOWED", "PLEDGE_NOT_ALLOWED"}
 PUBLIC = {("GET", "/"), ("GET", "/db-test"), ("GET", "/dogs/"), ("GET", "/dogs/{dog_id}"),
           ("GET", "/dogs/{dog_id}/personality"), ("GET", "/shelters/{shelter_id}"),
           ("GET", "/shelters/{shelter_id}/dogs"), ("GET", "/surveys/options"), ("GET", "/breed-traits/"),
-          ("POST", "/users/"), ("GET", "/users/id-availability"), ("GET", "/users/nickname-availability")}
+          ("POST", "/users/"), ("GET", "/users/id-availability"), ("GET", "/users/nickname-availability"),
+          ("GET", "/regions/sido"), ("GET", "/regions/sigungu")}
 # Import-key routes: without a Bearer token they use X-Import-Key, not an account.
 IMPORT_KEY = {("GET", "/public-api/test"), ("POST", "/public-api/fetch-dogs")}
 
@@ -133,6 +135,37 @@ class AccessControlTests(unittest.TestCase):
             with self.subTest(route=f"{method} {path}"):
                 response = self.call(method, path, "token-1")
                 self.assertEqual((response.status_code, response.json()["code"]), (403, "AGE_REVIEW_REQUIRED"))
+
+    def test_region_lookup_is_public_and_leaves_account_status_unchanged(self):
+        with self.Session.begin() as db:
+            db.add(Region(region_code="11", region_name="서울특별시", region_level=LEVEL_SIDO, is_active=True))
+            db.flush()
+            db.add(Region(region_code="11110", region_name="종로구", region_level=LEVEL_SIGUNGU,
+                          parent_region_code="11", is_active=True))
+            accounts_before = db.query(User.id, User.account_status, User.age_review_required_at).order_by(User.id).all()
+
+        for token in (None, "token-2", "token-1"):
+            with self.subTest(token=token):
+                sido = self.call("GET", "/regions/sido", token)
+                self.assertEqual(sido.status_code, 200, sido.text)
+                self.assertEqual(sido.json()["data"]["regions"], [{"region_code": "11", "region_name": "서울특별시"}])
+                sigungu = self.call("GET", "/regions/sigungu?sido_code=11", token)
+                self.assertEqual(sigungu.status_code, 200, sigungu.text)
+                self.assertEqual(sigungu.json()["data"], {
+                    "sido_code": "11",
+                    "regions": [{"region_code": "11110", "region_name": "종로구", "sido_code": "11"}],
+                })
+                for path, status, code in (
+                    ("/regions/sigungu", 422, "SIDO_CODE_REQUIRED"),
+                    ("/regions/sigungu?sido_code=abc", 422, "INVALID_SIDO_CODE"),
+                    ("/regions/sigungu?sido_code=99", 404, "REGION_NOT_FOUND"),
+                ):
+                    response = self.call("GET", path, token)
+                    self.assertEqual((response.status_code, response.json()["code"]), (status, code))
+
+        with self.Session() as db:
+            accounts_after = db.query(User.id, User.account_status, User.age_review_required_at).order_by(User.id).all()
+        self.assertEqual(accounts_after, accounts_before)
 
     def test_allowed_routes_still_work_for_the_restricted_account(self):
         self.assertEqual(self.client.get("/users/me", headers={"Authorization": "Bearer token-1"}).status_code, 200)
