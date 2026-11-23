@@ -162,11 +162,43 @@ def append_points(db, walk_id, actor, payload):
             "last_sequence_no": previous.sequence_no if previous else 0}
 
 
+def get_marker_max_accuracy_m():
+    try:
+        value = Decimal(os.getenv("WALK_MARKER_MAX_ACCURACY_M", "50"))
+    except ArithmeticError:
+        return Decimal("50")
+    return value if value.is_finite() and value >= 0 else Decimal("50")
+
+
+def get_marker_max_per_walk():
+    try:
+        value = int(os.getenv("WALK_MARKER_MAX_PER_WALK", "500"))
+    except ValueError:
+        return 500
+    return value if value > 0 else 500
+
+
+def resolve_marker_location(walk, payload):
+    """GPS가 약하거나 좌표가 없으면 산책의 마지막 위치를 쓴다."""
+    weak = payload.latitude is None or (
+        payload.accuracy_m is not None and payload.accuracy_m > get_marker_max_accuracy_m())
+    if not weak:
+        return payload.latitude, payload.longitude, "CURRENT"
+    if walk.last_latitude is None or walk.last_longitude is None:
+        raise HTTPException(409, "위치 정보가 없어 마커를 저장할 수 없습니다.")
+    return walk.last_latitude, walk.last_longitude, "LAST_KNOWN"
+
+
 def add_marker(db, walk_id, actor, payload):
     walk, _ = locked_walk(db, walk_id, actor)
-    data = payload.model_dump()
-    data["recorded_at"] = validate_event_time(walk, payload.recorded_at, utc_now())
-    marker = WalkMarker(walk_id=walk.id, **data)
+    recorded_at = validate_event_time(walk, payload.recorded_at, utc_now())
+    count = db.query(func.count(WalkMarker.id)).filter(WalkMarker.walk_id == walk.id).scalar()
+    if count >= get_marker_max_per_walk():
+        raise HTTPException(409, "산책당 저장할 수 있는 마커 수를 초과했습니다.")
+    latitude, longitude, location_source = resolve_marker_location(walk, payload)
+    marker = WalkMarker(
+        walk_id=walk.id, marker_type=payload.marker_type, memo=payload.memo,
+        latitude=latitude, longitude=longitude, recorded_at=recorded_at, location_source=location_source)
     db.add(marker)
     db.flush()
     return marker

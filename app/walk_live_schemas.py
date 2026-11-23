@@ -37,11 +37,12 @@ class LiveWalkCardResponse(LiveWalkUTCModel):
 
 
 class LiveWalkMarkerResponse(LiveWalkUTCModel):
-    marker_type: Literal["START", "INCIDENT"]
+    marker_type: Literal["START", "INCIDENT", "BEHAVIOR"]
     latitude: Decimal | None = None
     longitude: Decimal | None = None
     occurred_at: datetime
     incident_type: str | None = None
+    behavior_type: str | None = None
     description: str | None = None
 
 

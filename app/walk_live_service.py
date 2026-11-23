@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app import walk_service
 from app.dependencies import require_shelter_access
-from app.models import Dog, User, UserRole, Walk, WalkIncident, WalkPoint, WalkRequest
+from app.models import Dog, User, UserRole, Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest
 from app.walk_live_schemas import (
     LiveWalkCardResponse,
     LiveWalkDetailResponse,
@@ -67,24 +67,41 @@ def build_live_walk_markers(
             )
         )
 
-    # 2. INCIDENT markers from walk_incidents
+    # 2. INCIDENT markers (walk_incidents) and BEHAVIOR markers (walk_markers), merged by time
     incidents = (
         db.query(WalkIncident)
         .filter(WalkIncident.walk_id == walk.id)
         .order_by(WalkIncident.occurred_at.asc(), WalkIncident.id.asc())
         .all()
     )
-    for inc in incidents:
-        markers.append(
-            LiveWalkMarkerResponse(
-                marker_type="INCIDENT",
-                latitude=inc.latitude,
-                longitude=inc.longitude,
-                occurred_at=inc.occurred_at,
-                incident_type=inc.incident_type,
-                description=inc.description,
-            )
-        )
+    behaviors = (
+        db.query(WalkMarker)
+        .filter(WalkMarker.walk_id == walk.id)
+        .order_by(WalkMarker.recorded_at.asc(), WalkMarker.id.asc())
+        .all()
+    )
+    events = [
+        (walk_service.as_utc(inc.occurred_at), 0, inc.id, LiveWalkMarkerResponse(
+            marker_type="INCIDENT",
+            latitude=inc.latitude,
+            longitude=inc.longitude,
+            occurred_at=inc.occurred_at,
+            incident_type=inc.incident_type,
+            description=inc.description,
+        ))
+        for inc in incidents
+    ] + [
+        (walk_service.as_utc(mk.recorded_at), 1, mk.id, LiveWalkMarkerResponse(
+            marker_type="BEHAVIOR",
+            latitude=mk.latitude,
+            longitude=mk.longitude,
+            occurred_at=mk.recorded_at,
+            behavior_type=mk.marker_type,
+            description=mk.memo,
+        ))
+        for mk in behaviors
+    ]
+    markers.extend(item[3] for item in sorted(events, key=lambda item: item[:3]))
 
     return markers
 
