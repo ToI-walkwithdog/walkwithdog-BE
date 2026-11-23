@@ -16,7 +16,7 @@ def normalize(text):
     """Remove only transient timestamps and pytest repr truncation lengths."""
     text = re.sub(r"datetime\.datetime\(\d{4}, \d{1,2}, \d{1,2}, \d{1,2}, \d{1,2}(?:, \d+){0,2}\)",
                   "datetime.datetime(<timestamp>)", text)
-    text = re.sub(r"datetime\.[a-z]*\[(?:\d+ chars|…)\]\d*\)\)", "datetime.datetime(<abbreviated>)", text)
+    text = re.sub(r"datetime\.[a-z]*\[(?:\d+ chars|…)\][ ,]*\d*\)\)", "datetime.datetime(<abbreviated>)", text)
     text = re.sub(r"\[\d+ chars\]", "[…]", text)
     text = text.replace("\r\n", "\n")
     # Pytest can print a paired ndiff change when a fixture save crosses a second.

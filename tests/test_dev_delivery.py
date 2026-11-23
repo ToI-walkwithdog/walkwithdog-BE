@@ -61,6 +61,15 @@ class TestRegressionGate(unittest.TestCase):
         self.assertNotEqual(dev_test_report.normalize(stable),
                             dev_test_report.normalize(rollover.replace("INTERMEDIATE", "EXPERIENCED")))
 
+    def test_truncated_timestamp_accepts_seconds_from_hosted_ci(self):
+        windows = "[(1, 'INTERMEDIATE', datetime.da[195 chars]0))]"
+        ubuntu = "[(1, 'INTERMEDIATE', datetime.da[195 chars] 9))]"
+        normalized = "[(1, 'INTERMEDIATE', datetime.datetime(<abbreviated>)]"
+        self.assertEqual(dev_test_report.normalize(windows), normalized)
+        self.assertEqual(dev_test_report.normalize(ubuntu), normalized)
+        self.assertNotEqual(dev_test_report.normalize(ubuntu.replace("INTERMEDIATE", "EXPERIENCED")),
+                            normalized)
+
     def test_uses_subtest_parameters(self):
         known = event(subtest={"message": None, "kwargs": {"body": "'INTERMEDIATE'"}})
         changed = {**known, "subtest": {"message": None, "kwargs": {"body": "'EXPERT'"}}}
