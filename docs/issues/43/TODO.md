@@ -1,6 +1,6 @@
 # Issue #43 남은 작업
 
-갱신: 2026-11-23 (KST). 구현 내용은 [HANDOFF.md](HANDOFF.md)를 본다.
+갱신: 2026-11-24 (KST). 구현 내용은 [HANDOFF.md](HANDOFF.md)를 본다.
 
 ## 미완료 기능
 
@@ -11,7 +11,7 @@
 
 ## 운영 정책 (결정 필요)
 
-- [ ] 공식 자료 기준 시점 표기 방식
+- [ ] 공식 자료 기준 시점 표기 방식(수집 시점은 기록됨, 자료 기준 시점은 공식 표시가 없어 확인 불가)
 - [ ] 갱신 주기와 담당
 - [ ] 중간 계층(구가 있는 시)의 시 단위 선택 허용 여부
 - [ ] 목록 정렬 기준(현재 코드 순)
@@ -29,11 +29,24 @@
 - [ ] 503이면 재시도 안내, 404이면 시도 목록을 다시 불러온다
 - [ ] 1~3개 선택 UI(#44와 함께 확인)
 
-## 배포 전 점검
+## PR #64 병합 전 조건
 
-- [ ] 개발 DB에 `022_regions.sql` 적용 승인과 적용
-- [ ] `python -m scripts.sync_regions --input data/regions/legal_dong_code_full_20261123.zip`으로 미리보기 후 `--apply --report`
+마이그레이션 운영 정책(2026-11-24): 모든 기능 개발과 관련 PR 병합이 끝난 뒤 개발 DB에 통합 마이그레이션을 적용한다. 개발 DB 적용은 PR #64 병합 조건이 아니다.
+
+- [x] 격리 PostgreSQL에서 022 적용, 재실행, 지역 적재와 재적재 검증(HANDOFF 8절)
+- [ ] #63이 `dev`에 먼저 병합되면: 최신 `dev` 반영, `022_regions.sql`을 manifest 예약에서 정식 항목으로 변경, 체크섬과 `requires` 등록, `scripts/check_migrations.py` 검사 통과(HANDOFF 12절)
+- [ ] #63이 아직 병합되지 않았으면 #63은 건드리지 않고 이 항목을 후속 조건으로 유지
+- [ ] 병합 직전 최신 원격에서 022 번호와 예약을 다시 확인
+- [ ] 리뷰 완료 후 Draft 해제는 별도 승인으로 진행(자동 병합 사용 안 함)
+
+## 통합 조건
+
+- [ ] 온보딩 스택(PR #53, #57)과 합칠 때 `tests/test_age_review_access.py`의 `PUBLIC`에 `GET /regions/sido`, `GET /regions/sigungu`를 명시 등록(자동 `detail` 분류에 맡기지 않음)
+- [ ] 등록 후 연령 확인 필요 계정이 두 API를 인증 없이 조회할 수 있는지 통합 테스트로 확인
+
+## 실제 개발 DB 적용 (전체 기능 개발 완료 후, 별도 승인)
+
+- [ ] 통합 마이그레이션 목록에 `022_regions.sql` 포함, 체크섬 대조
+- [ ] `python -m scripts.sync_regions --input data/regions/legal_dong_code_full_20261123.zip`으로 미리보기 후 `--apply --report`. 그때 최신 공식 자료를 다시 받을지 결정
 - [ ] 적용 후 `GET /regions/sido` 16개, `GET /regions/sigungu?sido_code=36` 1개 확인
-- [ ] 온보딩 스택(PR #53, #57)과 합칠 때 `tests/test_age_review_access.py`의 `PUBLIC`에 두 지역 경로 추가
-- [ ] 마이그레이션 번호 정리 작업과 022 번호 충돌 여부 재확인
-- [ ] 운영 배포 전 최신 공식 자료를 다시 받아 변경 내역 확인
+- [ ] 실제 DB 적용 전까지 공용 서버에 이 브랜치의 코드를 배포하지 않음(022 없으면 두 API 500, 미적재면 503)
