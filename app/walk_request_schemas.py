@@ -9,6 +9,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, computed_field
 from app.schemas import DogCardResponse
 
 RequestStatus = Literal["PENDING", "APPROVED", "REJECTED", "CANCELLED"]
+ReservationTab = Literal["ALL", "PENDING", "APPROVED", "REJECTED", "COMPLETED"]
+ReservationDisplayStatus = Literal["PENDING", "APPROVED", "REJECTED", "CANCELLED", "COMPLETED"]
 
 
 class RejectionReasonCode(str, Enum):
@@ -89,16 +91,58 @@ class WalkRequestResponse(BaseModel):
     user_id: int
     dog_id: int
     shelter_id: int
+    shelter_name: str | None = None
     dog: DogCardResponse
     requested_start_at: datetime
     requested_end_at: datetime
     status: RequestStatus
+    walk_id: int | None = None
+    walk_status: Literal["IN_PROGRESS", "COMPLETED", "INTERRUPTED"] | None = None
     reviewed_by: int | None
     reviewed_at: datetime | None
     rejection_reason: str | None
     rejection_reason_code: str | None = None
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_related_fields(cls, data):
+        if not isinstance(data, dict):
+            walk = getattr(data, "walk", None)
+            shelter = getattr(data, "shelter", None)
+            return {
+                "id": data.id,
+                "user_id": data.user_id,
+                "dog_id": data.dog_id,
+                "shelter_id": data.shelter_id,
+                "shelter_name": getattr(data, "shelter_name", None) or (shelter.name if shelter is not None else None),
+                "dog": data.dog,
+                "requested_start_at": data.requested_start_at,
+                "requested_end_at": data.requested_end_at,
+                "status": data.status,
+                "walk_id": walk.id if walk is not None else None,
+                "walk_status": walk.status if walk is not None else None,
+                "reviewed_by": data.reviewed_by,
+                "reviewed_at": data.reviewed_at,
+                "rejection_reason": data.rejection_reason,
+                "rejection_reason_code": getattr(data, "rejection_reason_code", None),
+                "created_at": data.created_at,
+                "updated_at": data.updated_at,
+            }
+        return data
+
+    @computed_field
+    @property
+    def display_status(self) -> ReservationDisplayStatus:
+        if self.status == "APPROVED" and self.walk_status in ("COMPLETED", "INTERRUPTED"):
+            return "COMPLETED"
+        return self.status
+
+    @computed_field
+    @property
+    def can_cancel(self) -> bool:
+        return self.status in ("PENDING", "APPROVED") and self.walk_id is None
 
     @computed_field
     @property
