@@ -12,6 +12,7 @@ from app.models import Shelter, User, UserRole
 from app.rate_limit import RateLimiter
 from app.schemas import (AvailabilityResponse, MeResponse, PledgeRequest, PledgeResponse, SignupRequest,
                          SignupResponse, UserResponse, UserShelterUpdate)
+from app.account_status import ensure_active
 from app.api_contract import ContractError
 from app.pledge_service import PLEDGE_COMPLETED_MESSAGE, PLEDGE_NOT_ALLOWED_MESSAGE, acknowledge_pledge
 from app.signup_service import is_taken, register_user
@@ -85,11 +86,13 @@ def get_me(user: User = Depends(get_contract_user)):
 
 
 def get_pledge_user(user: User = Depends(get_contract_user)) -> User:
-    """Bearer session (401), then role (403). The pledge is for general users only."""
+    """Bearer session (401), role (403 PLEDGE_NOT_ALLOWED), account status (403 AGE_REVIEW_REQUIRED).
+
+    The status is checked again on the locked row inside acknowledge_pledge().
+    """
     if user.role != UserRole.USER:
         raise ContractError(403, "PLEDGE_NOT_ALLOWED", PLEDGE_NOT_ALLOWED_MESSAGE)
-    # Issue #40: the shared ACTIVE account check (403 AGE_REVIEW_REQUIRED) goes here once
-    # users.account_status exists. It is not implemented yet; see app.pledge_service.
+    ensure_active(user)
     return user
 
 
@@ -97,7 +100,8 @@ def get_pledge_user(user: User = Depends(get_contract_user)) -> User:
                 responses={401: {"model": ContractErrorResponse,
                                  "description": "AUTHENTICATION_REQUIRED, INVALID_ACCESS_TOKEN, SESSION_EXPIRED, "
                                                 "USER_NOT_FOUND"},
-                           403: {"model": ContractErrorResponse, "description": "PLEDGE_NOT_ALLOWED(보호소, 관리자)"},
+                           403: {"model": ContractErrorResponse,
+                                 "description": "PLEDGE_NOT_ALLOWED(보호소, 관리자), AGE_REVIEW_REQUIRED(연령 확인 필요 계정)"},
                            409: {"model": ContractErrorResponse, "description": "PLEDGE_VERSION_MISMATCH"},
                            422: {"model": ContractErrorResponse,
                                  "description": "PLEDGE_VERSION_REQUIRED, INVALID_PLEDGE_VERSION"},

@@ -1,7 +1,8 @@
 import enum
 
-from sqlalchemy import (BigInteger, CheckConstraint, Column, Integer, String, Text, DateTime, ForeignKey, JSON,
-                        UniqueConstraint, Boolean, Enum, Date, Time, Index)
+from sqlalchemy import (BigInteger, CheckConstraint, Column, Integer, SmallInteger, String, Text, DateTime,
+                        ForeignKey, JSON, PrimaryKeyConstraint, UniqueConstraint, Boolean, Enum, Date, Time, Index,
+                        Uuid)
 from sqlalchemy.sql import func
 from app.database import Base
 from sqlalchemy.orm import relationship
@@ -14,6 +15,9 @@ class UserRole(str, enum.Enum):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("account_status IN ('ACTIVE', 'AGE_REVIEW_REQUIRED')", name="ck_users_account_status"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     # Sign-up stores login_id lowercased and nickname NFC-trimmed. Email is not collected.
@@ -29,6 +33,10 @@ class User(Base):
     # the birth date is validated later in onboarding Step 1. NULL for accounts made
     # before #31; never back-filled.
     age_14_plus_confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    # Issue #40 (migration 020). AGE_REVIEW_REQUIRED is set when Step 1 finds an age
+    # under 14; only the age review flow (Issue #41) sets it back to ACTIVE.
+    account_status = Column(String(24), nullable=False, default="ACTIVE", server_default="ACTIVE")
+    age_review_required_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -76,6 +84,68 @@ class UserPledgeAcknowledgement(Base):
     user_id = Column(Integer, ForeignKey("users.id", name="fk_user_pledge_ack_user_id"), nullable=False)
     pledge_version = Column(String(32), nullable=False)
     acknowledged_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class VolunteerOnboardingBasic(Base):
+    """Onboarding Step 1 (Issue #40, migration 020). A row means Step 1 is complete."""
+    __tablename__ = "volunteer_onboarding_basics"
+
+    user_id = Column(Integer, ForeignKey("users.id", name="fk_onboarding_basics_user_id"), primary_key=True)
+    full_name = Column(String(10), nullable=False)
+    birth_date = Column(Date, nullable=False)
+    # Verified number; one account per number (users.phone is a separate, older field).
+    phone_e164 = Column(String(16), nullable=False, unique=True)
+    phone_verified_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PhoneVerification(Base):
+    """SMS code requests (Issue #40, migration 020). Only an HMAC of the code is stored."""
+    __tablename__ = "phone_verifications"
+    __table_args__ = (
+        CheckConstraint("send_status IN ('PENDING', 'SENDING', 'SENT', 'UNKNOWN', 'FAILED')",
+                        name="ck_phone_verifications_send_status"),
+        CheckConstraint("attempt_count >= 0", name="ck_phone_verifications_attempt_count"),
+        Index("ix_phone_verifications_user_created", "user_id", "created_at"),
+        Index("ix_phone_verifications_phone_created", "phone_e164", "created_at"),
+        Index("ix_phone_verifications_expires_at", "expires_at"),
+    )
+
+    id = Column(Uuid, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", name="fk_phone_verifications_user_id"), nullable=False)
+    phone_e164 = Column(String(16), nullable=False)
+    code_digest = Column(String(64), nullable=False)
+    send_status = Column(String(16), nullable=False)
+    provider_message_id = Column(String(100), nullable=True)
+    provider_group_id = Column(String(100), nullable=True)
+    provider_request_key = Column(Uuid, nullable=False)
+    last_checked_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    attempt_count = Column(SmallInteger, nullable=False, default=0, server_default="0")
+    verified_at = Column(DateTime(timezone=True), nullable=True)
+    verified_valid_until = Column(DateTime(timezone=True), nullable=True)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PhoneVerificationDailyCount(Base):
+    """Daily SMS send counters per account and per number (Asia/Seoul date).
+
+    Kept apart from phone_verifications so the 24-hour cleanup of those rows never
+    resets a limit. The PHONE subject is an HMAC of the number, not the number.
+    """
+    __tablename__ = "phone_verification_daily_counts"
+    __table_args__ = (
+        PrimaryKeyConstraint("scope", "subject", "kst_date", name="pk_phone_verification_daily_counts"),
+        CheckConstraint("scope IN ('USER', 'PHONE')", name="ck_phone_verification_daily_counts_scope"),
+        CheckConstraint("send_count >= 0", name="ck_phone_verification_daily_counts_send_count"),
+    )
+
+    scope = Column(String(8), nullable=False)
+    subject = Column(String(64), nullable=False)
+    kst_date = Column(Date, nullable=False)
+    send_count = Column(SmallInteger, nullable=False)
 
 
 class SessionToken(Base):
