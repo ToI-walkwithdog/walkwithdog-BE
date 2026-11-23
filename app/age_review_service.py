@@ -8,7 +8,8 @@ exit for the same account never both succeed: the second sees the new state.
 Sign-up exit deletes explicitly in foreign key order (every FK to users is NO
 ACTION; no CASCADE is added):
   auth_sessions, session_tokens, phone_verifications, the account's USER daily
-  counter row, volunteer_onboarding_basics, user_pledge_acknowledgements,
+  counter row, volunteer_experience_challenges, volunteer_onboarding_experiences
+  (Step 2, Issue #42), volunteer_onboarding_basics, user_pledge_acknowledgements,
   user_consents, then users.
 It refuses with 409 ACCOUNT_HAS_RETAINED_ACTIVITY and deletes nothing when
   - activity records exist (walk requests and reviews of them, incidents, chat,
@@ -35,7 +36,8 @@ from app.account_status import ACCOUNT_ACTIVE, ACCOUNT_AGE_REVIEW_REQUIRED, lock
 from app.api_contract import ContractError
 from app.auth import contract_unauthorized, verify_password
 from app.models import (AuthSession, ChatSession, MatchingResult, PhoneVerification, PhoneVerificationDailyCount,
-                        SessionToken, Survey, User, UserConsent, UserPledgeAcknowledgement, VolunteerOnboardingBasic)
+                        SessionToken, Survey, User, UserConsent, UserPledgeAcknowledgement, VolunteerExperienceChallenge,
+                        VolunteerOnboardingBasic, VolunteerOnboardingExperience)
 from app.onboarding_common import age_years, first_incomplete_step, kst_date, step1_completed
 from app.walk_models import VolunteerProfile, WalkIncident, WalkRequest
 
@@ -146,6 +148,9 @@ def delete_account(db: Session, user_id: int) -> None:
             (PhoneVerification, PhoneVerification.user_id == user_id),
             (PhoneVerificationDailyCount, (PhoneVerificationDailyCount.scope == "USER")
              & (PhoneVerificationDailyCount.subject == str(user_id))),
+            # Step 2 children before the main row (FK to volunteer_onboarding_experiences).
+            (VolunteerExperienceChallenge, VolunteerExperienceChallenge.user_id == user_id),
+            (VolunteerOnboardingExperience, VolunteerOnboardingExperience.user_id == user_id),
             (VolunteerOnboardingBasic, VolunteerOnboardingBasic.user_id == user_id),
             (UserPledgeAcknowledgement, UserPledgeAcknowledgement.user_id == user_id),
             (UserConsent, UserConsent.user_id == user_id),

@@ -100,6 +100,58 @@ class VolunteerOnboardingBasic(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
+DOG_SIZE_CODES = ("SMALL", "MEDIUM", "LARGE")
+WALKING_FREQUENCY_CODES = ("DAILY", "WEEKLY_3_4", "WEEKLY_1_2", "RARELY")
+DIFFICULTY_CODES = ("EASY", "NORMAL", "HARD")
+CHALLENGE_CODES = ("LEASH_PULLING", "BARKING_EXCITEMENT", "OTHER_DOG_REACTION", "NONE")
+
+
+def _in(column, codes):
+    return f"{column} IN ({', '.join(repr(code) for code in codes)})"
+
+
+class VolunteerOnboardingExperience(Base):
+    """Onboarding Step 2 (Issue #42, migration 021). A row means Step 2 is complete;
+    has_experience=false alone is a complete answer. Self-reported, separate from surveys
+    and from volunteer_profiles (real walk records)."""
+    __tablename__ = "volunteer_onboarding_experiences"
+    __table_args__ = (
+        CheckConstraint(_in("dog_size_code", DOG_SIZE_CODES), name="ck_onboarding_experience_dog_size"),
+        CheckConstraint(_in("walking_frequency", WALKING_FREQUENCY_CODES), name="ck_onboarding_experience_frequency"),
+        CheckConstraint(_in("perceived_difficulty", DIFFICULTY_CODES), name="ck_onboarding_experience_difficulty"),
+        # Details are all present with experience and all absent without it.
+        CheckConstraint(
+            "(has_experience AND experienced_breeds_text IS NOT NULL AND dog_size_code IS NOT NULL"
+            " AND walking_frequency IS NOT NULL AND perceived_difficulty IS NOT NULL)"
+            " OR (NOT has_experience AND experienced_breeds_text IS NULL AND dog_size_code IS NULL"
+            " AND walking_frequency IS NULL AND perceived_difficulty IS NULL)",
+            name="ck_onboarding_experience_details"),
+    )
+
+    user_id = Column(Integer, ForeignKey("users.id", name="fk_onboarding_experiences_user_id"), primary_key=True)
+    has_experience = Column(Boolean, nullable=False)
+    experienced_breeds_text = Column(String(200), nullable=True)
+    dog_size_code = Column(String(10), nullable=True)
+    walking_frequency = Column(String(20), nullable=True)
+    perceived_difficulty = Column(String(20), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class VolunteerExperienceChallenge(Base):
+    """Step 2 "어려웠던 상황" choices, one row per code (Issue #42). NONE is exclusive
+    (checked by the server in the saving transaction)."""
+    __tablename__ = "volunteer_experience_challenges"
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "challenge_code", name="pk_volunteer_experience_challenges"),
+        CheckConstraint(_in("challenge_code", CHALLENGE_CODES), name="ck_experience_challenge_code"),
+    )
+
+    user_id = Column(Integer, ForeignKey("volunteer_onboarding_experiences.user_id",
+                                         name="fk_experience_challenges_experience"), nullable=False)
+    challenge_code = Column(String(30), nullable=False)
+
+
 class PhoneVerification(Base):
     """SMS code requests (Issue #40, migration 020). Only an HMAC of the code is stored."""
     __tablename__ = "phone_verifications"

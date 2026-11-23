@@ -8,8 +8,8 @@ the age review flow (#41) and GET /users/me (#45).
   common years.
 - Account status: app.account_status (ACTIVE or AGE_REVIEW_REQUIRED).
 - Steps: first incomplete step in the order AGE_REVIEW, PLEDGE, BASIC_INFORMATION,
-  PET_EXPERIENCE, WALKING_ROUTINE. Step 2 and 3 are not implemented yet, so an
-  account with Step 1 done always reports PET_EXPERIENCE; nothing marks them done.
+  PET_EXPERIENCE, WALKING_ROUTINE. Step 3 is not implemented yet, so an account with
+  Step 2 done always reports WALKING_ROUTINE; nothing marks Step 3 done.
 """
 from datetime import date, datetime, timedelta, timezone
 
@@ -20,7 +20,7 @@ from app.account_status import ACCOUNT_ACTIVE, ensure_active
 from app.api_contract import ContractError
 from app.auth import get_contract_user
 from app.database import get_db
-from app.models import User, UserRole, VolunteerOnboardingBasic
+from app.models import User, UserRole, VolunteerOnboardingBasic, VolunteerOnboardingExperience
 from app.pledge_service import current_pledge_acknowledgement
 
 KST = timezone(timedelta(hours=9), "Asia/Seoul")
@@ -109,5 +109,7 @@ def first_incomplete_step(db: Session, user: User) -> str | None:
         return STEP_PLEDGE
     if not step1_completed(db, user.id):
         return STEP_BASIC_INFORMATION
-    # Step 2 and Step 3 add their checks here; until then PET_EXPERIENCE is never done.
-    return STEP_PET_EXPERIENCE
+    if db.get(VolunteerOnboardingExperience, user.id) is None:
+        return STEP_PET_EXPERIENCE
+    # Step 3 (walking routine) adds its check here; until then it is never done.
+    return STEP_WALKING_ROUTINE
