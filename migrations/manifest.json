@@ -335,8 +335,8 @@
     },
     {
       "file": "022_regions.sql",
-      "state": "reserved",
-      "source": "https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/43",
+      "state": "unmerged",
+      "source": "https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/64",
       "requires": []
     }
   ]

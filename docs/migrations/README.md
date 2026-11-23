@@ -2,14 +2,29 @@
 
 ## 기준과 실행 경로
 
-이 목록의 기준은 `origin/dev`의 `0936933005c895947e256e735e9c4c9615c6c10f`다. [manifest](../../migrations/manifest.json)의 `migrations` 배열에 병합된 SQL 21개를 실행 순서대로 기록한다. `reservations`는 별도로 조회하며 실행 목록에 포함하지 않는다. `requires`는 선행 파일의 전체 이름이다. 테이블이나 기본 스키마처럼 이 저장소의 SQL이 만들지 않는 전제와 SQL이 직접 요구하지 않는 배포 순서는 아래에 명시한다. `environments`는 대상 범위이며 실행 승인이나 현재 DB 상태를 뜻하지 않는다.
+[manifest](../../migrations/manifest.json)는 매 기능 PR과 함께 갱신하는 관리 파일이다. 처음 등록한 SQL 21개는 `origin/dev`의 `0936933005c895947e256e735e9c4c9615c6c10f` 기준이다. `migrations` 배열에는 해당 Git 트리의 정식 SQL을 실행 순서대로 기록한다. `reservations`에는 아직 병합되지 않은 번호와 파일을 추적한다. `requires`는 선행 파일의 전체 이름이다. 기본 스키마처럼 이 저장소의 SQL이 만들지 않는 전제와 SQL이 직접 요구하지 않는 배포 순서는 아래에 명시한다. `environments`는 적용 대상 범위를 나타낸다.
+
+**번호 예약, 정식 등록, DB 적용 이력은 별개다.** 예약은 병렬 작업의 번호를 확보한다. 정식 등록은 검수한 SQL이 병합 후보와 `dev`에 포함됐음을 나타낸다. 실제 적용은 대상 DB별 검증 증빙과 전체 파일명, 체크섬으로 기록한다. 기능 PR 병합, manifest 등록, 격리 PostgreSQL 테스트는 개발 DB의 적용 이력을 생성하지 않는다.
 
 - [prepare_demo_db.py](../../scripts/prepare_demo_db.py)는 데모 DB의 `001_matching_snapshot.sql` 전후를 확인한다. [migrate_backend.py](../../scripts/migrate_backend.py)는 `002`부터 `008`까지만 파일명과 매핑한다. 기존 도구의 기본 점검도 DB에 연결하며, 적용 경로는 대상 스키마 검사, 잠금, 백업 절차를 사용한다. `007_walk_domain.schema.json`과 `008_gps_motion_analysis.schema.json`은 그 경로의 카탈로그 계약이다.
 - [check_migrations.py](../../scripts/check_migrations.py)는 Python 표준 라이브러리로 로컬 파일만 읽는다. 배포 자동화나 기존 도구의 실행 범위를 늘리지 않는다.
 - `001`은 기존 `matching_results`, `surveys`, `dogs`를 전제로 한다. 이어지는 파일들도 기존 `users`, `dogs`, `shelters` 등을 요구한다. 따라서 빈 PostgreSQL에 `001`부터 전부 적용하는 방식으로 신규 환경을 초기화할 수 없다. 최신 앱의 모델에서 직접 초기화하는 경로는 별도로 승인한 완전히 빈 환경에서만 검증한다. [app/main.py](../../app/main.py)는 `AUTO_CREATE_SCHEMA=true`일 때 `Base.metadata.create_all`을 호출한다. 이는 기존 테이블을 업데이트하거나 과거 SQL 실행을 입증하지 않는다. 최종 카탈로그와 통합 테스트를 검증하고 사용한 기준 커밋과 초기화 방식을 별도 기록한다.
 - 과거 SQL 자체의 연속 적용을 시험할 때는 해당 릴리스의 기본 스키마를 먼저 준비한다. 예를 들어 [PostgreSQL 가입 테스트](../../tests/test_signup_postgres.py)는 이메일이 있는 `users` 등 구형 픽스처를 만든 뒤 실제 SQL을 적용한다. 지원되는 기존 DB와 신규 초기화 경로를 별개로 검증한다.
 
-### 병합된 SQL 순서와 검사
+## 개발 중 검증과 최종 통합 적용
+
+### 모든 기능 개발과 관련 PR 병합이 끝날 때까지
+
+#44 이후에도 같은 절차를 계속한다. 기능별 SQL을 개별 파일로 작성하고 격리 PostgreSQL에서 선행 스키마, 적용 결과, 재실행 위험을 검증한다. 모든 신규 SQL은 예약 또는 정식 항목으로 추적하고, 기능 PR 병합 시 번호, 의존성, 실행 순서와 체크섬을 검토한다. 이 기간의 검증과 PR 병합은 개발 DB에 SQL을 적용하는 작업을 포함하지 않는다. 통합 실행 파일과 최종 적용 목록은 전체 개발과 병합이 끝난 뒤 확정한다.
+
+### 모든 기능 개발과 관련 PR 병합이 끝난 뒤
+
+1. 최종 `dev` 커밋에서 전체 SQL 목록, 의존 순서, 체크섬과 트랜잭션 방식을 확정한다. 읽기 전용으로 승인받은 뒤 실제 개발 DB의 기존 적용 이력과 카탈로그를 대조한다.
+2. 이미 적용된 파일과 미적용 파일, 부분 적용 및 증빙이 불확실한 파일을 구분한다. 미적용 파일의 선행 조건과 실행 순서를 정하고, 불확실한 항목은 대조를 마친다. 기존 데이터 보존 방법, 백업과 복원 절차를 확인한다.
+3. 확정한 순서를 하나의 명령으로 실행할 도구를 완성한다. 도구는 확인된 적용 이력을 바탕으로 실행 대상을 정하고 파일별 트랜잭션과 검증 기록을 유지한다. 실패 시 다음 파일로 넘어가지 않고, 재개 전에 커밋 여부와 현재 상태를 대조한다. 아래의 개별 `psql` 명령은 파일별 동작의 기준이다.
+4. 격리 PostgreSQL에서 기본 스키마 또는 확인된 기존 스키마로부터 전체 적용을 검증한다. 데이터 보존과 부팅 후 기능, 재실행 시 건너뛸 파일, 중간 실패와 부분 적용에서의 처리까지 검증한다. 개발 DB에는 통합 검증 결과와 복구 절차를 확인하고 별도의 적용 승인을 받은 뒤 실행한다.
+
+### 최초 등록한 SQL의 순서와 검사
 
 `file`은 파일 내부 `BEGIN/COMMIT`, `psql-single`은 적용 시 `psql --single-transaction`으로 파일 전체를 감싸는 방식이다. 재실행 방어는 일부 문장이 기존 객체를 허용하는 경우를 가리킨다. 객체가 같은 이름이어도 정의가 다르면 그대로 남을 수 있으므로 검사를 통과하기 전에는 재실행을 결정하지 않는다.
 
@@ -47,7 +62,7 @@
 
 - `017_f10_behavior_marker.sql`은 산책 마커를 바꾸고 `017_remove_user_email.sql`은 사용자 이메일을 제거한다. 두 파일 간 직접 스키마 의존성이 없다. 이메일 제거는 `016_onboarding_signup.sql` 또는 검증한 계정 전환에 의존한다. [PR #47](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/47)
 - `018_f11_walk_overtime.sql`은 `walks`에 시간 컬럼과 CHECK를 더하고 `018_user_consents.sql`은 사용자 자기확인 시각과 동의 테이블을 추가한다. 동의용 SQL은 출시 순서상 이메일 제거 뒤에 둔다. F-11은 동의 적용의 선행 SQL이 아니다. [PR #48](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/48)
-- 예외는 위 두 쌍의 정확한 전체 파일명으로만 허용한다. `019`와 `020`은 병합된 기능과 미병합 온보딩이 같은 번호를 사용하므로 새 예외를 늘리지 않고 온보딩 파일을 병합하기 전에 번호와 참조를 합의한다. 기존 `021` 헤드 주석에는 `017~021` 재번호 안내가 남아 있다. 이 관리 기준은 병합된 `017/018` 보존과 미병합 `019/020` 조정을 전제로 하며 기존 SQL은 그대로 있다.
+- 기존 번호 예외는 위 두 쌍의 정확한 전체 파일명에만 적용한다. `019`와 `020`은 병합된 기능과 미병합 온보딩이 같은 번호를 사용한다. 각 온보딩 PR을 병합하기 전에 번호와 참조를 확정한다.
 
 | 번호, 상태 | 관측 위치 | SQL 범위 및 병합 전 확인 |
 | --- | --- | --- |
@@ -56,9 +71,22 @@
 | 020, 기본 정보와 보호소 평가 충돌 | #52 `a8cd897`에서 추가, #53/#57에 상속. 기준 dev에는 `020_shelter_volunteer_reviews.sql` | 서약 뒤 `users.account_status`, `age_review_required_at`, `volunteer_onboarding_basics`, `phone_verifications`, `phone_verification_daily_counts`를 확인한다. 내부 트랜잭션과 존재 가드가 있으며 기존 계정의 상태 기본값은 `ACTIVE`다. 컬럼이 있어야 새 로그인 코드가 동작한다. [PR #52](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/52) |
 | 추가 SQL 없음 | #53 `02494c3`, Base #52 브랜치 | 서약과 기본 정보 SQL을 상속한다. #41 가입 종료와 연령 제한의 전체 동작은 #42의 Step 2 테이블까지 갖춘 배포 후보에서 확인한다. [PR #53](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/53) |
 | 021, 반려견 경험 미병합 | #57 `657813a`, Base #53 브랜치 | 기본 정보 뒤 `volunteer_onboarding_experiences`와 `volunteer_experience_challenges`의 FK, 선택 코드 및 경험 상세 CHECK를 확인한다. 내부 트랜잭션과 존재 가드가 있다. Step 2 저장과 가입 종료를 같이 검증한다. [PR #57](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/57) |
-| 022, 지역 마스터 예약 | #43 진행 중 | `022_regions.sql`의 존재나 적용을 이 목록으로 확정하지 않는다. PR에서 최종 SQL, 선행 DB 객체, 트랜잭션 방식, 지역 데이터 로더의 중복 및 일부 실패 복구 검증을 마친 뒤 적용 목록 후보에 넣는다. [Issue #43](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/43) |
+| 022, 지역 마스터 미병합 | #43의 Draft PR #64 `c9c594e` | `022_regions.sql`은 `regions`를 만들며 앞선 마이그레이션을 요구하지 않는다. 자체 트랜잭션을 사용한다. 병합 전 최종 SQL 및 지역 데이터 로더의 중복과 일부 실패 복구를 검증한 뒤 정식 등록한다. [PR #64](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/64) |
 
 관측 시 #50의 Base는 `dev`, #52는 #50 브랜치, #53은 #52 브랜치, #57은 #53 브랜치다. 당시 온보딩 브랜치 트리에는 `017_f10_behavior_marker.sql`, `018_f11_walk_overtime.sql`, `019_first_walk_guide.sql`, `020_shelter_volunteer_reviews.sql`이 아직 없었다. 선행 PR 병합 후 뒤쪽 PR을 최신 `dev`와 다시 비교하고, 범위와 SQL 순서를 재검증한다. #44는 #42와 #43을 통합한 DB에서 지역과 온보딩 흐름을 검증한다. #44용 SQL 번호는 아직 배정하지 않았다. [Issue #44](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/44)
+
+### 온보딩 019/020 충돌을 해결할 때
+
+**미병합 서약 SQL과 기본 정보 SQL에 새 번호를 배정하는 편이 안전하다.** 이미 병합된 산책 안내와 보호소 평가의 파일명 및 체크섬을 보존한다. 온보딩의 두 파일을 바꾸기 전에 기존 실행 기록이 있는지 확인하고, 새 번호 두 개는 최신 원격에서 다시 조회한 뒤 배정한다. 반려견 경험용 `021`은 번호가 고유하므로 유지할 수 있다. 번호의 크기와 관계없이 명시적 순서에는 **개인정보 동의 → 서약 → 기본 정보 → 반려견 경험**을 반영한다.
+
+두 파일에 번호 예외를 추가하면 현재 경로 참조는 유지할 수 있다. 대신 이후의 검증기와 운영 도구가 예외를 계속 관리해야 하고, 번호로만 적힌 과거 기록이나 작업 로그에서 서로 다른 파일을 오인할 여지가 남는다. 재번호 전 이미 적용됐다는 증빙이 발견되면 같은 SQL을 새 파일로 다시 적용하지 않도록 기존 파일명, 해시와 대상 DB를 먼저 대조한다. 예외가 필요하다면 근거와 두 전체 파일명을 별도로 검토한다.
+
+| 확인한 참조 | 관련 기능 PR에서 반영할 범위 |
+| --- | --- |
+| SQL 경로와 순서 | #50의 서약과 #52의 기본 정보 파일명, 각 파일 헤더의 실행 명령, 기본 정보 헤더의 서약 경로, #57의 `021_onboarding_dog_experience.sql` 헤더의 기본 정보 경로 및 기존 재번호 안내 |
+| 테스트 | `tests/test_signup_postgres.py`의 `PLEDGE_MIGRATION`, `STEP1_MIGRATION` 경로를 새 이름과 맞추고 #50 → #52 → #53 → #57에서 상속된 변경을 확인. 격리 PostgreSQL에서 서약, 기본 정보, 연령 상태 및 Step 2와 가입 종료를 순서대로 검증 |
+| 문서와 메타데이터 | `docs/issues/33/HANDOFF.md`, `docs/issues/40/HANDOFF.md`와 #50, #52, #53, #57 본문의 파일명 및 번호 범위. manifest의 예약과 `requires` 참조를 함께 바꾸고 병합할 파일의 체크섬을 등록 |
+| 런타임과 적용 도구 | 확인한 네 브랜치에서 두 파일명을 직접 읽는 런타임 코드는 발견되지 않았다. 기존 `scripts/migrate_backend.py`의 범위는 002~008이다. 병합 후보의 전체 트리에서 참조를 다시 검색한다. |
 
 ### 신규 번호를 배정할 때
 
@@ -73,8 +101,15 @@
    ```
 
 2. 이미 사용한 번호와 미병합 예약을 모두 보존한다. 다른 신규 예약이 없으면 다음 번호는 `023`이다. `010` 같은 이력상의 빈자리를 재사용하지 않는다. 병렬 작업에서는 번호와 전체 파일명을 이슈나 PR에 남기고, 배정과 병합 직전에 각각 최신 원격을 다시 확인한다.
-3. 미병합 파일은 `reservations`에 기록한다. 병합 후보에는 예약을 실행 항목으로 옮기고 순서, `requires`, 환경, 트랜잭션 방식, 사전 검사와 SHA-256을 리뷰한다. 의존 관계가 순서를 결정하며 번호만 정렬해 적용하지 않는다. #43은 최종 파일을 직접 확인한 뒤 이 절차를 적용한다.
-4. 변경된 SQL은 파일이 아직 병합 또는 적용되지 않았는지 먼저 확인한다. 이미 적용된 파일의 내용과 이름은 보존하고, 수정이 필요한 스키마는 새 번호의 후속 SQL로 처리한다.
+3. 미병합 파일은 전체 파일명과 출처, 알려진 선행 파일을 `reservations`에 등록한다. 예약 항목에 개발 DB 적용 상태를 적지 않는다.
+4. 파일을 변경하기 전에 병합 또는 적용 여부를 확인한다. 병합된 파일은 이름과 내용을 보존하고, 변경이 필요한 스키마는 새 번호의 후속 SQL로 처리한다.
+
+### 기능 PR을 dev에 병합할 때
+
+1. 최신 `dev`와 합친 후보에서 추가되거나 바뀐 SQL과 예약을 확인한다. 충돌을 해소할 때 예약 파일명의 변경과 후속 항목의 `requires` 참조를 같이 검토한다.
+2. 함께 병합하는 SQL을 같은 PR의 `migrations` 배열에 정식 등록한다. 예약했던 파일은 `reservations`에서 제거하되 아직 미병합인 다른 예약은 유지한다. 의존 파일의 전체 이름과 위치, 트랜잭션 방식, 적용 대상 환경, 사전 검사, 최종 SQL의 SHA-256을 검토한다. #43도 최종 파일과 적재 절차를 검증한 뒤 이 단계에서 등록한다.
+3. 병합 전에 후보에서 아래 기본 검사를 실행하고 추가 및 변경한 SQL과 예약 이름을 모두 `--check-reservations-for`로 검사한다. 반복 옵션으로 각 파일을 지정한다. 병합 후보에서 새 SQL이 예약에만 있거나 정식 목록에서 빠졌거나 두 곳에 중복되면 실패한다. 해당 PR의 번호 충돌도 해소한 뒤 병합한다.
+4. 실제 병합 뒤 최신 `dev` 체크아웃에서 기본 검사를 다시 실행한다. 검증기는 `migrations/`의 SQL을 모두 열거해 manifest와 양방향으로 대조한다. 전후 검사가 모두 성공해야 병합 과정에서 파일이나 등록 정보가 누락되지 않았음을 확인할 수 있다. 다른 기능 PR이 이 관리 기준보다 먼저 병합되면 관리 PR을 최신 `dev`에 맞춰 누락 SQL을 등록한 뒤 검증한다.
 
 ## DB 연결 없이 하는 사전 검증
 
@@ -82,12 +117,17 @@
 
 ```sh
 python scripts/check_migrations.py
+python scripts/check_migrations.py --check-reservations-for 023_example.sql
 python scripts/check_migrations.py --check-reservations
 python scripts/check_migrations.py --propose 023_example.sql
 python -m pytest -q tests/test_check_migrations.py
 ```
 
-기본 명령은 SQL 누락, 미등록 파일, 허용되지 않은 중복, 체크섬 불일치, 검사 스크립트 누락, 선행 SQL 누락, 순환과 순서 오류에 종료 코드 1을 반환한다. 현재의 미병합 `019/020` 충돌은 `BLOCKED FUTURE MIGRATION`으로 항상 보인다. 기본 검사는 병합된 목록과 분리하여 성공할 수 있지만, 병합 후보를 확인하는 `--check-reservations`는 두 충돌이 해결될 때까지 종료 코드 1이다. `--propose`는 이 목록에서 다음 번호를 확인하고 최신 원격 조회를 대신하지 않는다.
+기본 명령은 SQL 누락, 미등록 파일, 허용되지 않은 중복, 체크섬 불일치, 검사 스크립트 누락, 선행 SQL 누락, 순환과 순서 오류에 종료 코드 1을 반환한다. 현재의 미병합 `019/020` 충돌은 `BLOCKED FUTURE MIGRATION`으로 항상 보인다.
+
+- `--check-reservations-for`의 예시 파일명은 병합 후보에서 추가하거나 변경한 실제 이름으로 바꾼다. 정식 항목 또는 예약에 없는 이름과 선택한 파일의 예약 충돌은 종료 코드 1이다. 선택한 파일과 관계없는 예약 충돌은 출력되며 해당 PR의 검사를 실패시키지 않는다. 기본 검사가 찾는 정식 목록 오류는 이 옵션을 사용해도 모두 실패한다.
+- `--check-reservations`는 전체 예약을 점검하며, 현재 `019/020` 충돌이 남아 있어 종료 코드 1이다.
+- `--propose`는 목록에 등록하기 전에 다음 번호를 확인하는 명령이다. 최신 원격 브랜치와 PR도 함께 조회한다.
 
 SHA-256은 SQL 바이트에서 CRLF만 LF로 통일해 계산한다. BOM, 공백, 내용 변경은 해시를 바꾼다. 후보의 해시가 다른 경우 배포를 멈추고, 검수한 Git 커밋에서 파일을 다시 가져와 차이를 확인한다. 새 파일의 체크섬을 확인하는 예시다.
 
@@ -111,9 +151,9 @@ python -c "from pathlib import Path; from scripts.check_migrations import checks
 - `absent`에는 전체 사전 상태를 검토한 증빙을 입력한다. 선행 파일 이력이 검증됐을 때 `MANUAL_PRECHECK_REQUIRED`가 나온다. 사람이 현재 상태와 승인을 확인하기 전에는 실행하지 않는다.
 - 스키마는 맞지만 실행 증빙이 없으면 `schema-match`, 일부만 일치하면 `partial`, 증거가 부족하거나 미기재면 `unknown`이다. 이들 상태와 체크섬 불일치, 선행 이력 부족은 별도 대조가 필요하며 종료 코드 1이다. 자동 실행 프로그램을 도입하기 전에 개발 DB에서 이 대조를 마친다.
 
-## 기존 DB 이력 대조
+## 최종 통합 적용 전 DB 이력 대조
 
-개발과 운영은 각각 승인된 접속 프로필과 별도 실행 기록을 사용한다. 시작할 때 접속 대상, 역할, 대상 스키마와 `search_path`를 확인한다. 읽기 전용 프로필로 다음 유형의 카탈로그 조회를 같은 스냅샷에서 실행한다. 예시는 검증 대상이 `public`으로 확정된 경우다. 세션은 `ROLLBACK`으로 종료한다.
+모든 기능과 관련 PR 병합이 끝난 뒤 읽기 전용 접속 승인을 받아 이 절차를 진행한다. 개발과 운영은 각각 승인된 접속 프로필과 별도 실행 기록을 사용한다. 시작할 때 접속 대상, 역할, 대상 스키마와 `search_path`를 확인한다. 읽기 전용 프로필로 다음 유형의 카탈로그 조회를 같은 스냅샷에서 실행한다. 예시는 검증 대상이 `public`으로 확정된 경우다. 세션은 `ROLLBACK`으로 종료한다.
 
 ```sql
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
@@ -165,17 +205,19 @@ ROLLBACK;
 | --- | --- | --- |
 | 대상 확정 | 개발 환경, 승인된 DB와 역할, 스키마, Git 커밋, 적용 파일 순서와 예약 확인 | 운영 전용 프로필과 변경 승인, 배포 시간 및 담당자 확인. 개발에서 같은 커밋과 초기화 또는 업그레이드 경로를 검증 |
 | 쓰기 전 | 승인된 읽기 전용 사전 검사, 환경별 이력 대조, 누락과 부분 적용 해결, 검수한 백업과 복구 확인 | 운영 스냅샷 시점과 복구 가능 범위를 확인하고 복원 연습, DB 잠금에 따른 영향, API 쓰기 중지 범위와 서비스 복구 기준 검토 |
-| 실행 | 파일 하나씩 승인된 프로필로 실행하고 종료 상태와 사후 SQL을 기록 | 운영 승인자와 적용자가 대상, 파일, SHA-256을 다시 확인. 중단 기준과 실패 시 담당자를 공유 |
+| 실행 | 승인된 통합 명령으로 파일별 적용과 사후 검사를 수행하고 기록 | 운영 승인자와 적용자가 대상, 파일, SHA-256을 다시 확인. 중단 기준과 실패 시 담당자를 공유 |
 | 사후 | 카탈로그 재검증과 합성 계정 스모크 테스트. 증빙 저장 | 카탈로그와 서비스 헬스, 오류율 및 승인된 스모크 항목 확인. 기록 정리 후 쓰기를 재개 |
 
-### 적용과 실패 복구
+### 파일별 적용과 실패 복구 기준
+
+전체 기능 개발 중에는 아래 명령을 격리 PostgreSQL에서 검증할 때 사용한다. 개발 DB의 통합 적용 도구는 최종 단계에서 이 파일별 트랜잭션, 중단 및 사후 검사 기준을 따른다.
 
 1. 적용 전 `python scripts/check_migrations.py`로 대상 커밋의 파일과 체크섬을 확인한다. 미병합 번호 충돌이 해당 배포 후보에 포함됐으면 멈춘다. 쓰기 작업 승인과 검증된 백업을 확보한 뒤 승인된 쓰기 프로필에서 DB와 역할, 스키마를 다시 확인한다. `016`의 빈 사용자 조건, `017`의 이메일 삭제, 코드가 새 컬럼을 읽는 `018_user_consents.sql`과 온보딩 변경은 앱 중지와 기동 순서를 함께 확정한다. 기존 `002~008`의 전용 적용 절차를 쓸 경우 도구의 계약과 백업 검사를 유지한다.
 2. 전체 이름을 명시해 한 파일씩 실행한다. 아래 명령은 형식 예시다. 각각 파일 내 트랜잭션과 외부 단일 트랜잭션을 구분한다. `-X`는 사용자 psql 시작 파일을 무시하고, `ON_ERROR_STOP=1`은 스크립트 오류에서 실행을 멈춘다. `--single-transaction`을 파일 내부에 `BEGIN/COMMIT`이 있는 SQL에 겹쳐 쓰지 않는다. [PostgreSQL 16 psql 문서](https://www.postgresql.org/docs/16/app-psql.html)
 
    ```sh
-   psql -X -v ON_ERROR_STOP=1 --single-transaction "service=approved_target_write" -f migrations/018_f11_walk_overtime.sql
-   psql -X -v ON_ERROR_STOP=1 "service=approved_target_write" -f migrations/018_user_consents.sql
+   psql -X -v ON_ERROR_STOP=1 --single-transaction "service=approved_isolated_test" -f migrations/018_f11_walk_overtime.sql
+   psql -X -v ON_ERROR_STOP=1 "service=approved_isolated_test" -f migrations/018_user_consents.sql
    ```
 
    두 파일이 모두 적용 대상이면 위 순서를 따른다. 다음 파일은 앞 파일의 커밋과 사후 검사를 확인한 뒤 시작한다.

@@ -149,7 +149,7 @@ def validate_inventory(root, manifest):
     for prefix, group in sorted(number_groups(reserved_names).items()):
         other = active_groups.get(prefix, set())
         if other or len(group) > 1:
-            conflicts.append(f"reserved number {prefix}: {', '.join(sorted(group | other))}")
+            conflicts.append((prefix, group | other))
     return errors, conflicts
 
 
@@ -210,11 +210,19 @@ def main(argv=None):
     parser.add_argument("--root", type=Path, default=ROOT, help="repository root")
     parser.add_argument("--evidence", type=Path, help="offline JSON with reviewed per-file evidence")
     parser.add_argument("--check-reservations", action="store_true", help="fail on unmerged reservation conflicts")
+    parser.add_argument(
+        "--check-reservations-for", metavar="FILENAME", action="append", type=filename, default=[],
+        help="fail on reservation conflicts involving this listed file (repeat for each changed file)",
+    )
     parser.add_argument("--propose", metavar="FILENAME", help="check a proposed new migration filename")
     args = parser.parse_args(argv)
     try:
         manifest = read_json(args.root / MANIFEST)
         errors, conflicts = validate_inventory(args.root, manifest)
+        selected = set(args.check_reservations_for)
+        listed = {row["file"] for row in manifest["migrations"] + manifest["reservations"]}
+        for name in sorted(selected - listed):
+            errors.append(f"file selected for reservation check is not listed: {name}")
         if args.propose and not errors:
             proposal = proposal_error(args.propose, manifest)
             if proposal:
@@ -226,8 +234,11 @@ def main(argv=None):
 
     for problem in errors:
         print(f"ERROR: {problem}", file=sys.stderr)
-    for conflict in conflicts:
-        print(f"BLOCKED FUTURE MIGRATION: {conflict}")
+    reservation_blocked = False
+    for prefix, names in conflicts:
+        print(f"BLOCKED FUTURE MIGRATION: reserved number {prefix}: {', '.join(sorted(names))}")
+        if args.check_reservations or selected.intersection(names):
+            reservation_blocked = True
     if errors:
         return 1
 
@@ -243,9 +254,9 @@ def main(argv=None):
     if not args.evidence:
         print("DATABASE STATE UNKNOWN: static checks only; no migration can be inferred as applied")
     else:
-        print("OFFLINE EVIDENCE ONLY: confirm live preconditions and approval before any manual apply")
+        print("OFFLINE EVIDENCE ONLY: confirm preconditions and approval before any database apply")
     blocked = any(action.startswith(("RECONCILE", "BLOCKED")) for _, action in actions)
-    return int(bool(blocked or (args.check_reservations and conflicts)))
+    return int(blocked or reservation_blocked)
 
 
 if __name__ == "__main__":

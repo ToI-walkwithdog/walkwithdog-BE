@@ -212,3 +212,62 @@ def test_dry_run_does_not_connect_or_change_a_database(inventory, capsys, monkey
 
     assert db.read_bytes() == before
     assert "DATABASE STATE UNKNOWN" in capsys.readouterr().out
+
+
+def test_new_sql_must_move_from_reservation_into_dev_inventory(inventory, capsys):
+    root, manifest = inventory
+    add_migration(inventory, FIRST)
+    add_reservation(manifest, SECOND, "reserved")
+    (root / "migrations" / SECOND).write_bytes(b"SELECT 1;\n")
+    args = ["--root", str(root), "--check-reservations-for", SECOND]
+
+    save_manifest(root, manifest)
+    assert checker.main(args) == 1
+    assert f"SQL file not listed for dev: {SECOND}" in capsys.readouterr().err
+
+    row = add_migration(inventory, SECOND, [FIRST])
+    digest = row["sha256"]
+    save_manifest(root, manifest)
+    assert checker.main(args) == 1
+    assert f"filename listed more than once: {SECOND}" in capsys.readouterr().err
+
+    manifest["reservations"].clear()
+    row["sha256"] = "0" * 64
+    save_manifest(root, manifest)
+    assert checker.main(args) == 1
+    assert f"{SECOND}: SHA-256 mismatch" in capsys.readouterr().err
+
+    row["sha256"] = digest
+    save_manifest(root, manifest)
+    assert checker.main(args) == 0
+    output = capsys.readouterr().out
+    assert f"02. {SECOND}" in output
+    assert f"RESERVED {SECOND}" not in output
+    assert "DATABASE STATE UNKNOWN" in output
+
+
+def test_candidate_reservation_check_blocks_only_selected_collisions(inventory, capsys):
+    root, manifest = inventory
+    add_migration(inventory, FIRST)
+    add_migration(inventory, SECOND, [FIRST])
+    add_reservation(manifest, "001_colliding.sql")
+    save_manifest(root, manifest)
+    args = ["--root", str(root), "--check-reservations-for", SECOND]
+
+    assert checker.main(args) == 0
+    assert "BLOCKED FUTURE MIGRATION: reserved number 001" in capsys.readouterr().out
+    assert checker.main(args + ["--check-reservations-for", "001_colliding.sql"]) == 1
+
+    add_reservation(manifest, "002_another_branch.sql")
+    save_manifest(root, manifest)
+    assert checker.main(args) == 1
+    assert "BLOCKED FUTURE MIGRATION: reserved number 002" in capsys.readouterr().out
+
+
+def test_candidate_reservation_check_rejects_unlisted_target(inventory, capsys):
+    root, manifest = inventory
+    add_migration(inventory, FIRST)
+    save_manifest(root, manifest)
+
+    assert checker.main(["--root", str(root), "--check-reservations-for", FUTURE]) == 1
+    assert f"file selected for reservation check is not listed: {FUTURE}" in capsys.readouterr().err
