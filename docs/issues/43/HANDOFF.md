@@ -1,7 +1,7 @@
 # 인수인계: 행정구역 지역 마스터와 시도, 시군구 목록 조회 (Issue #43)
 
 - 작성: 2026-11-23 (KST)
-- 브랜치: `feature/regions-master` (`origin/dev` `0936933`에서 분기), PR 대상 `dev`
+- 브랜치: `feature/regions-master` (`origin/dev` `0936933`에서 분기), [Draft PR #64](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/64) → `dev`
 - 근거: [Issue #43](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/43), Notion [시도 지역 목록 조회](https://app.notion.com/p/420b7bbac8c7819691a9c52404a7ef63), [시군구 지역 목록 조회](https://app.notion.com/p/420b7bbac8c781b8b028e6bc5cf7c3d1)
 - 상태: `dev` 미병합, 개발 DB에 022 미적용, 지역 데이터 미적재
 
