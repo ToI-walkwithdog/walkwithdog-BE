@@ -14,3 +14,11 @@
 - [ ] (사용자) 로컬 PostgreSQL에 018 적용 (`handoff` 6번 참고)
 - [ ] (사용자) 커밋·push 후 PR 생성 (feature → dev)
 - [ ] (앱) 보호소 실시간 카드(SC-15) 빨간 테두리·'시간 초과' 뱃지 및 사용자 산책 화면 종료 안내 UI 연동
+
+## F-12 산책 이력 (SC-09, SC-16)
+- [x] 사용자 산책 이력 목록 API (`GET /walks/history`) 및 상세 연동 (`GET /walks/{walk_id}`, `GET /walks/{walk_id}/summary`)
+- [x] 보호소 산책 이력 목록·상세 API (`GET /shelters/me/walks`, `GET /shelters/me/walks/{walk_id}`) 및 사용자 신고 탭 연동 (`GET /shelters/me/incidents`)
+- [x] 인수 테스트 작성 및 통과 (`tests/test_f12_walk_history.py`, `tests/test_walk_domain.py` — 26 passed)
+- [x] `docs/handoff/LATEST.md` 테스트 결과 및 인수인계 내용 반영
+- [ ] `feature/f-12-walk-history` 커밋·push 후 PR 생성 (`feature/f-12-walk-history` → `dev`)
+- [ ] (앱) SC-09 / SC-16 Android RecyclerView 목록·상세 UI 연동

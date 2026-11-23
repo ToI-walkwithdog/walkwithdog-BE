@@ -1,4 +1,6 @@
 """Authenticated GPS sessions; raw locations and safety reports are never public."""
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -7,6 +9,8 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.dependencies import require_role
 from app.models import User, UserRole
+from app.walk_map_schemas import UserWalksResponse
+from app.walk_map_service import user_walk_history
 from app.walk_record_schemas import (
     ActiveWalkResponse, PointsReceipt, WalkDetailResponse, WalkEnd, WalkIncidentCreate, WalkIncidentResponse,
     WalkMarkerCreate, WalkMarkerResponse, WalkPointsBatch, WalkResponse, WalkStart,
@@ -80,6 +84,19 @@ def end(walk_id: int, payload: WalkEnd, actor: User = Depends(get_current_user),
 def active(actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
     """현재 로그인한 봉사자의 진행 중인 산책을 복원 조회합니다."""
     return persist(db, lambda: get_active_walk(db, actor), ActiveWalkResponse)
+
+
+@router.get("/history", response_model=UserWalksResponse)
+def history(
+    status: Literal["COMPLETED", "INTERRUPTED"] | None = Query(None),
+    end_reason: Literal["USER", "STAFF", "AUTO_TIMEOUT"] | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    actor: User = Depends(require_volunteer),
+    db: Session = Depends(get_db),
+):
+    """F-12 SC-09: 로그인한 봉사자의 종료된 산책 이력 목록을 시작 시각 최신순으로 조회합니다."""
+    return user_walk_history(db, actor.id, status, end_reason, limit, offset)
 
 
 @router.get("/{walk_id}", response_model=WalkDetailResponse)
