@@ -1,4 +1,8 @@
-"""Sign-up uniqueness, consent atomicity, concurrency and migrations 016 to 018 on real PostgreSQL.
+"""Sign-up uniqueness, consent atomicity, concurrency and migrations 016 to 019 on real PostgreSQL.
+
+Each migration test first checks the DDL and data of its own stage (016, 017, 018 or 019).
+Only then does it bring users up to the columns the current User model maps and run the
+current API on the migrated tables (no create_all()), so a stage check never sees a later file.
 
 SIGNUP_TEST_DATABASE_URL must name an EMPTY local toi_walk_test_* database.
 Each test works in its own new su_<uuid> schema and drops only that schema
@@ -40,6 +44,12 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (ROOT / "migrations" / "016_onboarding_signup.sql").read_text(encoding="utf-8")
 EMAIL_REMOVAL = (ROOT / "migrations" / "017_remove_user_email.sql").read_text(encoding="utf-8")
 CONSENT_MIGRATION = (ROOT / "migrations" / "018_user_consents.sql").read_text(encoding="utf-8")
+GUIDE_MIGRATION = (ROOT / "migrations" / "019_first_walk_guide.sql").read_text(encoding="utf-8")
+# users columns the current User model maps that files after 018 add, with the adding file.
+# The current sign-up and login code selects and inserts them, so it needs these files on
+# top of 016 to 018 (Issue #65: F-14, PR #60 added first_walk_guide_completed_at).
+USER_COLUMNS_AFTER_018 = {"first_walk_guide_completed_at": "019_first_walk_guide.sql"}
+GUIDE_COLUMN = ("first_walk_guide_completed_at", "TIMESTAMP", True)
 # Real files a dev DB has applied to users and walk tables before 016, in order.
 # 014 (F-08) adds users.phone; 015 (F-09) needs walk_reviews from 007.
 DEV_CHAIN_BEFORE_016 = ("005_user_roles.sql", "006_user_shelters.sql", "007_walk_domain.sql",
@@ -203,6 +213,17 @@ class SignupPostgresTests(unittest.TestCase):
             survey_fk = [(f["constrained_columns"], f["referred_table"]) for f in inspector.get_foreign_keys("surveys")]
             user_fk = [(f["constrained_columns"], f["referred_table"]) for f in inspector.get_foreign_keys("users")]
         return columns, indexes, survey_fk, user_fk
+
+    def migrate_users_for_current_models(self):
+        """Apply the files after 018 that the current User model needs (019 today).
+
+        Call it only after the stage under test has been checked, right before the current
+        API runs on the migrated tables. Without it the ORM reads and writes
+        users.first_walk_guide_completed_at and PostgreSQL answers UndefinedColumn
+        (SQLSTATE 42703), which the API turns into 500 (Issue #65).
+        """
+        for name in dict.fromkeys(USER_COLUMNS_AFTER_018.values()):
+            self.run_sql_file((ROOT / "migrations" / name).read_text(encoding="utf-8"))
 
     # Schema creation and constraints
 
@@ -408,8 +429,10 @@ class SignupPostgresTests(unittest.TestCase):
         self.run_sql_file(MIGRATION)  # re-running on the still-empty migrated table is a no-op
         self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
         # The current code no longer writes email, so it ships with 017 (same deployment).
+        # It also reads the 018 consent column and the 019 guide column on every user lookup.
         self.run_sql_file(EMAIL_REMOVAL)
         self.run_sql_file(CONSENT_MIGRATION)
+        self.migrate_users_for_current_models()
         snapshot = self.schema_snapshot()
         # The ORM and sign-up API work on the migrated tables with no create_all().
         self.start_api(create_schema=False)
@@ -498,8 +521,9 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual(self.user_rows(), before_rows)
         self.run_sql_file(EMAIL_REMOVAL)  # re-running is a no-op
         self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
-        # The current code requires the consent schema on all user lookups.
+        # The current code requires the consent (018) and guide (019) columns on all user lookups.
         self.run_sql_file(CONSENT_MIGRATION)
+        self.migrate_users_for_current_models()
         self.start_api(create_schema=False)
         for identifier, user_id, role in (("walker_one", 1, "user"), ("Shelter01", 2, "shelter"),
                                           (" ADMIN01 ", 3, "admin")):
@@ -547,15 +571,61 @@ class SignupPostgresTests(unittest.TestCase):
                 "SELECT count(*) FROM users WHERE age_14_plus_confirmed_at IS NULL")).scalar_one(), 3)
             self.assertEqual(connection.execute(text("SELECT count(*) FROM user_consents")).scalar_one(), 0)
 
+        # The current API also needs 019, which adds one users column and nothing else.
+        self.migrate_users_for_current_models()
+        with_guide = self.schema_snapshot()
+        self.assertEqual(with_guide[0]["users"], sorted(tables["users"] + [GUIDE_COLUMN]))
+        self.assertEqual({k: v for k, v in with_guide[0].items() if k != "users"},
+                         {k: v for k, v in tables.items() if k != "users"})
+        self.assertEqual(with_guide[1:], (indexes, constraints))
         self.start_api(create_schema=False)
         response = self.client.post("/users/", json=self.body("consent"))
         self.assertEqual(response.status_code, 200, response.text)
-        self.run_sql_file(CONSENT_MIGRATION)
-        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        self.run_sql_file(CONSENT_MIGRATION)  # re-running 018 with consent rows present changes nothing
+        self.assertEqual(self.schema_snapshot(), with_guide)
         with self.Session() as db:
             record = db.query(UserConsent).one()
             self.assertEqual(record.user_id, response.json()["data"]["id"])
             self.assertEqual(record.document_version, TEST_DOCUMENT_VERSION)
+
+    # Migration 019 (F-14 first walk guide) and the current User model (Issue #65)
+
+    def test_migration_019_adds_only_the_guide_column_and_matches_the_current_user_model(self):
+        self.migrate_dev_chain_through_016_with_accounts()
+        self.run_sql_file(EMAIL_REMOVAL)
+        self.run_sql_file(CONSENT_MIGRATION)
+        accounts = self.user_rows()
+        before_tables, before_indexes, before_constraints = self.schema_snapshot()
+        model_columns = set(User.__table__.columns.keys())
+        # At the 018 stage, the only mapped users columns missing are the ones later files add.
+        self.assertEqual(model_columns - {c[0] for c in before_tables["users"]}, set(USER_COLUMNS_AFTER_018))
+        self.run_sql_file(GUIDE_MIGRATION)
+        tables, indexes, constraints = self.schema_snapshot()
+        self.assertEqual(tables["users"], sorted(before_tables["users"] + [GUIDE_COLUMN]))
+        self.assertEqual({k: v for k, v in tables.items() if k != "users"},
+                         {k: v for k, v in before_tables.items() if k != "users"})
+        self.assertEqual((indexes, constraints), (before_indexes, before_constraints))
+        self.assertEqual(self.user_rows(), accounts)  # existing accounts are untouched
+        with self.engine.connect() as connection:
+            self.assertTrue(next(col["type"].timezone for col in inspect(connection).get_columns("users")
+                                 if col["name"] == "first_walk_guide_completed_at"))
+            self.assertEqual(connection.execute(text(
+                "SELECT count(*) FROM users WHERE first_walk_guide_completed_at IS NULL")).scalar_one(), 3)
+        # After 019 the users table has exactly the columns the current User model maps.
+        self.assertEqual({c[0] for c in tables["users"]}, model_columns)
+        self.run_sql_file(GUIDE_MIGRATION)  # re-running is a no-op
+        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        # The current API runs on 016 to 019 with no create_all().
+        self.start_api(create_schema=False)
+        login = self.client.post("/auth/login", json={"identifier": "walker_one", "password": PASSWORD})
+        self.assertEqual(login.status_code, 200, login.text)
+        headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+        self.assertEqual(self.client.get("/users/me", headers=headers).json()["data"]["id"], 1)
+        response = self.client.post("/users/", json=self.body("guide"))
+        self.assertEqual(response.status_code, 200, response.text)
+        with self.Session() as db:
+            created = db.get(User, response.json()["data"]["id"])
+            self.assertIsNone(created.first_walk_guide_completed_at)
 
     def test_migration_017_aborts_without_changes_before_016(self):
         self.create_dev_schema_before_016()
