@@ -122,7 +122,7 @@ class SignupPostgresTests(unittest.TestCase):
 
         app.dependency_overrides[get_db] = test_db
         # Concurrency tests send more sign-ups than the per-IP limit; limits are tested separately.
-        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER):
+        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER, auth.LOGIN_RATE_LIMITER):
             app.dependency_overrides[limiter] = lambda: None
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
@@ -463,7 +463,7 @@ class SignupPostgresTests(unittest.TestCase):
                 login = self.client.post("/auth/login", json={"identifier": identifier, "password": PASSWORD})
                 self.assertEqual(login.status_code, 200, login.text)
                 headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
-                me = self.client.get("/users/me", headers=headers).json()
+                me = self.client.get("/users/me", headers=headers).json()["data"]
                 self.assertEqual((me["id"], me["role"]), (user_id, role))
                 self.assertNotIn("email", me)
         email_login = self.client.post("/auth/login", json={"identifier": "one@example.com", "password": PASSWORD})

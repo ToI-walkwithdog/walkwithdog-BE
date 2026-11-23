@@ -55,7 +55,7 @@ def verify(live_ai=False):
                 response = client.post("/auth/login", json={"identifier": accounts[0][0], "password": password})
                 assert response.status_code == 200, "login failed"
                 client.headers["Authorization"] = "Bearer " + response.json()["data"]["access_token"]
-                assert client.get("/users/me").json()["id"] == accounts[0][1]
+                assert client.get("/users/me").json()["data"]["id"] == accounts[0][1]
                 assert client.get(f"/users/{accounts[1][1]}").status_code == 403
                 assert client.post("/surveys/", json={"user_id": accounts[1][1]}).status_code == 403
                 survey = client.post("/surveys/", json={"user_id": accounts[0][1], "housing_type": "studio"})
@@ -86,7 +86,7 @@ def verify(live_ai=False):
                     )
                     assert message.json()["pii_redacted"] is False
                     assert len(client.get(chat_path).json()["messages"]) == 2
-                assert client.post("/auth/logout").status_code == 204
+                assert client.post("/auth/logout").status_code == 200
                 assert client.get("/users/me").status_code == 401
         finally:
             transaction.rollback()

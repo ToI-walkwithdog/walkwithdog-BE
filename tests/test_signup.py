@@ -66,7 +66,7 @@ class SignupTests(unittest.TestCase):
 
         app.dependency_overrides[get_db] = test_db
         # These tests send many requests per test on purpose; limits are covered in test_rate_limit.py.
-        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER):
+        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER, auth.LOGIN_RATE_LIMITER):
             app.dependency_overrides[limiter] = lambda: None
         self.client = TestClient(app)
 
@@ -359,7 +359,7 @@ class SignupTests(unittest.TestCase):
         self.assertIn("detail", self.client.get("/users/not-a-number").json())
         login = self.client.post("/auth/login", json={"identifier": VALID["login_id"], "password": PASSWORD})
         self.client.headers["Authorization"] = f"Bearer {login.json()['data']['access_token']}"
-        own_id = self.client.get("/users/me").json()["id"]
+        own_id = self.client.get("/users/me").json()["data"]["id"]
         self.assertEqual(self.client.get(f"/users/{own_id}").status_code, 200)
 
     # Schema and contract details

@@ -92,8 +92,7 @@ class ShelterPermissionTests(unittest.TestCase):
             self.assertEqual(response.json()["login_id"], "staff_unset")
             self.assertNotIn("email", response.json())
             self.authenticate(4)
-            for path in ("/users/me", "/auth/me"):
-                self.assertEqual(self.client.get(path).json()["shelter_id"], shelter_id)
+            self.assertEqual(self.client.get("/users/me").json()["data"]["shelter_id"], shelter_id)
             self.authenticate(5)
             with self.Session() as db:
                 self.assertEqual(db.get(User, 4).shelter_id, shelter_id)

@@ -1,22 +1,33 @@
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.account_rules import PASSWORD_MAX_LENGTH
 from app.api_contract import ContractError, ContractErrorResponse, ContractRoute, ok
-from app.auth import get_current_session, get_current_user, hash_password, token_digest, verify_password
+from app.auth import get_contract_session, hash_password, token_digest, verify_password
 from app.database import get_db
 from app.models import AuthSession, User
-from app.schemas import LoginRequest, LoginResponse, TokenResponse, UserResponse
+from app.rate_limit import RateLimiter
+from app.schemas import EmptyContractResponse, LoginRequest, LoginResponse, TokenResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-# Login answers with {code, data, message}; logout and /auth/me keep FastAPI errors.
+# Login and logout answer with {code, data, message}. GET /auth/me was removed in
+# Issue #32; GET /users/me is the only "who am I" route.
 contract = APIRouter(route_class=ContractRoute)
 SESSION_SECONDS = 3600
 DUMMY_HASH = hash_password(secrets.token_urlsafe(32))
+# Per client IP; every attempt counts (also 422 and successes). Interim default,
+# override with LOGIN_RATE_LIMIT_REQUESTS / LOGIN_RATE_LIMIT_WINDOW_SECONDS.
+LOGIN_RATE_LIMITER = RateLimiter.from_env("login", "LOGIN", 10, 60,
+                                          message="로그인 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.")
+UNAUTHORIZED_RESPONSE = {
+    "model": ContractErrorResponse,
+    "description": "AUTHENTICATION_REQUIRED(헤더 없음, Bearer 아님), INVALID_ACCESS_TOKEN(위조, 폐기, 길이 초과), "
+                   "SESSION_EXPIRED",
+}
 
 
 def invalid_credentials() -> ContractError:
@@ -40,11 +51,13 @@ def authenticate(db: Session, login_id: str, password: str) -> User:
     return user
 
 
-@contract.post("/login", response_model=LoginResponse,
+@contract.post("/login", response_model=LoginResponse, dependencies=[Depends(LOGIN_RATE_LIMITER)],
                responses={401: {"model": ContractErrorResponse,
                                 "description": "INVALID_CREDENTIALS. 미등록 계정, 비밀번호 불일치, 사용할 수 없는 비밀번호 해시"},
                           422: {"model": ContractErrorResponse,
                                 "description": "IDENTIFIER_REQUIRED, PASSWORD_REQUIRED, INVALID_IDENTIFIER_FORMAT(100자 초과)"},
+                          429: {"model": ContractErrorResponse,
+                                "description": "TOO_MANY_REQUESTS. 클라이언트 IP별 로그인 시도 제한 초과"},
                           500: {"model": ContractErrorResponse, "description": "INTERNAL_SERVER_ERROR"}})
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = authenticate(db, payload.identifier, payload.password)
@@ -59,16 +72,17 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     return response
 
 
-router.include_router(contract)
-
-
-@router.post("/logout", status_code=204)
-def logout(session=Depends(get_current_session), db: Session = Depends(get_db)):
+@contract.post("/logout", response_model=EmptyContractResponse,
+               responses={401: UNAUTHORIZED_RESPONSE,
+                          500: {"model": ContractErrorResponse, "description": "INTERNAL_SERVER_ERROR"}})
+def logout(session=Depends(get_contract_session), db: Session = Depends(get_db)):
+    # Only this token's session is removed; the user's other sessions stay valid.
+    # A retried logout finds no session and gets 401 INVALID_ACCESS_TOKEN.
     db.delete(session)
     db.commit()
-    return Response(status_code=204)
+    response = ok({}, "로그아웃이 완료되었습니다.")
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
-@router.get("/me", response_model=UserResponse)
-def get_me(current_user: User = Depends(get_current_user)):
-    return current_user
+router.include_router(contract)

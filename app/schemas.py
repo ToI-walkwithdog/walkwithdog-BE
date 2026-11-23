@@ -99,6 +99,12 @@ class LoginResponse(BaseModel):
     message: str
 
 
+class EmptyContractResponse(BaseModel):
+    code: Literal["OK"] = "OK"
+    data: dict = Field(default_factory=dict, examples=[{}])
+    message: str
+
+
 class UserResponse(BaseModel):
     id: int
     login_id: str
@@ -108,6 +114,13 @@ class UserResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class MeResponse(BaseModel):
+    """GET /users/me. Basic account fields only; onboarding progress fields come later (#45)."""
+    code: Literal["OK"] = "OK"
+    data: UserResponse
+    message: str
 
 
 class UserShelterUpdate(BaseModel):

@@ -48,9 +48,12 @@ def ok(data: dict, message: str) -> JSONResponse:
     return contract_response(200, "OK", message, data)
 
 
-def too_many_requests(retry_after_seconds: int) -> ContractError:
+TOO_MANY_REQUESTS_MESSAGE = "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."
+
+
+def too_many_requests(retry_after_seconds: int, message: str = TOO_MANY_REQUESTS_MESSAGE) -> ContractError:
     """429 contract; app.rate_limit passes the real seconds until the next allowed request."""
-    return ContractError(429, "TOO_MANY_REQUESTS", "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.",
+    return ContractError(429, "TOO_MANY_REQUESTS", message,
                          {"retry_after_seconds": retry_after_seconds},
                          headers={"Retry-After": str(retry_after_seconds)})
 

@@ -13,7 +13,7 @@ F-03~F-07 기록은 `docs/team/TODO.md`에 있다. 이 문서는 Issue #30 항�
   - 2026-11-23: 읽기 전용 사전 검사 SQL 작성(`scripts/precheck_017_users.sql`). 개발 DB 접속 정보가 없어 미실행
 - [x] 이메일 미수집: 모델, 가입 요청과 응답, 중복 판정에서 `email` 제거 (`feature/onboarding-login-id`)
 - [x] `migrations/017_remove_user_email.sql` 작성, 격리 PostgreSQL 검증
-- [ ] 개발 DB에 017 적용 (사전 검사 결과 보고와 승인 후, `HANDOFF.md` 5절)
+- [ ] 개발 DB에 017 적용 (사전 검사 결과 보고와 승인 후, `HANDOFF.md` 6절)
 
 ## API 및 오류 처리
 
