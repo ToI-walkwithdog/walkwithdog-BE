@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.account_status import require_active_writer
 from app.auth import get_current_user
 from app.database import get_db
 from app.dependencies import require_role, require_shelter, require_shelter_access
@@ -34,8 +35,9 @@ def database_error(exc):
     return HTTPException(500, "산책 신청을 저장하지 못했습니다.")
 
 
-def persist_request(db, operation):
+def persist_request(db, operation, actor):
     try:
+        require_active_writer(db, actor)  # Issue #41: status re-checked on the locked row
         request = operation()
         response = WalkRequestResponse.model_validate(request)
         db.commit()
@@ -51,13 +53,13 @@ def persist_request(db, operation):
 @router.post("/walk-requests", response_model=WalkRequestResponse, status_code=201)
 def apply_for_walk(payload: WalkRequestCreate, actor: User = Depends(require_volunteer),
                    db: Session = Depends(get_db)):
-    return persist_request(db, lambda: create_request(db, actor, payload))
+    return persist_request(db, lambda: create_request(db, actor, payload), actor)
 
 
 @router.patch("/walk-requests/{request_id}", response_model=WalkRequestResponse)
 def review_or_cancel(request_id: int, payload: WalkRequestAction,
                      actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return persist_request(db, lambda: transition_request(db, request_id, actor, payload))
+    return persist_request(db, lambda: transition_request(db, request_id, actor, payload), actor)
 
 
 @router.get("/walk-requests/my", response_model=list[WalkRequestResponse])

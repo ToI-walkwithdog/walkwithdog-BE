@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import re as regex
+import sys
 from threading import Barrier, Event, Thread
 import time
 import unittest
@@ -24,15 +25,17 @@ from uuid import uuid4
 # named in DATABASE_URL or .env, and does not depend on another test importing app
 # first. Every test overrides get_db with SIGNUP_TEST_DATABASE_URL.
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
-    from app import basic_info_service, pledge_service, signup_service
+    from app import age_review_service, basic_info_service, pledge_service, signup_service
     from app.account_status import change_to_age_review
     from app.auth import UNUSABLE_PASSWORD, hash_password, token_digest
     from app.database import Base, get_db
-    from app.models import (AuthSession, PhoneVerification, PhoneVerificationDailyCount, User, UserConsent,
+    from app.models import (AuthSession, PhoneVerification, PhoneVerificationDailyCount, Survey, User, UserConsent,
                             UserPledgeAcknowledgement, UserRole, VolunteerOnboardingBasic)
     from app.onboarding_common import get_clock
     from app.phone_verification_service import phone_subject
-    from app.routers import auth, onboarding_basic, users
+    from app.routers import age_review, auth, chat, matching, onboarding_basic, surveys, users, walk_requests, walks
+    from app.models import ChatMessage, ChatSession, Dog, DogWalkSetting, DogWalkSlot, MatchingResult, Shelter
+    from app.walk_models import VolunteerProfile, Walk, WalkRequest
     from app.sms_provider import MockSmsProvider, get_sms_provider
 
 from fastapi import FastAPI
@@ -148,6 +151,7 @@ class SignupPostgresTests(unittest.TestCase):
         app.include_router(auth.router)
         app.include_router(users.router)
         app.include_router(onboarding_basic.router)
+        app.include_router(age_review.router)
         self.now = STEP1_START
         self.sms = MockSmsProvider()
         app.dependency_overrides[get_clock] = lambda: (lambda: self.now)
@@ -1037,6 +1041,326 @@ class SignupPostgresTests(unittest.TestCase):
             pledge.join(10)
         self.assertEqual((results["pledge"].status_code, results["pledge"].json()["code"]), (403, "AGE_REVIEW_REQUIRED"))
         self.assertEqual(self.pledge_rows(), [])
+
+
+    # Age review correction and sign-up exit (Issue #41)
+
+    def age_review_user(self, user_id=1):
+        """An AGE_REVIEW_REQUIRED account with a pledge and a consent, two sessions."""
+        with self.Session.begin() as db:
+            db.add(User(id=user_id, login_id=f"minor{user_id:02d}", nickname=f"연령{user_id}",
+                        password=self.exit_hash, account_status="AGE_REVIEW_REQUIRED",
+                        age_review_required_at=STEP1_START))
+            db.flush()
+            db.add(UserPledgeAcknowledgement(user_id=user_id, pledge_version=PLEDGE_VERSION, acknowledged_at=STEP1_START))
+            db.add(UserConsent(user_id=user_id, consent_type="PRIVACY_COLLECTION_USE", document_version="privacy-test-v1",
+                               action="AGREE", recorded_at=STEP1_START))
+        self.add_session(user_id, f"second-device-{user_id}")
+        return self.add_session(user_id, f"age-token-{user_id}")
+
+    def setup_age_review(self):
+        if not hasattr(type(self), "_exit_hash"):
+            type(self)._exit_hash = hash_password(PASSWORD)
+        self.exit_hash = type(self)._exit_hash
+        records = patch.dict(os.environ, {"ACCOUNT_EXIT_RECORD_POLICY": "delete", "APP_ENV": "test"})
+        records.start()
+        self.addCleanup(records.stop)
+        self.start_api()
+        return self.age_review_user()
+
+    def correct(self, headers):
+        return self.client.put("/users/me/age-review/birth-date", json={"birth_date": "2006-05-17"}, headers=headers)
+
+    def exit_account(self, headers):
+        return self.client.request("DELETE", "/users/me", json={"password": PASSWORD}, headers=headers)
+
+    def remaining(self, user_id=1):
+        with self.engine.connect() as connection:
+            return {table: connection.execute(text(f"SELECT count(*) FROM {table} WHERE {column} = :id"),
+                                              {"id": user_id}).scalar_one()
+                    for table, column in (("users", "id"), ("auth_sessions", "user_id"),
+                                          ("user_consents", "user_id"), ("user_pledge_acknowledgements", "user_id"))}
+
+    def hold(self, target):
+        """Patch `target` so the first call blocks until released; returns (entered, release)."""
+        entered, release = Event(), Event()
+        module, name = target.rsplit(".", 1)
+        original = getattr(sys.modules[module], name)
+
+        def held(*args, **kwargs):
+            if not entered.is_set():
+                entered.set()
+                release.wait(10)
+            return original(*args, **kwargs)
+
+        patcher = patch(target, side_effect=held)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return entered, release
+
+    def run_in_thread(self, results, key, call):
+        thread = Thread(target=lambda: results.setdefault(key, call()))
+        thread.start()
+        return thread
+
+    def test_correction_holding_the_lock_makes_a_concurrent_exit_see_active(self):
+        headers = self.setup_age_review()
+        entered, release = self.hold("app.age_review_service.step1_completed")  # runs under the FOR UPDATE lock
+        results = {}
+        correction = self.run_in_thread(results, "correction", lambda: self.correct(headers))
+        self.assertTrue(entered.wait(10))
+        exit_thread = self.run_in_thread(results, "exit", lambda: self.exit_account(headers))
+        time.sleep(0.5)
+        self.assertTrue(exit_thread.is_alive())  # waits for the correction's row lock
+        release.set()
+        correction.join(10)
+        exit_thread.join(10)
+        self.assertEqual(results["correction"].status_code, 200, results["correction"].text)
+        self.assertEqual((results["exit"].status_code, results["exit"].json()["code"]), (409, "AGE_REVIEW_NOT_REQUIRED"))
+        self.assertEqual(self.remaining(), {"users": 1, "auth_sessions": 2, "user_consents": 1,
+                                            "user_pledge_acknowledgements": 1})
+        self.assertEqual(self.account_status(1), "ACTIVE")
+
+    def test_exit_holding_the_lock_makes_a_concurrent_correction_fail(self):
+        headers = self.setup_age_review()
+        entered, release = self.hold("app.age_review_service.has_retained_activity")
+        results = {}
+        exit_thread = self.run_in_thread(results, "exit", lambda: self.exit_account(headers))
+        self.assertTrue(entered.wait(10))
+        correction = self.run_in_thread(results, "correction", lambda: self.correct(headers))
+        time.sleep(0.5)
+        self.assertTrue(correction.is_alive())
+        release.set()
+        exit_thread.join(10)
+        correction.join(10)
+        self.assertEqual(results["exit"].status_code, 200, results["exit"].text)
+        self.assertEqual((results["correction"].status_code, results["correction"].json()["code"]),
+                         (401, "USER_NOT_FOUND"))
+        self.assertEqual(self.remaining(), {"users": 0, "auth_sessions": 0, "user_consents": 0,
+                                            "user_pledge_acknowledgements": 0})
+
+    def test_parallel_identical_exits_and_corrections(self):
+        headers = self.setup_age_review()
+        workers = 4
+        barrier = Barrier(workers)
+
+        def corrected(_):
+            barrier.wait(10)
+            return self.correct(headers)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            outcomes = sorted((r.status_code, r.json()["code"]) for r in pool.map(corrected, range(workers)))
+        self.assertEqual(outcomes, [(200, "OK")] + [(409, "AGE_REVIEW_NOT_REQUIRED")] * (workers - 1))
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("UPDATE users SET account_status = 'AGE_REVIEW_REQUIRED' WHERE id = 1")
+        barrier = Barrier(workers)
+
+        def exited(_):
+            barrier.wait(10)
+            return self.exit_account(headers)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            responses = list(pool.map(exited, range(workers)))
+        codes = sorted((r.status_code, r.json()["code"]) for r in responses)
+        self.assertEqual(codes[0], (200, "OK"), codes)
+        self.assertTrue(all(status == 401 for status, _ in codes[1:]), codes)
+        self.assertEqual(self.remaining(), {"users": 0, "auth_sessions": 0, "user_consents": 0,
+                                            "user_pledge_acknowledgements": 0})
+
+    def test_login_racing_an_exit_leaves_no_session(self):
+        headers = self.setup_age_review()
+        entered, release = self.hold("app.age_review_service.has_retained_activity")
+        results = {}
+        exit_thread = self.run_in_thread(results, "exit", lambda: self.exit_account(headers))
+        self.assertTrue(entered.wait(10))
+        login = self.run_in_thread(results, "login", lambda: self.client.post(
+            "/auth/login", json={"identifier": "minor01", "password": PASSWORD}))
+        time.sleep(1.0)  # the password check passes; the session insert waits on the users row lock
+        release.set()
+        exit_thread.join(10)
+        login.join(10)
+        self.assertEqual(results["exit"].status_code, 200, results["exit"].text)
+        self.assertEqual((results["login"].status_code, results["login"].json()["code"]), (401, "INVALID_CREDENTIALS"))
+        self.assertEqual(self.remaining()["auth_sessions"], 0)
+        self.assertEqual(self.client.get("/users/me", headers=headers).status_code, 401)
+
+    def test_fk_error_during_exit_rolls_back_on_postgres(self):
+        headers = self.setup_age_review()
+        with self.Session.begin() as db:
+            db.add(Survey(user_id=1))
+        with patch("app.age_review_service.has_retained_activity", return_value=False), \
+                self.assertLogs("app.api_contract", "ERROR"):
+            response = self.exit_account(headers)
+        self.assertEqual((response.status_code, response.json()["code"]), (500, "INTERNAL_SERVER_ERROR"))
+        self.assertEqual(self.remaining(), {"users": 1, "auth_sessions": 2, "user_consents": 1,
+                                            "user_pledge_acknowledgements": 1})
+        self.assertEqual(self.client.get("/users/me", headers=headers).status_code, 200)
+
+
+    # Walk, chat, survey and matching writes racing the age review status change (Issue #41)
+
+    def start_walk_api(self):
+        """Real routers on the isolated schema: a general user (1), a shelter (3), a walkable dog."""
+        from datetime import time as clock_time
+        self.start_api()
+        for router in (walk_requests.router, walks.router, surveys.router, matching.router, chat.router):
+            self.client.app.include_router(router)
+        self.walk_start = datetime(2030, 1, 7, tzinfo=timezone.utc)  # Monday 09:00 Asia/Seoul
+        for target, value in (("app.walk_request_service.utc_now", datetime(2030, 1, 6, tzinfo=timezone.utc)),
+                              ("app.walk_service.utc_now", self.walk_start + timedelta(minutes=5)),
+                              ("app.routers.chat.configuration", None)):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        with self.Session.begin() as db:
+            db.add(Shelter(id=1, name="보호소"))
+            db.flush()
+            db.add_all([User(id=1, login_id="walker01", nickname="봉사자", password=UNUSABLE_PASSWORD),
+                        User(id=3, login_id="shelter01", nickname="보호소", password=UNUSABLE_PASSWORD,
+                             role=UserRole.SHELTER, shelter_id=1),
+                        Dog(id=1, name="강아지", shelter_id=1, energy_level=2)])
+            db.flush()
+            setting = DogWalkSetting(dog_id=1, walkable=True, difficulty="BEGINNER", recommended_duration_minutes=30)
+            db.add(setting)
+            db.flush()
+            db.add(DogWalkSlot(walk_setting_id=setting.id, day_of_week=0, start_time=clock_time(9),
+                               end_time=clock_time(12)))
+        self.add_session(3, "shelter-token")
+        return self.add_session(1, "walker-token")
+
+    def wait_for_lock_waiter(self):
+        """Block until a backend of this test DB waits on a lock (a condition, not a fixed delay)."""
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with self.admin.connect() as connection:
+                waiting = connection.execute(text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                    " AND wait_event_type = 'Lock'")).scalar_one()
+            if waiting:
+                return
+            time.sleep(0.02)
+        self.fail("no backend started waiting for the row lock")
+
+    def change_status_while(self, request):
+        """Case B: the status change holds the users row FOR UPDATE (not committed yet) while
+        `request` runs in a thread; it commits once the request waits on the row lock."""
+        results = {}
+        with self.engine.connect() as connection:
+            transaction = connection.begin()
+            connection.execute(text("SELECT id FROM users WHERE id = 1 FOR UPDATE"))
+            connection.execute(text("UPDATE users SET account_status = 'AGE_REVIEW_REQUIRED',"
+                                    " age_review_required_at = now() WHERE id = 1"))
+            thread = Thread(target=lambda: results.setdefault("response", request()))
+            thread.start()
+            self.wait_for_lock_waiter()
+            transaction.commit()
+        thread.join(10)
+        return results["response"]
+
+    def table_count(self, model):
+        with self.Session() as db:
+            return db.query(model).count()
+
+    def test_walk_request_that_locked_first_commits_before_the_status_change(self):
+        headers = self.start_walk_api()
+        entered, release = self.hold("app.walk_request_service.lock_resources")  # after the share lock
+        results = {}
+        body = {"dog_id": 1, "requested_start_at": self.walk_start.isoformat(),
+                "requested_end_at": (self.walk_start + timedelta(hours=1)).isoformat()}
+        request = self.run_in_thread(results, "request", lambda: self.client.post(
+            "/walk-requests", json=body, headers=headers))
+        self.assertTrue(entered.wait(10))
+
+        def change():
+            with self.Session() as db:
+                change_to_age_review(db, 1, self.now)
+            return "done"
+
+        status_change = self.run_in_thread(results, "change", change)
+        self.wait_for_lock_waiter()  # the status change waits for the request's share lock
+        self.assertEqual(self.account_status(1), "ACTIVE")
+        release.set()
+        request.join(10)
+        status_change.join(10)
+        self.assertEqual(results["request"].status_code, 201, results["request"].text)
+        self.assertEqual(results["change"], "done")
+        self.assertEqual(self.account_status(1), "AGE_REVIEW_REQUIRED")
+        self.assertEqual(self.table_count(WalkRequest), 1)  # recorded while the account was ACTIVE
+
+    def test_walk_request_after_the_status_change_is_refused_without_records(self):
+        headers = self.start_walk_api()
+        body = {"dog_id": 1, "requested_start_at": self.walk_start.isoformat(),
+                "requested_end_at": (self.walk_start + timedelta(hours=1)).isoformat()}
+        response = self.change_status_while(lambda: self.client.post("/walk-requests", json=body, headers=headers))
+        self.assertEqual((response.status_code, response.json()),
+                         (403, {"detail": "연령 확인 정보를 먼저 수정해 주세요."}))
+        self.assertEqual((self.table_count(WalkRequest), self.table_count(VolunteerProfile)), (0, 0))
+
+    def test_walk_start_after_the_status_change_is_refused(self):
+        headers = self.start_walk_api()
+        with self.Session.begin() as db:
+            db.add(WalkRequest(id=1, user_id=1, dog_id=1, shelter_id=1, requested_start_at=self.walk_start,
+                               requested_end_at=self.walk_start + timedelta(hours=1), status="APPROVED",
+                               reviewed_by=3, reviewed_at=self.walk_start - timedelta(days=1)))
+            db.add(VolunteerProfile(user_id=1))
+        response = self.change_status_while(lambda: self.client.post("/walks", json={"walk_request_id": 1},
+                                                                     headers=headers))
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.table_count(Walk), 0)
+        # The shelter's own actions are not blocked by the volunteer's status.
+        shelter = {"Authorization": "Bearer shelter-token"}
+        self.assertEqual(self.client.get("/walk-requests/1", headers=shelter).status_code, 200)
+
+    def test_survey_and_matching_after_the_status_change_are_refused(self):
+        headers = self.start_walk_api()
+        response = self.change_status_while(lambda: self.client.post("/surveys/", json={"user_id": 1}, headers=headers))
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.table_count(Survey), 0)
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("UPDATE users SET account_status = 'ACTIVE', age_review_required_at = NULL")
+        survey = self.client.post("/surveys/", json={"user_id": 1}, headers=headers)
+        self.assertEqual(survey.status_code, 200, survey.text)
+        survey_id = survey.json()["id"]
+        response = self.change_status_while(lambda: self.client.post(f"/matching/{survey_id}", headers=headers))
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.table_count(MatchingResult), 0)
+
+    def test_chat_message_checks_after_the_external_call_without_holding_the_users_row(self):
+        headers = self.start_walk_api()
+        with self.Session.begin() as db:
+            survey = Survey(user_id=1)
+            db.add(survey)
+            db.flush()
+            db.add(ChatSession(id=1, user_id=1, dog_id=1, survey_id=survey.id, context_snapshot={},
+                               consent_to_external_ai=True))
+
+        def reply_while_the_status_changes(*args, **kwargs):
+            # The users row must not be locked during the external call: this commit would
+            # otherwise wait for the request (and time out the test).
+            with self.Session() as db:
+                change_to_age_review(db, 1, self.now)
+            return "응답", "stub-model"
+
+        with patch("app.routers.chat.generate_reply", side_effect=reply_while_the_status_changes):
+            response = self.client.post("/chat/sessions/1/messages", json={"message": "안녕"}, headers=headers)
+        self.assertEqual((response.status_code, response.json()),
+                         (403, {"detail": "연령 확인 정보를 먼저 수정해 주세요."}))
+        self.assertEqual(self.table_count(ChatMessage), 0)
+        self.assertEqual(self.account_status(1), "AGE_REVIEW_REQUIRED")
+
+    def test_parallel_active_writes_of_one_user_do_not_deadlock(self):
+        headers = self.start_walk_api()
+        workers = 4
+        barrier = Barrier(workers)
+
+        def write(_):
+            barrier.wait(10)
+            return self.client.post("/surveys/", json={"user_id": 1}, headers=headers)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            statuses = [r.status_code for r in pool.map(write, range(workers))]
+        self.assertEqual(statuses, [200] * workers)  # share locks do not serialize ACTIVE writers
+        self.assertEqual(self.table_count(Survey), workers)
 
 
 if __name__ == "__main__":

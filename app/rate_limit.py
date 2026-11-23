@@ -118,3 +118,52 @@ class RateLimiter:
 
     def reset(self):
         self.store.clear()
+
+
+class FailureLimiter:
+    """Counts failures (not requests) per key in a sliding window, e.g. wrong passwords.
+
+    blocked_for() is checked before the attempt; record_failure() after a failure;
+    clear() after a success. Same process-memory limits as RateLimiter: several
+    workers or servers each keep their own counts.
+    """
+
+    def __init__(self, limit: int, window_seconds: int, clock=time.monotonic):
+        if limit < 1 or window_seconds < 1:
+            raise ValueError("limit and window_seconds must be positive")
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self.clock = clock
+        self._failures: dict[str, deque] = {}
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_env(cls, prefix: str, default_limit: int, default_window_seconds: int):
+        return cls(positive_int_env(f"{prefix}_FAILURE_LIMIT", default_limit),
+                   positive_int_env(f"{prefix}_FAILURE_WINDOW_SECONDS", default_window_seconds))
+
+    def _recent(self, key: str, now: float) -> deque:
+        failures = self._failures.setdefault(key, deque())
+        while failures and failures[0] <= now - self.window_seconds:
+            failures.popleft()
+        return failures
+
+    def blocked_for(self, key: str) -> int:
+        """0 if another attempt is allowed, else whole seconds until it is."""
+        with self._lock:
+            now = self.clock()
+            failures = self._recent(key, now)
+            if len(failures) < self.limit:
+                return 0
+            return max(1, math.ceil(failures[0] + self.window_seconds - now))
+
+    def record_failure(self, key: str) -> None:
+        with self._lock:
+            self._recent(key, self.clock()).append(self.clock())
+
+    def clear(self, key: str | None = None) -> None:
+        with self._lock:
+            if key is None:
+                self._failures.clear()
+            else:
+                self._failures.pop(key, None)

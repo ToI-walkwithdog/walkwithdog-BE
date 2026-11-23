@@ -3,6 +3,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.account_status import require_active_writer
 from app.database import get_db
 from app.models import User
 from app.walk_review_schemas import (
@@ -39,6 +40,7 @@ def put_review(
 ):
     """산책 평가 작성 및 수정 (없으면 201 생성, 있으면 200 수정)."""
     try:
+        require_active_writer(db, actor)  # Issue #41: status re-checked on the locked row
         review_data, is_created = upsert_walk_review(db=db, walk_id=walk_id, actor=actor, payload=payload)
         response.status_code = 201 if is_created else 200
         db.commit()
