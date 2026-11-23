@@ -43,5 +43,4 @@ logs/
 *.swo
 *~
 
-docs/
 design/
