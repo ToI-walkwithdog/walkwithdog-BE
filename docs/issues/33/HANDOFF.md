@@ -35,7 +35,7 @@
 | `app/routers/users.py` | `PUT /users/me/pledge`, `get_pledge_user` |
 | `app/schemas.py` | `PledgeRequest`, `PledgeData`, `PledgeResponse` |
 | `app/models.py` | `UserPledgeAcknowledgement` |
-| `migrations/019_user_pledge_acknowledgements.sql` | 새 테이블 |
+| `migrations/023_user_pledge_acknowledgements.sql` | 새 테이블 |
 | `.env.example` | `PLEDGE_CURRENT_VERSION` 이름(값 없음) |
 | `tests/test_pledge.py`, `tests/test_signup_postgres.py` | SQLite와 격리 PostgreSQL 테스트 |
 
@@ -72,7 +72,7 @@
 
 ## 4. DB와 마이그레이션
 
-`migrations/019_user_pledge_acknowledgements.sql`
+`migrations/023_user_pledge_acknowledgements.sql`
 
 | 컬럼 | 타입 | 제약 |
 |---|---|---|
@@ -83,7 +83,7 @@
 
 - `uq_user_pledge_ack_user_version UNIQUE (user_id, pledge_version)`: 사용자와 버전별 1행, 최초 확인 시각 유지. 이 인덱스가 `user_id` 조회도 맡는다.
 - 새 테이블 하나만 추가한다. 기존 테이블과 행은 바꾸지 않는다. `BEGIN`/`COMMIT` 한 트랜잭션이고 재실행하면 변경이 없다.
-- `users`에 컬럼을 추가하지 않으므로 019 적용 전에도 가입과 로그인은 동작하고 서약 API만 실패한다.
+- `users`에 컬럼을 추가하지 않으므로 019 첫 산책 가이드까지 적용하면 가입과 로그인은 동작한다. 서약 기능은 023을 적용한 뒤 사용한다.
 - SQLAlchemy 모델의 `id`는 SQLite에서만 INTEGER로 바뀐다(자동 증가 호환).
 
 ## 5. 처리 흐름, 트랜잭션, 잠금
@@ -128,7 +128,7 @@
 
 - 실패 2건은 선행 브랜치에서도 실패하는 `test_walk_settings_api.py::test_invalid_scalar_types_and_unknown_fields_are_422`다.
 - 건너뛴 82건은 각자 빈 DB가 필요한 산책 PostgreSQL 테스트로 실행하지 않았다.
-- 검증 항목: 최초 서약 200과 1건, 가입 후 로그인 직후 Step 1~3 없이 성공, 같은 버전 재요청 시각 유지, 이전 버전 보존, 422와 409에서 기록 없음, 401과 보호소, 관리자 403, 서버 버전 미설정과 33자 설정 500, SQLite 커밋 실패 롤백, PostgreSQL 삽입 후 실패 롤백, PostgreSQL 동시 6건 모두 200과 같은 시각과 1건, UNIQUE 제약, 016~018 이후 019 적용과 재실행, `create_all()` 없이 동작
+- 검증 항목: 최초 서약 200과 1건, 가입 후 로그인 직후 Step 1~3 없이 성공, 같은 버전 재요청 시각 유지, 이전 버전 보존, 422와 409에서 기록 없음, 401과 보호소, 관리자 403, 서버 버전 미설정과 33자 설정 500, SQLite 커밋 실패 롤백, PostgreSQL 삽입 후 실패 롤백, PostgreSQL 동시 6건 모두 200과 같은 시각과 1건, UNIQUE 제약, 016~019 이후 023 적용과 재실행, `create_all()` 없이 동작
 - 미실행: 개발 DB 검증, FE 실연동
 
 ## 9. FE 연동
@@ -160,10 +160,10 @@ Notion 온보딩 문서에서 확정 순서와 맞지 않는 문구(위치 권�
 
 ## 12. 개발 DB와 배포 대기
 
-- 019는 016, 017(`017_remove_user_email.sql`), 018(`018_user_consents.sql`) 다음에 적용한다. 실제 개발 DB 적용 여부는 확인하지 못했다(접속 정보 없음). 적용은 승인 후 진행한다.
-- 019 자체는 기존 행을 바꾸지 않는다. 단, #40 이후 코드는 `users.account_status`가 필요하므로 이 스택을 배포할 때는 020까지 함께 적용해야 로그인이 동작한다(#40 문서 참고).
+- 023은 016, 017(`017_remove_user_email.sql`), 018(`018_user_consents.sql`) 다음에 적용한다. 실제 개발 DB 적용 여부는 확인하지 못했다(접속 정보 없음). 적용은 승인 후 진행한다.
+- 023 자체는 기존 행을 바꾸지 않는다. 단, #40 이후 코드는 `users.account_status`가 필요하므로 이 스택을 배포할 때는 024까지 함께 적용해야 로그인이 동작한다(#40 문서 참고).
 - 배포 설정: `PLEDGE_CURRENT_VERSION`을 FE가 표시하는 서약 버전과 같게 설정한다.
-- 마이그레이션 번호: `origin/dev`에 `017_f10_behavior_marker.sql`, `018_f11_walk_overtime.sql`이 들어와 017, 018 번호가 각각 두 파일이다. 019 자체는 `dev`와 겹치지 않지만, 온보딩 파일 전체의 번호 정리가 병합 전 과제로 남아 있다. 이 문서 작성 시점에 파일 이름과 SQL은 바꾸지 않았다.
+- 서약 SQL을 023으로 배정했다. 기존 017, 018 예외와 019 첫 산책 가이드 파일은 보존했다.
 
 ## 13. 후속 Issue와 의존 관계
 
