@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from app.schemas import DogCardResponse
+from app.shelter_volunteer_review_schemas import VolunteerReviewSummaryResponse
 
 RequestStatus = Literal["PENDING", "APPROVED", "REJECTED", "CANCELLED"]
 ReservationTab = Literal["ALL", "PENDING", "APPROVED", "REJECTED", "COMPLETED"]
@@ -186,3 +187,4 @@ class VolunteerProfileResponse(BaseModel):
     total_distance_m: Decimal = Decimal("0")
     total_duration_seconds: int = Field(default=0, description="COMPLETED 산책의 전체 경과 시간(duration_seconds) 합계. 이동 시간 합계가 아닙니다.")
     unique_dog_count: int = 0
+    review_summary: VolunteerReviewSummaryResponse = Field(default_factory=VolunteerReviewSummaryResponse)

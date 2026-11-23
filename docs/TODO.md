@@ -40,3 +40,14 @@
 - [x] `docs/handoff/LATEST.md` 테스트 결과 및 인수인계 내용 반영
 - [ ] `feature/f-14-first-walk-guide` 커밋·push 후 PR 생성 (`feature/f-14-first-walk-guide` → `dev`)
 - [ ] (앱) SC-03 홈 카드·권유 안내 및 SC-04 `ViewPager` 슬라이드 UI 연동
+
+## F-15 보호소의 산책자 평가 (SC-16, SC-09, SC-10)
+- [x] PostgreSQL 단독 테이블(`shelter_volunteer_reviews`, `shelter_volunteer_review_tags`) 모델 및 `migrations/020_shelter_volunteer_reviews.sql` 작성
+- [x] 보호소 담당자의 산책자 평가 1회 작성 및 단건 조회 API 구현 (`POST /walks/{walk_id}/volunteer-review`, `GET /walks/{walk_id}/volunteer-review`)
+- [x] `Walk.status == "COMPLETED"` 상태 검증, 0.5 단위 별점(`0.5~5.0`), 태그 4종 복수 선택(`PUNCTUALITY`, `SAFETY_CARE`, `CONSIDERATE`, `DISAPPOINTING`), 최대 500자 선택 코멘트, 중복 작성(`409`) 및 수정·삭제(`405`) 차단 검증
+- [x] SC-09 산책 이력(`GET /walks/history`) 및 SC-16 보호소 산책 이력 응답에 `shelter_review` 필드 추가
+- [x] SC-10 마이페이지(`GET /volunteers/me`) `review_summary`(평균 별점, 총 평가 수, 태그별 횟수) 추가 및 받은 평가 전체 목록(`GET /volunteers/me/reviews`) API 구현
+- [x] 인수 테스트 작성 및 통과 (`tests/test_f15_shelter_volunteer_reviews.py`, `tests/test_walk_requests.py` — 36 passed)
+- [x] `docs/handoff/LATEST.md` 테스트 결과 및 인수인계 내용 반영
+- [ ] `feature/f-15-shelter-volunteer-review` 커밋·push 후 PR 생성 (`feature/f-15-shelter-volunteer-review` → `dev`)
+- [ ] (앱) SC-16 보호소 산책 이력 평가 작성 모달 및 SC-09/SC-10 마이페이지 받은 평가 요약·목록 UI 연동

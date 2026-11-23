@@ -12,7 +12,11 @@ from fastapi import HTTPException
 from sqlalchemy import and_, distinct, func, or_
 from sqlalchemy.orm import contains_eager, joinedload
 
-from app.models import Dog, User, UserRole, Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest, WalkReview
+from app.models import (
+    Dog, ShelterVolunteerReview, User, UserRole, Walk, WalkIncident,
+    WalkMarker, WalkPoint, WalkRequest, WalkReview,
+)
+from app.shelter_volunteer_review_service import serialize_shelter_volunteer_review
 from app.gps_geometry import distance_m
 from app.walk_record_schemas import WalkIncidentResponse, WalkMarkerResponse
 from app.walk_review_schemas import WalkReviewResponse
@@ -43,7 +47,12 @@ def walk_page(db, conditions, limit, offset, order=(Walk.started_at.desc(), Walk
     total = (db.query(func.count(Walk.id)).select_from(Walk)
              .join(WalkRequest, Walk.walk_request_id == WalkRequest.id).filter(*conditions).scalar())
     walks = (db.query(Walk).join(WalkRequest, Walk.walk_request_id == WalkRequest.id)
-             .options(contains_eager(Walk.walk_request).joinedload(WalkRequest.dog), joinedload(Walk.review))
+             .options(
+                 contains_eager(Walk.walk_request).joinedload(WalkRequest.dog),
+                 joinedload(Walk.review),
+                 joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.tags),
+                 joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.shelter),
+             )
              .filter(*conditions).order_by(*order).limit(limit).offset(offset).all())
     return total, walks
 
@@ -175,6 +184,7 @@ def _serialize_user_walk_items(walks):
         **motion_metrics(walk), "counted_as_volunteer_record": walk.status == "COMPLETED",
         "rating": walk.review.rating if walk.review is not None else None,
         "has_review": walk.review is not None,
+        "shelter_review": serialize_shelter_volunteer_review(walk.volunteer_review),
     } for walk in walks]
 
 
@@ -243,7 +253,11 @@ def shelter_walk_history(db, actor: User, shelter_id: int | None, status: str | 
         .join(WalkRequest, Walk.walk_request_id == WalkRequest.id)
         .join(Dog, WalkRequest.dog_id == Dog.id)
         .join(User, WalkRequest.user_id == User.id)
-        .options(joinedload(Walk.review))
+        .options(
+            joinedload(Walk.review),
+            joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.tags),
+            joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.shelter),
+        )
         .filter(*conditions)
         .order_by(Walk.started_at.desc(), Walk.id.desc())
         .limit(limit)
@@ -281,6 +295,7 @@ def shelter_walk_history(db, actor: User, shelter_id: int | None, status: str | 
         "incident_count": incident_counts.get(walk.id, 0),
         "rating": walk.review.rating if walk.review is not None else None,
         "has_review": walk.review is not None,
+        "shelter_review": serialize_shelter_volunteer_review(walk.volunteer_review),
     } for walk, dog_id, dog_name, walker_id, walker_nickname in rows]
 
     return {
@@ -299,7 +314,11 @@ def shelter_walk_history_detail(db, walk_id: int, actor: User):
         .join(WalkRequest, Walk.walk_request_id == WalkRequest.id)
         .join(Dog, WalkRequest.dog_id == Dog.id)
         .join(User, WalkRequest.user_id == User.id)
-        .options(joinedload(Walk.review).joinedload(WalkReview.tags))
+        .options(
+            joinedload(Walk.review).joinedload(WalkReview.tags),
+            joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.tags),
+            joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.shelter),
+        )
         .filter(Walk.id == walk_id)
         .first()
     )
@@ -368,6 +387,7 @@ def shelter_walk_history_detail(db, walk_id: int, actor: User):
         "incident_count": len(incidents),
         "rating": walk.review.rating if walk.review is not None else None,
         "has_review": walk.review is not None,
+        "shelter_review": serialize_shelter_volunteer_review(walk.volunteer_review),
         "points": points,
         "markers": markers,
         "incidents": incidents,
