@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.database import Base, get_db
-    from app.models import User, Dog, Survey, ChatSession, ChatMessage
+    from app.models import User, Dog, Survey, ChatSession, ChatMessage, UserRole
     from app.auth import UNUSABLE_PASSWORD, get_current_user
     from app.routers import chat, simulation
     from app.ai_chat import generate_reply, redact_personal_data
@@ -39,7 +39,7 @@ class ChatSimulationTests(unittest.TestCase):
             with self.Session() as db:
                 yield db
         app.dependency_overrides[get_db] = test_db
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=self.current_id)
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=self.current_id, role=UserRole.USER)
         self.client = TestClient(app)
         self.settings = patch.dict(os.environ, {"GEMINI_API_KEY": "never-echo", "GEMINI_MODEL": "test-model"})
         self.settings.start()

@@ -8,7 +8,7 @@ from unittest.mock import patch, Mock
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.database import Base, get_db
     from app.auth import UNUSABLE_PASSWORD
-    from app.models import User, Shelter, Dog, Survey, MatchingResult
+    from app.models import User, Shelter, Dog, Survey, MatchingResult, UserRole
     from app.routers import surveys, matching
     from scripts.seed_demo import seed, LOGIN_ID, SHELTER_KEY
 
@@ -44,7 +44,7 @@ class DemoToolTests(unittest.TestCase):
         # The demo/scoring regressions have a test-only authenticated identity.
         from app.auth import get_current_user
         from types import SimpleNamespace
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1)
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1, role=UserRole.USER)
         self.client = TestClient(app)
 
     def tearDown(self):

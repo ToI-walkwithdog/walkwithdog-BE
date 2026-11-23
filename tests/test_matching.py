@@ -8,7 +8,7 @@ from types import SimpleNamespace
 # Set before app.database imports so .env cannot select the user's real DB.
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.database import Base, get_db
-    from app.models import User, Survey, Dog, Shelter, MatchingResult
+    from app.models import User, Survey, Dog, Shelter, MatchingResult, UserRole
     from app.routers import surveys, matching, simulation
 
 from fastapi import FastAPI
@@ -146,7 +146,7 @@ class MatchingAPITests(unittest.TestCase):
 
         app.dependency_overrides[get_db] = test_db
         # These regression tests exercise scoring, not authentication.
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1)
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1, role=UserRole.USER)
         self.client = TestClient(app)
         with self.Session() as db:
             db.add(User(id=1, login_id="test_user", nickname="테스트", password=UNUSABLE_PASSWORD))

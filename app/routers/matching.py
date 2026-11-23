@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 
+from app.account_status import require_active_writer
 from app.database import get_db
 from app.models import Survey, Dog, DogWalkSetting, MatchingResult
 from app.schemas import MatchingDetailResponse, MatchingScoreRequest, MatchingScoreResponse
@@ -68,6 +69,7 @@ def create_matching_results(survey_id: int, db: Session = Depends(get_db), curre
         raise HTTPException(status_code=404, detail="Dog data not found")
     candidates = [(dog, build_analysis(survey, dog)) for dog in dogs]
     candidates.sort(key=lambda item: (-item[1]["score"], item[0].id))
+    require_active_writer(db, current_user)  # Issue #41: status re-checked on the locked row
     for dog, analysis in candidates[:5]:
         db.add(MatchingResult(
             user_id=survey.user_id, survey_id=survey.id, dog_id=dog.id,

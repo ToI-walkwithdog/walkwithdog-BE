@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.account_status import require_active_writer
 from app.database import get_db
 from app.models import Survey, User
 from app.schemas import SurveyCreate, SurveyResponse
@@ -36,6 +37,7 @@ def create_survey(survey: SurveyCreate, db: Session = Depends(get_db), current_u
         },
     )
 
+    require_active_writer(db, current_user)  # Issue #41: status re-checked on the locked row
     db.add(new_survey)
     db.commit()
     db.refresh(new_survey)

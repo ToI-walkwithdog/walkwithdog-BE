@@ -10,10 +10,11 @@ on the locked row, and writers that start later see the new status.
 """
 from datetime import datetime
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.api_contract import ContractError
-from app.models import User
+from app.models import User, UserRole
 
 ACCOUNT_ACTIVE = "ACTIVE"
 ACCOUNT_AGE_REVIEW_REQUIRED = "AGE_REVIEW_REQUIRED"
@@ -43,6 +44,26 @@ def lock_user(db: Session, user_id: int, *, for_update: bool = False) -> User | 
     """
     query = db.query(User).filter(User.id == user_id).populate_existing()
     return query.with_for_update(read=not for_update).one_or_none()
+
+
+def require_active_writer(db: Session, user: User) -> None:
+    """For writes of the `detail`-format APIs (walks, walk requests, reviews, chat, surveys,
+    matching): lock the actor's users row FOR SHARE in the current transaction and re-read
+    the status before anything is written.
+
+    A status change (FOR UPDATE) that committed first is seen here and the write is
+    refused with the same 403 as get_current_user, so nothing is stored. A write that took
+    the share lock first finishes before the status change can proceed. Shelter and admin
+    accounts never change status, so they are not locked. Call it before the business rows
+    are locked (users row first) and never across an external call.
+    """
+    if user.role != UserRole.USER:
+        return
+    locked = lock_user(db, user.id)
+    if locked is None:  # deleted by a concurrent sign-up exit
+        raise HTTPException(401, "로그인이 필요하거나 세션이 만료되었습니다.", headers={"WWW-Authenticate": "Bearer"})
+    if not is_active(locked):
+        raise HTTPException(403, AGE_REVIEW_REQUIRED_MESSAGE)
 
 
 def change_to_age_review(db: Session, user_id: int, now: datetime) -> None:

@@ -176,6 +176,31 @@ class AccessControlTests(unittest.TestCase):
                 body = self.call(method, path, "token-1").json()
                 self.assertNotEqual(body, AGE_DETAIL)
 
+    def test_status_change_after_the_request_check_blocks_the_write(self):
+        """The request-start check saw ACTIVE; the write re-reads the locked row and refuses."""
+        from app import account_status
+        from app.models import Survey
+        original = account_status.lock_user
+
+        def changed_meanwhile(db, user_id, **kwargs):
+            with self.Session.begin() as other:  # a concurrent Step 1 status change commits first
+                other.get(User, user_id).account_status = "AGE_REVIEW_REQUIRED"
+            return original(db, user_id, **kwargs)
+
+        with patch("app.account_status.lock_user", side_effect=changed_meanwhile):
+            response = self.client.post("/surveys/", json={"user_id": 2}, headers={"Authorization": "Bearer token-2"})
+        self.assertEqual((response.status_code, response.json()), (403, AGE_DETAIL))
+        with self.Session() as db:
+            self.assertEqual(db.query(Survey).count(), 0)
+        # An ACTIVE user's write still works, and staff writes never take the user lock.
+        with self.Session.begin() as db:
+            db.get(User, 2).account_status = "ACTIVE"
+        ok = self.client.post("/surveys/", json={"user_id": 2}, headers={"Authorization": "Bearer token-2"})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        with patch("app.account_status.lock_user", side_effect=AssertionError("staff must not be locked")):
+            shelter = self.client.post("/shelters/", json={"name": "새 보호소"}, headers={"Authorization": "Bearer token-4"})
+        self.assertEqual(shelter.status_code, 200, shelter.text)
+
     def test_role_errors_keep_their_detail_format(self):
         # An ACTIVE general user on an admin route: the existing role 403 is unchanged.
         response = self.call("PATCH", "/users/{user_id}/shelter", "token-2")

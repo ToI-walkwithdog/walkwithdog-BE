@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.account_status import require_active_writer
 from app.auth import get_current_user
 from app.database import get_db
 from app.dependencies import require_role
@@ -17,8 +18,9 @@ router = APIRouter(prefix="/walks", tags=["walks"])
 require_volunteer = require_role(UserRole.USER)
 
 
-def persist(db, operation, response_model):
+def persist(db, operation, response_model, actor):
     try:
+        require_active_writer(db, actor)  # Issue #41: status re-checked on the locked row
         result = response_model.model_validate(operation())
         db.commit()
         return result
@@ -41,17 +43,17 @@ def persist(db, operation, response_model):
 
 @router.post("", response_model=WalkResponse, status_code=201)
 def begin(payload: WalkStart, actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
-    return persist(db, lambda: start_walk(db, actor, payload), WalkResponse)
+    return persist(db, lambda: start_walk(db, actor, payload), WalkResponse, actor)
 
 
 @router.post("/{walk_id}/points", response_model=PointsReceipt)
 def points(walk_id: int, payload: WalkPointsBatch, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return persist(db, lambda: append_points(db, walk_id, actor, payload), PointsReceipt)
+    return persist(db, lambda: append_points(db, walk_id, actor, payload), PointsReceipt, actor)
 
 
 @router.post("/{walk_id}/markers", response_model=WalkMarkerResponse, status_code=201)
 def marker(walk_id: int, payload: WalkMarkerCreate, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return persist(db, lambda: add_marker(db, walk_id, actor, payload), WalkMarkerResponse)
+    return persist(db, lambda: add_marker(db, walk_id, actor, payload), WalkMarkerResponse, actor)
 
 
 @router.post("/{walk_id}/incidents", response_model=WalkIncidentResponse, status_code=201)
@@ -62,7 +64,7 @@ def incident(walk_id: int, payload: WalkIncidentCreate, response: Response, acto
             response.status_code = 200
         return incident_obj
 
-    return persist(db, operation, WalkIncidentResponse)
+    return persist(db, operation, WalkIncidentResponse, actor)
 
 
 @router.patch("/{walk_id}/end", response_model=WalkResponse)
@@ -73,13 +75,13 @@ def end(walk_id: int, payload: WalkEnd, actor: User = Depends(get_current_user),
     GPS 부족 시 UNKNOWN이며 이동 근거가 없으면 페이스는 NULL입니다. 기존 미분석 기록의
     새 필드는 NULL이며 기존 average_pace는 전체 시간 기준 값으로 보존됩니다.
     """
-    return persist(db, lambda: end_walk(db, walk_id, actor, payload), WalkResponse)
+    return persist(db, lambda: end_walk(db, walk_id, actor, payload), WalkResponse, actor)
 
 
 @router.get("/active", response_model=ActiveWalkResponse)
 def active(actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
     """현재 로그인한 봉사자의 진행 중인 산책을 복원 조회합니다."""
-    return persist(db, lambda: get_active_walk(db, actor), ActiveWalkResponse)
+    return persist(db, lambda: get_active_walk(db, actor), ActiveWalkResponse, actor)
 
 
 @router.get("/{walk_id}", response_model=WalkDetailResponse)
