@@ -142,6 +142,7 @@ def get_live_walks(
     cards = []
     for walk, req, dog, walker in rows:
         elapsed_seconds, last_location_at, is_stale = compute_walk_live_status(walk, now, stale_sec)
+        is_overdue, overdue_minutes = walk_service.compute_walk_overdue(walk, now=now)
         scheduled_duration_minutes = int(
             (walk_service.as_utc(req.requested_end_at) - walk_service.as_utc(req.requested_start_at)).total_seconds() // 60
         )
@@ -156,6 +157,9 @@ def get_live_walks(
                 elapsed_seconds=elapsed_seconds,
                 scheduled_duration_minutes=scheduled_duration_minutes,
                 scheduled_end_at=req.requested_end_at,
+                expected_end_at=walk.expected_end_at,
+                is_overdue=is_overdue,
+                overdue_minutes=overdue_minutes,
                 last_latitude=walk.last_latitude,
                 last_longitude=walk.last_longitude,
                 last_location_at=last_location_at,
@@ -208,6 +212,7 @@ def get_live_walk_detail(
     now = walk_service.utc_now()
     stale_sec = get_live_walk_stale_seconds()
     elapsed_seconds, last_location_at, is_stale = compute_walk_live_status(walk, now, stale_sec)
+    is_overdue, overdue_minutes = walk_service.compute_walk_overdue(walk, now=now)
     scheduled_duration_minutes = int(
         (walk_service.as_utc(req.requested_end_at) - walk_service.as_utc(req.requested_start_at)).total_seconds() // 60
     )
@@ -222,6 +227,9 @@ def get_live_walk_detail(
         elapsed_seconds=elapsed_seconds,
         scheduled_duration_minutes=scheduled_duration_minutes,
         scheduled_end_at=req.requested_end_at,
+        expected_end_at=walk.expected_end_at,
+        is_overdue=is_overdue,
+        overdue_minutes=overdue_minutes,
         last_latitude=walk.last_latitude,
         last_longitude=walk.last_longitude,
         last_location_at=last_location_at,
@@ -273,10 +281,14 @@ def get_live_walk_updates(
     now = walk_service.utc_now()
     stale_sec = get_live_walk_stale_seconds()
     _, last_location_at, is_stale = compute_walk_live_status(walk, now, stale_sec)
+    is_overdue, overdue_minutes = walk_service.compute_walk_overdue(walk, now=now)
 
     return LiveWalkUpdatesResponse(
         walk_id=walk.id,
         is_stale=is_stale,
+        expected_end_at=walk.expected_end_at,
+        is_overdue=is_overdue,
+        overdue_minutes=overdue_minutes,
         last_location_at=last_location_at,
         last_latitude=walk.last_latitude,
         last_longitude=walk.last_longitude,

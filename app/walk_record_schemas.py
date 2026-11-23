@@ -148,8 +148,9 @@ class UTCResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     @field_validator(
-        "started_at", "ended_at", "created_at", "updated_at", "recorded_at", "occurred_at",
-        "last_point_recorded_at", "last_point_received_at", check_fields=False,
+        "started_at", "ended_at", "expected_end_at", "created_at", "updated_at",
+        "recorded_at", "occurred_at", "last_point_recorded_at", "last_point_received_at",
+        check_fields=False,
     )
     @classmethod
     def utc_time(cls, value):
@@ -175,6 +176,10 @@ class WalkResponse(UTCResponse):
     last_point_recorded_at: datetime | None = None
     last_point_received_at: datetime | None = None
     end_reason: Literal["USER", "STAFF", "AUTO_TIMEOUT"] | None = None
+    planned_duration_minutes: int | None = None
+    expected_end_at: datetime | None = None
+    is_overdue: bool = False
+    overdue_minutes: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -182,6 +187,10 @@ class WalkResponse(UTCResponse):
 class ActiveWalkResponse(UTCResponse):
     walk_id: int
     started_at: datetime
+    planned_duration_minutes: int | None = None
+    expected_end_at: datetime | None = None
+    is_overdue: bool = False
+    overdue_minutes: int = 0
     last_latitude: Decimal | None = None
     last_longitude: Decimal | None = None
     last_accuracy_m: Decimal | None = None
