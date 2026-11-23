@@ -1,3 +1,5 @@
+from datetime import timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -8,8 +10,10 @@ from app.dependencies import require_admin
 from app.auth import get_contract_user, get_current_user, require_owner
 from app.models import Shelter, User, UserRole
 from app.rate_limit import RateLimiter
-from app.schemas import (AvailabilityResponse, MeResponse, SignupRequest, SignupResponse, UserResponse,
-                         UserShelterUpdate)
+from app.schemas import (AvailabilityResponse, MeResponse, PledgeRequest, PledgeResponse, SignupRequest,
+                         SignupResponse, UserResponse, UserShelterUpdate)
+from app.api_contract import ContractError
+from app.pledge_service import PLEDGE_COMPLETED_MESSAGE, PLEDGE_NOT_ALLOWED_MESSAGE, acknowledge_pledge
 from app.signup_service import is_taken, register_user
 
 router = APIRouter(
@@ -78,6 +82,37 @@ def get_me(user: User = Depends(get_contract_user)):
     response = ok(data, "사용자 정보를 조회했습니다.")
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+def get_pledge_user(user: User = Depends(get_contract_user)) -> User:
+    """Bearer session (401), then role (403). The pledge is for general users only."""
+    if user.role != UserRole.USER:
+        raise ContractError(403, "PLEDGE_NOT_ALLOWED", PLEDGE_NOT_ALLOWED_MESSAGE)
+    # Issue #40: the shared ACTIVE account check (403 AGE_REVIEW_REQUIRED) goes here once
+    # users.account_status exists. It is not implemented yet; see app.pledge_service.
+    return user
+
+
+@onboarding.put("/me/pledge", response_model=PledgeResponse,
+                responses={401: {"model": ContractErrorResponse,
+                                 "description": "AUTHENTICATION_REQUIRED, INVALID_ACCESS_TOKEN, SESSION_EXPIRED, "
+                                                "USER_NOT_FOUND"},
+                           403: {"model": ContractErrorResponse, "description": "PLEDGE_NOT_ALLOWED(보호소, 관리자)"},
+                           409: {"model": ContractErrorResponse, "description": "PLEDGE_VERSION_MISMATCH"},
+                           422: {"model": ContractErrorResponse,
+                                 "description": "PLEDGE_VERSION_REQUIRED, INVALID_PLEDGE_VERSION"},
+                           500: {"model": ContractErrorResponse, "description": "INTERNAL_SERVER_ERROR"}})
+def put_my_pledge(payload: PledgeRequest, user: User = Depends(get_pledge_user), db: Session = Depends(get_db)):
+    # Same version again returns the first confirmation time with 200 (idempotent).
+    record = acknowledge_pledge(db, user.id, payload.pledge_version)
+    data = {"pledge_completed": True, "pledge_version": record.pledge_version,
+            "acknowledged_at": as_utc(record.acknowledged_at).isoformat()}
+    return ok(data, PLEDGE_COMPLETED_MESSAGE)
+
+
+def as_utc(value):
+    # SQLite drops the time zone; PostgreSQL TIMESTAMPTZ keeps it. Both are stored in UTC.
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 router.include_router(onboarding)

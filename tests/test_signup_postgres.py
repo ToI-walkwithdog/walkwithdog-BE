@@ -1,10 +1,11 @@
-"""Sign-up uniqueness, consent atomicity, concurrency and migrations 016 to 018 on real PostgreSQL.
+"""Sign-up uniqueness, consent atomicity, pledge idempotency, concurrency and migrations 016 to 019 on real PostgreSQL.
 
 SIGNUP_TEST_DATABASE_URL must name an EMPTY local toi_walk_test_* database.
 Each test works in its own new su_<uuid> schema and drops only that schema
 afterwards, so the same test DB can be reused; no other schema is touched.
 """
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import re
@@ -18,10 +19,10 @@ from uuid import uuid4
 # named in DATABASE_URL or .env, and does not depend on another test importing app
 # first. Every test overrides get_db with SIGNUP_TEST_DATABASE_URL.
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
-    from app import signup_service
-    from app.auth import UNUSABLE_PASSWORD, hash_password
+    from app import pledge_service, signup_service
+    from app.auth import UNUSABLE_PASSWORD, hash_password, token_digest
     from app.database import Base, get_db
-    from app.models import User, UserConsent
+    from app.models import AuthSession, User, UserConsent, UserPledgeAcknowledgement, UserRole
     from app.routers import auth, users
 
 from fastapi import FastAPI
@@ -40,6 +41,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (ROOT / "migrations" / "016_onboarding_signup.sql").read_text(encoding="utf-8")
 EMAIL_REMOVAL = (ROOT / "migrations" / "017_remove_user_email.sql").read_text(encoding="utf-8")
 CONSENT_MIGRATION = (ROOT / "migrations" / "018_user_consents.sql").read_text(encoding="utf-8")
+PLEDGE_MIGRATION = (ROOT / "migrations" / "019_user_pledge_acknowledgements.sql").read_text(encoding="utf-8")
+PLEDGE_VERSION = "pledge-test-v1"  # test-only value; the real version is an undecided server setting
 # Real files a dev DB has applied to users and walk tables before 016, in order.
 # 014 (F-08) adds users.phone; 015 (F-09) needs walk_reviews from 007.
 DEV_CHAIN_BEFORE_016 = ("005_user_roles.sql", "006_user_shelters.sql", "007_walk_domain.sql",
@@ -81,6 +84,9 @@ class SignupPostgresTests(unittest.TestCase):
 
     def setUp(self):
         use_test_privacy_policy(self)
+        pledge_env = patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION})
+        pledge_env.start()
+        self.addCleanup(pledge_env.stop)
         self.schema = "su_" + uuid4().hex
         with self.admin.begin() as connection:
             connection.exec_driver_sql(f'CREATE SCHEMA "{self.schema}"')
@@ -590,6 +596,117 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual((self.schema_snapshot(), self.user_rows()), (before, before_rows))
         with self.engine.connect() as connection:
             self.assertEqual(connection.execute(text("SELECT count(*) FROM user_emails")).scalar_one(), 3)
+
+
+    # Pledge (Issue #33) and migration 019
+
+    def add_session(self, user_id, token):
+        with self.Session.begin() as db:
+            db.add(AuthSession(token_hash=token_digest(token), user_id=user_id,
+                               expires_at=datetime.now(timezone.utc) + timedelta(hours=1)))
+        return {"Authorization": f"Bearer {token}"}
+
+    def pledge_rows(self):
+        with self.engine.connect() as connection:
+            return [tuple(row) for row in connection.execute(text(
+                "SELECT user_id, pledge_version, acknowledged_at FROM user_pledge_acknowledgements ORDER BY id"))]
+
+    def test_migration_019_adds_only_the_pledge_table_and_pledges_work_without_create_all(self):
+        self.migrate_dev_chain_through_016_with_accounts()
+        self.run_sql_file(EMAIL_REMOVAL)
+        self.run_sql_file(CONSENT_MIGRATION)
+        accounts = self.user_rows()
+        before_tables, before_indexes, before_constraints = self.schema_snapshot()
+        self.run_sql_file(PLEDGE_MIGRATION)
+        tables, indexes, constraints = self.schema_snapshot()
+        self.assertEqual(self.user_rows(), accounts)
+        self.assertEqual({k: v for k, v in tables.items() if k != "user_pledge_acknowledgements"}, before_tables)
+        self.assertEqual([i for i in indexes if i[0] != "user_pledge_acknowledgements"], before_indexes)
+        self.assertEqual([c for c in constraints if c[0] != "user_pledge_acknowledgements"], before_constraints)
+        self.assertEqual(sorted(tables["user_pledge_acknowledgements"]), sorted([
+            ("id", "BIGINT", False), ("user_id", "INTEGER", False),
+            ("pledge_version", "VARCHAR(32)", False), ("acknowledged_at", "TIMESTAMP", False)]))
+        new_constraints = {c[1]: c[2] for c in constraints if c[0] == "user_pledge_acknowledgements"}
+        self.assertEqual(new_constraints["uq_user_pledge_ack_user_version"], "UNIQUE (user_id, pledge_version)")
+        self.assertEqual(new_constraints["fk_user_pledge_ack_user_id"], "FOREIGN KEY (user_id) REFERENCES users(id)")
+        self.run_sql_file(PLEDGE_MIGRATION)  # re-running is a no-op
+        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        # The API runs on the migrated tables with no create_all(): an existing user pledges,
+        # shelter and admin accounts are refused.
+        self.start_api(create_schema=False)
+        login = self.client.post("/auth/login", json={"identifier": "walker_one", "password": PASSWORD})
+        headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+        first = self.client.put("/users/me/pledge", json={"pledge_version": PLEDGE_VERSION}, headers=headers)
+        self.assertEqual(first.status_code, 200, first.text)
+        again = self.client.put("/users/me/pledge", json={"pledge_version": PLEDGE_VERSION}, headers=headers)
+        self.assertEqual(again.json()["data"], first.json()["data"])
+        for identifier in ("shelter01", "admin01"):
+            with self.subTest(identifier=identifier):
+                token = self.client.post("/auth/login", json={"identifier": identifier, "password": PASSWORD})
+                response = self.client.put("/users/me/pledge", json={"pledge_version": PLEDGE_VERSION},
+                                           headers={"Authorization": f"Bearer {token.json()['data']['access_token']}"})
+                self.assertEqual((response.status_code, response.json()["code"]), (403, "PLEDGE_NOT_ALLOWED"))
+        self.assertEqual([row[:2] for row in self.pledge_rows()], [(1, PLEDGE_VERSION)])
+        self.assertEqual(self.pledge_rows()[0][2], datetime.fromisoformat(first.json()["data"]["acknowledged_at"]))
+
+    def test_unique_constraint_rejects_a_second_row_for_the_same_user_and_version(self):
+        self.start_api()
+        with self.Session.begin() as db:
+            db.add(User(id=1, login_id="walker01", nickname="봉사자", password=UNUSABLE_PASSWORD))
+            db.flush()
+            db.add(UserPledgeAcknowledgement(user_id=1, pledge_version=PLEDGE_VERSION,
+                                             acknowledged_at=datetime.now(timezone.utc)))
+        with self.assertRaises(IntegrityError), self.Session.begin() as db:
+            db.add(UserPledgeAcknowledgement(user_id=1, pledge_version=PLEDGE_VERSION,
+                                             acknowledged_at=datetime.now(timezone.utc)))
+        with self.Session.begin() as db:  # another version for the same user is allowed
+            db.add(UserPledgeAcknowledgement(user_id=1, pledge_version="pledge-test-v0",
+                                             acknowledged_at=datetime.now(timezone.utc)))
+        self.assertEqual(len(self.pledge_rows()), 2)
+
+    def test_parallel_same_version_pledges_store_one_row_and_return_the_same_time(self):
+        self.start_api()
+        with self.Session.begin() as db:
+            db.add(User(id=1, login_id="walker01", nickname="봉사자", password=UNUSABLE_PASSWORD))
+        headers = self.add_session(1, "pledge-token")
+        workers = 6
+        barrier = Barrier(workers)
+        original = pledge_service._insert_if_absent
+
+        def synchronized(*args, **kwargs):
+            barrier.wait(10)  # every request saw "no record yet" before any of them inserts
+            return original(*args, **kwargs)
+
+        with patch("app.pledge_service._insert_if_absent", side_effect=synchronized), \
+                ThreadPoolExecutor(max_workers=workers) as pool:
+            responses = list(pool.map(
+                lambda _: self.client.put("/users/me/pledge", json={"pledge_version": PLEDGE_VERSION},
+                                          headers=headers), range(workers)))
+        self.assertEqual([r.status_code for r in responses], [200] * workers, [r.text for r in responses])
+        self.assertEqual(len({r.json()["data"]["acknowledged_at"] for r in responses}), 1)
+        rows = self.pledge_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][2], datetime.fromisoformat(responses[0].json()["data"]["acknowledged_at"]))
+
+    def test_pledge_failure_after_insert_rolls_back(self):
+        self.start_api()
+        with self.Session.begin() as db:
+            db.add(User(id=1, login_id="walker01", nickname="봉사자", password=UNUSABLE_PASSWORD))
+        headers = self.add_session(1, "pledge-token")
+        original = pledge_service._insert_if_absent
+
+        def insert_then_fail(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError("simulated failure after the insert")
+
+        with patch("app.pledge_service._insert_if_absent", side_effect=insert_then_fail), \
+                self.assertLogs("app.api_contract", "ERROR"):
+            response = self.client.put("/users/me/pledge", json={"pledge_version": PLEDGE_VERSION}, headers=headers)
+        self.assertEqual((response.status_code, response.json()["code"]), (500, "INTERNAL_SERVER_ERROR"))
+        self.assertEqual(self.pledge_rows(), [])
+        retry = self.client.put("/users/me/pledge", json={"pledge_version": PLEDGE_VERSION}, headers=headers)
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual(len(self.pledge_rows()), 1)
 
 
 if __name__ == "__main__":

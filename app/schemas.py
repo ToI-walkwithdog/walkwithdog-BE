@@ -1,8 +1,11 @@
+from datetime import datetime
+
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 from typing import ClassVar, Literal, Optional
 from app.account_rules import (REQUIRED_MESSAGES, normalize_login_id, normalize_login_identifier,
                                normalize_nickname, require_login_password, validate_password)
 from app.privacy_policy import INVALID_PRIVACY_PAYLOAD_MESSAGE, PrivacyInput, parse_privacy
+from app.pledge_service import PLEDGE_VERSION_REQUIRED_MESSAGE, normalize_pledge_version
 from app.api_contract import as_field_error
 from app.models import UserRole
 from app.walk_schemas import WalkSettingsResponse
@@ -133,6 +136,33 @@ class MeResponse(BaseModel):
     """GET /users/me. Basic account fields only; onboarding progress fields come later (#45)."""
     code: Literal["OK"] = "OK"
     data: UserResponse
+    message: str
+
+
+class PledgeRequest(BaseModel):
+    """PUT /users/me/pledge (Issue #33). No user ID, time or agreement flag is accepted."""
+    pledge_version: str = Field(description="화면에 표시한 서약 문서 버전. 서버 현재 버전과 같아야 함, 최대 32자",
+                                examples=["pledge-v1"])
+
+    # A missing field or unreadable body never reaches the validator; ContractRoute uses this.
+    contract_required_errors: ClassVar[dict] = {
+        "pledge_version": ("PLEDGE_VERSION_REQUIRED", PLEDGE_VERSION_REQUIRED_MESSAGE)}
+
+    @field_validator("pledge_version", mode="before")
+    @classmethod
+    def check_pledge_version(cls, value):
+        return as_field_error(normalize_pledge_version, value)
+
+
+class PledgeData(BaseModel):
+    pledge_completed: bool
+    pledge_version: str
+    acknowledged_at: datetime
+
+
+class PledgeResponse(BaseModel):
+    code: Literal["OK"] = "OK"
+    data: PledgeData
     message: str
 
 

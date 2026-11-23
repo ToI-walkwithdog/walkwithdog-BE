@@ -63,6 +63,21 @@ class UserConsent(Base):
     recorded_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class UserPledgeAcknowledgement(Base):
+    """First walk pledge confirmations (Issue #33, migration 019). One row per user and
+    pledge version keeps the first acknowledged_at; rows for older versions are kept."""
+    __tablename__ = "user_pledge_acknowledgements"
+    __table_args__ = (
+        UniqueConstraint("user_id", "pledge_version", name="uq_user_pledge_ack_user_version"),
+    )
+
+    # BIGINT on PostgreSQL; SQLite only autoincrements INTEGER primary keys.
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", name="fk_user_pledge_ack_user_id"), nullable=False)
+    pledge_version = Column(String(32), nullable=False)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class SessionToken(Base):
     # Legacy schema retained for compatibility; new login tokens use AuthSession.
     __tablename__ = "session_tokens"
