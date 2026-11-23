@@ -102,7 +102,7 @@ FK 없이 사용자 ID를 담는 컬럼은 없다(#41 구현 시점 모델 조�
 - 차단 경로는 50개(계약 5, `detail` 45)다. `detail` 경로 45개는 모두 `get_current_user`(관리자 수집 API는 직접 호출)로 사용자를 얻으므로 `app/auth.py` 한 곳에서 적용했다.
 - 형식 차이: 온보딩 계약 API는 `{code, data, message}`의 403 `AGE_REVIEW_REQUIRED`, 기존 API는 FastAPI 기본 `detail` 형식 403이다. 기존 API의 응답 형식은 바꾸지 않았다.
 - 상태 검사는 세션 확인 뒤, 역할 검사 앞에서 실행된다. 401과 기존 역할 403의 형식과 메시지는 그대로다. 보호소, 관리자, `ACTIVE` 일반 사용자는 응답이 바뀌지 않는다(상태 전환은 일반 사용자의 Step 1에서만 발생).
-- 자동 테스트 `tests/test_age_review_access.py`가 실제 앱의 모든 경로를 네 분류로 나누고 각 경로를 호출해 확인한다. 분류되지 않은 새 경로가 생기면 실패한다. 전체 점검표는 PR #53 본문에 있다.
+- 자동 테스트 `tests/test_age_review_access.py`는 허용, 계약 차단, 공개 목록을 명시하고, 목록에 없는 나머지 경로를 모두 `detail` 차단 경로로 간주해 실제로 호출한다. 연령 확인 필요 계정에 `detail` 403을 주지 않는 새 경로(계약 형식 경로, 공개 경로, `get_current_user`를 거치지 않는 경로)가 생기면 실패한다. `get_current_user`를 쓰는 새 경로는 따로 분류하지 않아도 검사에 들어간다. PR #53 본문의 "분류되지 않은 새 경로가 생기면 실패"는 이 의미다. 전체 점검표는 PR #53 본문에 있다.
 
 ## 6. 쓰기 트랜잭션의 상태 재확인 (`1663aa3`)
 
@@ -192,7 +192,7 @@ FK 없이 사용자 ID를 담는 컬럼은 없다(#41 구현 시점 모델 조�
 
 - 새 마이그레이션은 없다. 016~020 적용이 선행 조건이다(#30, #40 문서 참고). 실제 개발 DB 적용 여부는 확인하지 못했다.
 - 운영 설정: `ACCOUNT_EXIT_RECORD_POLICY`는 비워 둔다. 실패 제한 설정을 확정한다.
-- 마이그레이션 번호 충돌(`dev`의 `017_f10_behavior_marker.sql`, `018_f11_walk_overtime.sql`)과 `dev` 신규 산책 경로의 접근 제어 분류는 이 스택을 `dev`에 병합하기 전에 해결해야 한다.
+- 마이그레이션 번호 충돌(`dev`의 `017_f10_behavior_marker.sql`, `018_f11_walk_overtime.sql`)은 이 스택을 `dev`에 병합하기 전에 해결해야 한다. `dev` 신규 산책 경로의 접근 제어는 13절을 참고한다.
 
 ## 13. 후속 연동 (#41 구현 범위 밖)
 
@@ -202,7 +202,9 @@ FK 없이 사용자 ID를 담는 컬럼은 없다(#41 구현 시점 모델 조�
   - 가입 종료 삭제 순서에 `volunteer_experience_challenges` → `volunteer_onboarding_experiences`를 `volunteer_onboarding_basics` 앞에 추가했다. Step 2 기록은 동의, 서약 같은 보존 정책 대기 대상이 아니라 기본 정보와 같은 온보딩 기록으로 분류했다.
   - 운영 환경의 가입 종료 차단과 보존 정책은 바꾸지 않았다.
   - `tests/test_age_review_access.py`에 Step 2 경로 2개를 계약 형식 차단으로 분류했다(계약 차단 7개).
-- `dev`에 들어온 F-10~F-12 산책 기능은 이 스택과 아직 합쳐지지 않았다. 새 경로 3개(`GET /walks/history`, `GET /shelters/me/walks`, `GET /shelters/me/walks/{walk_id}`)는 접근 제어 자동 테스트 분류가 필요하다.
+- `dev`에 들어온 F-10~F-12 산책 기능은 이 스택과 아직 합쳐지지 않았다. 2026-11-23 로컬 시험 병합(`dev` `baafada`와 #57 `188da56`, Push하지 않음)에서 확인한 결과는 다음과 같다. 실제 병합 후 다시 확인해야 한다.
+  - 새 경로 3개(`GET /walks/history`, `GET /shelters/me/walks`, `GET /shelters/me/walks/{walk_id}`)는 `get_current_user` 기반 역할 의존성을 써서 접근 제어 자동 테스트의 `detail` 차단 검사에 포함되었고 통과했다. 세 경로는 읽기 전용이다.
+  - F-10 마커 저장과 F-11 산책 시작 변경은 기존 `walks.persist` 안에서 실행되어 `require_active_writer()`를 거친다.
 
 ## 14. 관련 링크
 
