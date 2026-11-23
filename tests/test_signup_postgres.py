@@ -12,7 +12,9 @@ from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import re
-from threading import Barrier, Event
+import re as regex
+from threading import Barrier, Event, Thread
+import time
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -22,11 +24,16 @@ from uuid import uuid4
 # named in DATABASE_URL or .env, and does not depend on another test importing app
 # first. Every test overrides get_db with SIGNUP_TEST_DATABASE_URL.
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
-    from app import pledge_service, signup_service
+    from app import basic_info_service, pledge_service, signup_service
+    from app.account_status import change_to_age_review
     from app.auth import UNUSABLE_PASSWORD, hash_password, token_digest
     from app.database import Base, get_db
-    from app.models import AuthSession, User, UserConsent, UserPledgeAcknowledgement, UserRole
-    from app.routers import auth, users
+    from app.models import (AuthSession, PhoneVerification, PhoneVerificationDailyCount, User, UserConsent,
+                            UserPledgeAcknowledgement, UserRole, VolunteerOnboardingBasic)
+    from app.onboarding_common import get_clock
+    from app.phone_verification_service import phone_subject
+    from app.routers import auth, onboarding_basic, users
+    from app.sms_provider import MockSmsProvider, get_sms_provider
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -46,10 +53,17 @@ EMAIL_REMOVAL = (ROOT / "migrations" / "017_remove_user_email.sql").read_text(en
 CONSENT_MIGRATION = (ROOT / "migrations" / "018_user_consents.sql").read_text(encoding="utf-8")
 GUIDE_MIGRATION = "019_first_walk_guide.sql"
 PLEDGE_MIGRATION = "023_user_pledge_acknowledgements.sql"
-USER_COLUMNS_AFTER_018 = {"first_walk_guide_completed_at": GUIDE_MIGRATION}
-API_MIGRATIONS_AFTER_018 = (GUIDE_MIGRATION, PLEDGE_MIGRATION)
+STEP1_MIGRATION = "024_onboarding_basic_info.sql"
+USER_COLUMNS_AFTER_018 = {
+    "first_walk_guide_completed_at": GUIDE_MIGRATION,
+    "account_status": STEP1_MIGRATION,
+    "age_review_required_at": STEP1_MIGRATION,
+}
+API_MIGRATIONS_AFTER_018 = (GUIDE_MIGRATION, PLEDGE_MIGRATION, STEP1_MIGRATION)
 GUIDE_COLUMN = ("first_walk_guide_completed_at", "TIMESTAMP", True)
 PLEDGE_VERSION = "pledge-test-v1"  # test-only value; the real version is an undecided server setting
+HMAC_KEY = "test-only-hmac-key-0123456789abcdef"  # test-only secret
+STEP1_START = datetime(2026, 11, 23, 1, 0, tzinfo=timezone.utc)
 # Real files a dev DB has applied to users and walk tables before 016, in order.
 # 014 (F-08) adds users.phone; 015 (F-09) needs walk_reviews from 007.
 DEV_CHAIN_BEFORE_016 = ("005_user_roles.sql", "006_user_shelters.sql", "007_walk_domain.sql",
@@ -91,7 +105,8 @@ class SignupPostgresTests(unittest.TestCase):
 
     def setUp(self):
         use_test_privacy_policy(self)
-        pledge_env = patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION})
+        pledge_env = patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION,
+                                             "PHONE_VERIFICATION_HMAC_KEY": HMAC_KEY})
         pledge_env.start()
         self.addCleanup(pledge_env.stop)
         self.schema = "su_" + uuid4().hex
@@ -132,6 +147,11 @@ class SignupPostgresTests(unittest.TestCase):
         app = FastAPI()
         app.include_router(auth.router)
         app.include_router(users.router)
+        app.include_router(onboarding_basic.router)
+        self.now = STEP1_START
+        self.sms = MockSmsProvider()
+        app.dependency_overrides[get_clock] = lambda: (lambda: self.now)
+        app.dependency_overrides[get_sms_provider] = lambda: self.sms
 
         def test_db():
             with self.Session() as db:
@@ -527,7 +547,7 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual(self.user_rows(), before_rows)
         self.run_sql_file(EMAIL_REMOVAL)  # re-running is a no-op
         self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
-        # The current code requires the consent (018) and guide (019) columns on all user lookups.
+        # Finish the schema required by the current user lookup and onboarding code.
         self.run_sql_file(CONSENT_MIGRATION)
         self.migrate_users_for_current_models()
         self.start_api(create_schema=False)
@@ -577,6 +597,9 @@ class SignupPostgresTests(unittest.TestCase):
                 "SELECT count(*) FROM users WHERE age_14_plus_confirmed_at IS NULL")).scalar_one(), 3)
             self.assertEqual(connection.execute(text("SELECT count(*) FROM user_consents")).scalar_one(), 0)
 
+        self.run_sql_file(CONSENT_MIGRATION)  # re-run before any later files
+        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+
         # The current API also needs 019, which adds one users column and nothing else.
         self.run_migration(GUIDE_MIGRATION)
         with_guide = self.schema_snapshot()
@@ -609,6 +632,9 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual(model_columns - {c[0] for c in before_tables["users"]}, set(USER_COLUMNS_AFTER_018))
         self.run_migration(GUIDE_MIGRATION)
         tables, indexes, constraints = self.schema_snapshot()
+        self.assertEqual({c[0] for c in tables["users"]} - {c[0] for c in before_tables["users"]},
+                         {column for column, migration in USER_COLUMNS_AFTER_018.items()
+                          if migration == GUIDE_MIGRATION})
         self.assertEqual(tables["users"], sorted(before_tables["users"] + [GUIDE_COLUMN]))
         self.assertEqual({k: v for k, v in tables.items() if k != "users"},
                          {k: v for k, v in before_tables.items() if k != "users"})
@@ -779,6 +805,238 @@ class SignupPostgresTests(unittest.TestCase):
         retry = self.client.put("/users/me/pledge", json={"pledge_version": PLEDGE_VERSION}, headers=headers)
         self.assertEqual(retry.status_code, 200, retry.text)
         self.assertEqual(len(self.pledge_rows()), 1)
+
+
+    # Onboarding Step 1 (Issue #40) and migration 024
+
+    def step1_user(self, user_id, *, pledged=True):
+        with self.Session.begin() as db:
+            db.add(User(id=user_id, login_id=f"walker{user_id:02d}", nickname=f"봉사자{user_id}",
+                        password=UNUSABLE_PASSWORD))
+            db.flush()
+            if pledged:
+                db.add(UserPledgeAcknowledgement(user_id=user_id, pledge_version=PLEDGE_VERSION,
+                                                 acknowledged_at=STEP1_START - timedelta(minutes=5)))
+        return self.add_session(user_id, f"step1-token-{user_id}")
+
+    def send_and_confirm(self, headers, phone="010-1234-5678"):
+        sent = self.client.post("/users/me/phone-verifications", json={"phone_number": phone}, headers=headers)
+        self.assertEqual(sent.status_code, 200, sent.text)
+        verification_id = sent.json()["data"]["verification_id"]
+        code = re.search(r"\d{6}", self.sms.outbox[-1]["text"]).group()
+        confirmed = self.client.post("/users/me/phone-verifications/confirm",
+                                     json={"verification_id": verification_id, "code": code}, headers=headers)
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        return verification_id
+
+    def basic_info(self, headers, verification_id, birth_date="2002-12-10"):
+        return self.client.put("/users/me/onboarding/basic-info", headers=headers,
+                               json={"full_name": "김민지", "birth_date": birth_date,
+                                     "phone_verification_id": verification_id})
+
+    def account_status(self, user_id):
+        with self.engine.connect() as connection:
+            return connection.execute(text("SELECT account_status FROM users WHERE id = :id"),
+                                      {"id": user_id}).scalar_one()
+
+    def test_migration_024_keeps_accounts_and_step1_works_without_create_all(self):
+        self.migrate_dev_chain_through_016_with_accounts()
+        self.run_sql_file(EMAIL_REMOVAL)
+        self.run_sql_file(CONSENT_MIGRATION)
+        self.run_migration(GUIDE_MIGRATION)
+        self.run_migration(PLEDGE_MIGRATION)
+        accounts = self.user_rows()
+        before_tables, before_indexes, before_constraints = self.schema_snapshot()
+        self.run_migration(STEP1_MIGRATION)
+        tables, indexes, constraints = self.schema_snapshot()
+        self.assertEqual(self.user_rows(), accounts)  # includes users.phone (#28) unchanged
+        with self.engine.connect() as connection:
+            statuses = connection.execute(text(
+                "SELECT account_status, age_review_required_at FROM users ORDER BY id")).all()
+        self.assertEqual([tuple(row) for row in statuses], [("ACTIVE", None)] * 3)
+        new_tables = {"volunteer_onboarding_basics", "phone_verifications", "phone_verification_daily_counts"}
+        self.assertEqual(set(tables) - set(before_tables), new_tables)
+        self.assertEqual({k: v for k, v in tables.items() if k not in new_tables | {"users"}},
+                         {k: v for k, v in before_tables.items() if k != "users"})
+        added_columns = set(tables["users"]) - set(before_tables["users"])
+        self.assertEqual(added_columns,
+                         {("account_status", "VARCHAR(24)", False), ("age_review_required_at", "TIMESTAMP", True)})
+        self.assertEqual({column[0] for column in added_columns},
+                         {column for column, migration in USER_COLUMNS_AFTER_018.items()
+                          if migration == STEP1_MIGRATION})
+        with self.engine.connect() as connection:
+            user_columns = {column["name"]: column for column in inspect(connection).get_columns("users")}
+        self.assertTrue(user_columns["age_review_required_at"]["type"].timezone)
+        self.assertEqual([i for i in indexes if i[0] not in new_tables], before_indexes)
+        self.assertEqual([c for c in constraints if c[0] not in new_tables and c[1] != "ck_users_account_status"],
+                         before_constraints)
+        self.assertIn(("volunteer_onboarding_basics", "volunteer_onboarding_basics_phone_e164_key",
+                       "UNIQUE (phone_e164)"), constraints)
+        self.assertIn(("users", "ck_users_account_status",
+                       "CHECK (((account_status)::text = ANY ((ARRAY['ACTIVE'::character varying, "
+                       "'AGE_REVIEW_REQUIRED'::character varying])::text[])))"), constraints)
+        self.run_migration(STEP1_MIGRATION)  # re-running is a no-op
+        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        # The API runs on the migrated tables: login, pledge, then Step 1.
+        self.migrate_users_for_current_models(after=STEP1_MIGRATION)
+        self.start_api(create_schema=False)
+        login = self.client.post("/auth/login", json={"identifier": "walker_one", "password": PASSWORD})
+        headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+        blocked = self.client.post("/users/me/phone-verifications", json={"phone_number": "010-1234-5678"},
+                                   headers=headers)
+        self.assertEqual((blocked.status_code, blocked.json()["data"]), (409, {"required_step": "PLEDGE"}))
+        self.assertEqual(self.client.put("/users/me/pledge", json={"pledge_version": PLEDGE_VERSION},
+                                         headers=headers).status_code, 200)
+        saved = self.basic_info(headers, self.send_and_confirm(headers))
+        self.assertEqual(saved.status_code, 200, saved.text)
+        with self.engine.connect() as connection:
+            phone = connection.execute(text("SELECT phone FROM users WHERE id = 1")).scalar_one()
+        self.assertEqual(phone, "010-0000-0000")  # the #28 contact field is not overwritten
+
+    def test_parallel_sends_of_one_account_send_once(self):
+        self.start_api()
+        headers = self.step1_user(1)
+        workers = 6
+        barrier = Barrier(workers)
+
+        def send(_):
+            barrier.wait(10)
+            return self.client.post("/users/me/phone-verifications", json={"phone_number": "010-1234-5678"},
+                                    headers=headers)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            statuses = sorted(r.status_code for r in pool.map(send, range(workers)))
+        self.assertEqual(statuses, [200] + [429] * (workers - 1))
+        with self.Session() as db:
+            self.assertEqual(db.query(PhoneVerification).count(), 1)
+            self.assertEqual({row.send_count for row in db.query(PhoneVerificationDailyCount)}, {1})
+        self.assertEqual(len(self.sms.outbox), 1)
+
+    def test_parallel_sends_to_one_number_never_pass_the_daily_number_limit(self):
+        self.start_api()
+        headers = [self.step1_user(user_id) for user_id in range(1, 7)]
+        with self.Session.begin() as db:
+            db.add(PhoneVerificationDailyCount(scope="PHONE", subject=phone_subject(HMAC_KEY.encode(), "+821012345678"),
+                                               kst_date=(STEP1_START + timedelta(hours=9)).date(), send_count=4))
+        barrier = Barrier(len(headers))
+
+        def send(header):
+            barrier.wait(10)
+            return self.client.post("/users/me/phone-verifications", json={"phone_number": "010-1234-5678"},
+                                    headers=header)
+
+        with ThreadPoolExecutor(max_workers=len(headers)) as pool:
+            statuses = sorted(r.status_code for r in pool.map(send, headers))
+        self.assertEqual(statuses.count(200), 1, statuses)
+        self.assertEqual(statuses.count(429), len(headers) - 1)
+        with self.Session() as db:
+            phone_counter = db.query(PhoneVerificationDailyCount).filter_by(scope="PHONE").one()
+            self.assertEqual(phone_counter.send_count, 5)
+            self.assertEqual(db.query(PhoneVerification).count(), 1)
+
+    def test_two_accounts_saving_the_same_number_one_wins(self):
+        self.start_api()
+        first, second = self.step1_user(1), self.step1_user(2)
+        ids = [self.send_and_confirm(first)]
+        self.now += timedelta(seconds=61)  # the number's own resend wait
+        ids.append(self.send_and_confirm(second))
+        barrier = Barrier(2)
+        original = basic_info_service.registered_to_other_user
+        waited = set()
+
+        def checked_then_wait(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[2] not in waited:  # only the pre-check waits, not the conflict handling
+                waited.add(args[2])
+                barrier.wait(10)  # both pass the pre-check; only the UNIQUE constraint decides
+            return result
+
+        with patch("app.basic_info_service.registered_to_other_user", side_effect=checked_then_wait), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(lambda pair: self.basic_info(*pair), zip((first, second), ids)))
+        outcomes = sorted((r.status_code, r.json()["code"]) for r in responses)
+        self.assertEqual(outcomes, [(200, "OK"), (409, "PHONE_ALREADY_REGISTERED")])
+        with self.Session() as db:
+            self.assertEqual(db.query(VolunteerOnboardingBasic).count(), 1)
+            consumed = [row.consumed_at is not None for row in db.query(PhoneVerification)]
+        self.assertEqual(sorted(consumed), [False, True])
+
+    def test_parallel_saves_of_one_account_keep_one_row_and_one_time(self):
+        self.start_api()
+        headers = self.step1_user(1)
+        verification_id = self.send_and_confirm(headers)
+        workers = 4
+        barrier = Barrier(workers)
+        original = basic_info_service.age_years
+
+        def synchronized(*args, **kwargs):
+            barrier.wait(10)  # every request saw "not completed yet"
+            return original(*args, **kwargs)
+
+        with patch("app.basic_info_service.age_years", side_effect=synchronized), \
+                ThreadPoolExecutor(max_workers=workers) as pool:
+            responses = list(pool.map(lambda _: self.basic_info(headers, verification_id), range(workers)))
+        self.assertEqual([r.status_code for r in responses], [200] * workers, [r.text for r in responses])
+        self.assertEqual(len({r.json()["data"]["completed_at"] for r in responses}), 1)
+        with self.Session() as db:
+            self.assertEqual(db.query(VolunteerOnboardingBasic).count(), 1)
+
+    def test_status_change_waits_for_a_pledge_that_holds_the_share_lock(self):
+        self.start_api()
+        headers = self.step1_user(1)  # pledged: Step 1 is reachable
+        locked, release = Event(), Event()
+        original = pledge_service.find_acknowledgement
+
+        def hold(*args, **kwargs):
+            if not locked.is_set():
+                locked.set()  # the pledge transaction now holds FOR SHARE on users row 1
+                release.wait(10)
+            return original(*args, **kwargs)
+
+        results = {}
+        with patch("app.pledge_service.find_acknowledgement", side_effect=hold):
+            pledge = Thread(target=lambda: results.setdefault("pledge", self.client.put(
+                "/users/me/pledge", json={"pledge_version": PLEDGE_VERSION}, headers=headers)))
+            pledge.start()
+            self.assertTrue(locked.wait(10))
+            save = Thread(target=lambda: results.setdefault("save", self.basic_info(
+                headers, str(uuid4()), birth_date="2020-01-01")))
+            save.start()
+            time.sleep(0.5)
+            # The under-14 status change is blocked by the pledge's share lock.
+            self.assertTrue(save.is_alive())
+            self.assertEqual(self.account_status(1), "ACTIVE")
+            release.set()
+            pledge.join(10)
+            save.join(10)
+        self.assertEqual(results["pledge"].status_code, 200, results["pledge"].text)
+        self.assertEqual((results["save"].status_code, results["save"].json()["code"]), (422, "AGE_BELOW_MINIMUM"))
+        self.assertEqual(self.account_status(1), "AGE_REVIEW_REQUIRED")
+        self.assertEqual(len(self.pledge_rows()), 1)  # the history is kept
+
+    def test_pledge_that_passed_the_route_check_is_refused_after_a_status_change(self):
+        self.start_api()
+        headers = self.step1_user(1, pledged=False)
+        checked, release = Event(), Event()
+        original = pledge_service.lock_user
+
+        def wait_then_lock(*args, **kwargs):
+            checked.set()  # the route already saw ACTIVE
+            release.wait(10)
+            return original(*args, **kwargs)
+
+        results = {}
+        with patch("app.pledge_service.lock_user", side_effect=wait_then_lock):
+            pledge = Thread(target=lambda: results.setdefault("pledge", self.client.put(
+                "/users/me/pledge", json={"pledge_version": PLEDGE_VERSION}, headers=headers)))
+            pledge.start()
+            self.assertTrue(checked.wait(10))
+            with self.Session() as other:
+                change_to_age_review(other, 1, self.now)
+            release.set()
+            pledge.join(10)
+        self.assertEqual((results["pledge"].status_code, results["pledge"].json()["code"]), (403, "AGE_REVIEW_REQUIRED"))
+        self.assertEqual(self.pledge_rows(), [])
 
 
 if __name__ == "__main__":

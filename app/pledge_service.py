@@ -10,10 +10,12 @@ Not decided yet (Issue #33): where the current pledge version is managed. Until 
 it is read from the PLEDGE_CURRENT_VERSION setting with no default; if it is unset or
 invalid the API fails closed (500) and stores nothing.
 
-Account status (AGE_REVIEW_REQUIRED, 403) is not checked here yet: `users.account_status`
-and its shared check arrive with Issue #40. acknowledge_pledge() reads the user row
-under a share lock first, so that check can run on the same locked row in the same
-transaction as the insert.
+Account status (Issue #40): an AGE_REVIEW_REQUIRED account gets 403. The route checks
+it at request start, and acknowledge_pledge() checks it again on the users row it
+locks FOR SHARE, in the same transaction as the insert. A Step 1 status change locks
+that row FOR UPDATE, so the two are serialized: a pledge that took the lock first is
+kept (pledge history is never deleted by a status change), and a pledge that comes
+after the change is refused without a record.
 """
 from datetime import datetime, timezone
 import os
@@ -22,9 +24,10 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from app.account_status import ensure_active, lock_user
 from app.api_contract import ContractError
 from app.auth import contract_unauthorized
-from app.models import User, UserPledgeAcknowledgement
+from app.models import UserPledgeAcknowledgement
 
 PLEDGE_VERSION_MAX_LENGTH = 32
 PLEDGE_VERSION_REQUIRED_MESSAGE = "서약 버전을 확인해 주세요."
@@ -86,11 +89,12 @@ def acknowledge_pledge(db: Session, user_id: int, pledge_version: str) -> UserPl
     if pledge_version != server_version:
         raise ContractError(409, "PLEDGE_VERSION_MISMATCH", PLEDGE_VERSION_MISMATCH_MESSAGE, {"field": "pledge_version"})
     try:
-        # Share lock on the account row for the rest of the transaction. Issue #40 adds
-        # the account status check on this same row before the insert below.
-        user = db.query(User).filter(User.id == user_id).with_for_update(read=True).one_or_none()
+        # Share lock on the account row for the rest of the transaction, then the status
+        # check on that locked, freshly read row (not the copy loaded at authentication).
+        user = lock_user(db, user_id)
         if user is None:
             raise contract_unauthorized("USER_NOT_FOUND")
+        ensure_active(user)
         existing = find_acknowledgement(db, user_id, server_version)
         if existing is None:
             _insert_if_absent(db, user_id, server_version, datetime.now(timezone.utc))

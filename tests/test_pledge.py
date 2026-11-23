@@ -200,9 +200,16 @@ class PledgeTests(unittest.TestCase):
                 self.assert_error(self.pledge(user_id, body={}), 403, "PLEDGE_NOT_ALLOWED", {})
         self.assertEqual(self.records(), [])
 
-    @unittest.skip("Issue #40 미구현: users.account_status와 공통 계정 상태 검증이 아직 없다")
     def test_age_review_account_gets_403_and_no_record(self):
-        """After #40: an AGE_REVIEW_REQUIRED account gets 403 AGE_REVIEW_REQUIRED and no row is stored."""
+        """Issue #40: an AGE_REVIEW_REQUIRED account gets 403 and no row; earlier rows are kept."""
+        old_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with self.Session.begin() as db:
+            db.add(UserPledgeAcknowledgement(user_id=1, pledge_version="pledge-test-v0", acknowledged_at=old_time))
+            db.get(User, 1).account_status = "AGE_REVIEW_REQUIRED"
+        self.assert_error(self.pledge(), 403, "AGE_REVIEW_REQUIRED", {}, "연령 확인 정보를 먼저 수정해 주세요.")
+        # Role is checked first, status before the body: a bad body still gets this 403.
+        self.assert_error(self.pledge(body={}), 403, "AGE_REVIEW_REQUIRED", {})
+        self.assertEqual([(r[0], r[1]) for r in self.records()], [(1, "pledge-test-v0")])
 
     # Server settings and failures
 
