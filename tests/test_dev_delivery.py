@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts import dev_gate, issue_delivery
+from scripts import dev_gate, dev_test_report, issue_delivery
 
 
 def event(node="tests/test_example.py::test_case", outcome="failed", message="AssertionError: 12 != 10", subtest=None):
@@ -48,6 +48,18 @@ class TestRegressionGate(unittest.TestCase):
                 self.assertTrue(dev_gate.compare(report(known, new), baseline(known), baseline(known, new)))
         altered = {**known, "message": "different skip reason"}
         self.assertTrue(dev_gate.compare(report(altered), baseline(known), baseline(known)))
+
+    def test_timestamp_rollover_does_not_mask_other_field_changes(self):
+        context = "AssertionError: Tuples differ\n-    'INTERMEDIATE',\n+    'BEGINNER',\n"
+        stable = context + "     datetime.datetime(2026, 11, 23, 17, 58, 23)),\n   [('slot', 1)])"
+        rollover = (context + "-    datetime.datetime(2026, 11, 23, 17, 58, 24)),\n"
+                    "?                                             ^\n\n"
+                    "+    datetime.datetime(2026, 11, 23, 17, 58, 23)),\n"
+                    "?                                             ^\n\n"
+                    "   [('slot', 1)])")
+        self.assertEqual(dev_test_report.normalize(stable), dev_test_report.normalize(rollover))
+        self.assertNotEqual(dev_test_report.normalize(stable),
+                            dev_test_report.normalize(rollover.replace("INTERMEDIATE", "EXPERIENCED")))
 
     def test_uses_subtest_parameters(self):
         known = event(subtest={"message": None, "kwargs": {"body": "'INTERMEDIATE'"}})

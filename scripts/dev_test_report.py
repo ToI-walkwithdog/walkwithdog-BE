@@ -18,7 +18,16 @@ def normalize(text):
                   "datetime.datetime(<timestamp>)", text)
     text = re.sub(r"datetime\.[a-z]*\[(?:\d+ chars|…)\]\d*\)\)", "datetime.datetime(<abbreviated>)", text)
     text = re.sub(r"\[\d+ chars\]", "[…]", text)
-    return text.replace("\r\n", "\n").strip()
+    text = text.replace("\r\n", "\n")
+    # Pytest can print a paired ndiff change when a fixture save crosses a second.
+    # If the two lines are identical after timestamp normalization, retain one
+    # context line. Real field changes, deletions, and additions stay in the report.
+    timestamp_diff = re.compile(
+        r"(?m)^-(?P<value>[ \t]+datetime\.datetime\(<timestamp>\)[),]*)\n"
+        r"(?:\?[^\n]*\n)?(?:[ \t]*\n)*"
+        r"\+(?P=value)(?:\n\?[^\n]*(?:\n[ \t]*(?=\n))*)?(?=\n|$)"
+    )
+    return timestamp_diff.sub(r" \g<value>", text).strip()
 
 
 class TestReport:
