@@ -8,8 +8,8 @@ from app.dependencies import require_admin
 from app.auth import get_contract_user, get_current_user, require_owner
 from app.models import Shelter, User, UserRole
 from app.rate_limit import RateLimiter
-from app.schemas import (AvailabilityResponse, MeResponse, SignupRequest, SignupResponse, SignupUserData,
-                         UserResponse, UserShelterUpdate)
+from app.schemas import (AvailabilityResponse, MeResponse, SignupRequest, SignupResponse, UserResponse,
+                         UserShelterUpdate)
 from app.signup_service import is_taken, register_user
 
 router = APIRouter(
@@ -36,12 +36,15 @@ ERROR_RESPONSES = {
 
 
 @onboarding.post("/", response_model=SignupResponse, dependencies=[Depends(SIGNUP_RATE_LIMITER)],
-                 responses={409: {"model": ContractErrorResponse, "description": "아이디, 닉네임 중복"},
-                            **ERROR_RESPONSES})
+                 responses={409: {"model": ContractErrorResponse,
+                                  "description": "LOGIN_ID_ALREADY_EXISTS, NICKNAME_ALREADY_EXISTS, POLICY_VERSION_MISMATCH"},
+                            **ERROR_RESPONSES,
+                            422: {"model": ContractErrorResponse,
+                                  "description": "계정 입력 오류, INVALID_PRIVACY_PAYLOAD, "
+                                                 "PRIVACY_CONFIRMATION_REQUIRED, AGE_CONFIRMATION_REQUIRED"}})
 def create_user(payload: SignupRequest, db: Session = Depends(get_db)):
-    user = register_user(db, payload.login_id, payload.nickname, payload.password)
-    data = SignupUserData.model_validate(user, from_attributes=True).model_dump(mode="json")
-    return ok(data, "회원가입이 완료되었습니다.")
+    data = register_user(db, payload.login_id, payload.nickname, payload.password, payload.privacy)
+    return ok(data.model_dump(mode="json"), "회원가입이 완료되었습니다.")
 
 
 # Fixed paths stay ahead of /{user_id}: onboarding is included before those routes.

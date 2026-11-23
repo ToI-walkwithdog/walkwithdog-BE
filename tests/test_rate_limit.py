@@ -18,6 +18,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from privacy_test_support import privacy, use_test_privacy_policy
+
 PASSWORD = "WalkTogether2026!"
 TOO_MANY = "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."
 LOGIN_TOO_MANY = "로그인 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."
@@ -36,6 +38,7 @@ class RateLimitApiTests(unittest.TestCase):
     """Each test gets fresh limiters with the production policy and a controllable clock."""
 
     def setUp(self):
+        use_test_privacy_policy(self)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
@@ -69,7 +72,7 @@ class RateLimitApiTests(unittest.TestCase):
     def signup(self, client=None, **changes):
         self.sequence += 1
         body = {"login_id": f"walker{self.sequence}", "nickname": f"nick_{self.sequence}",
-                "password": PASSWORD, **changes}
+                "password": PASSWORD, "privacy": privacy(), **changes}
         return (client or self.client).post("/users/", json=body)
 
     def check(self, path, client=None, value="walker04"):
@@ -172,7 +175,7 @@ class RateLimitApiTests(unittest.TestCase):
         for header in ("203.0.113.50", "10.0.0.1, 203.0.113.51"):
             response = self.client.post("/users/", headers={"X-Forwarded-For": header, "X-Real-IP": header},
                                         json={"login_id": "spoofid", "nickname": "spoof_nick",
-                                              "password": PASSWORD})
+                                              "password": PASSWORD, "privacy": privacy()})
             self.assert_limited(response, 600)
         self.assertEqual(self.signup(client=other).status_code, 200)
 
@@ -246,6 +249,7 @@ class ProductionWiringTests(unittest.TestCase):
     """The shipped routes use the shipped limiter instances and defaults, with no override."""
 
     def setUp(self):
+        use_test_privacy_policy(self)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         Session = sessionmaker(bind=self.engine)
@@ -296,10 +300,10 @@ class ProductionWiringTests(unittest.TestCase):
     def test_real_signup_limiter_returns_429_with_real_clock(self):
         for index in range(5):
             response = self.client.post("/users/", json={"login_id": f"real{index}", "nickname": f"real_{index}",
-                                                         "password": PASSWORD})
+                                                         "password": PASSWORD, "privacy": privacy()})
             self.assertEqual(response.status_code, 200, response.text)
         response = self.client.post("/users/", json={"login_id": "real6", "nickname": "real_6",
-                                                     "password": PASSWORD})
+                                                     "password": PASSWORD, "privacy": privacy()})
         self.assertEqual(response.status_code, 429)
         retry_after = response.json()["data"]["retry_after_seconds"]
         self.assertTrue(590 <= retry_after <= 600, retry_after)
