@@ -2,6 +2,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator
 from typing import ClassVar, Literal, Optional
 from app.account_rules import (REQUIRED_MESSAGES, normalize_login_id, normalize_login_identifier,
                                normalize_nickname, require_login_password, validate_password)
+from app.privacy_policy import INVALID_PRIVACY_PAYLOAD_MESSAGE, PrivacyInput, parse_privacy
 from app.api_contract import as_field_error
 from app.models import UserRole
 from app.walk_schemas import WalkSettingsResponse
@@ -12,7 +13,7 @@ from app.survey_codes import (
 
 
 class SignupRequest(BaseModel):
-    """Account fields only. The privacy consent object is added with Issue #31.
+    """Account fields and the privacy confirmation (Issue #31).
 
     Email is not collected. Unknown fields, including a leftover `email`, are ignored.
     """
@@ -22,6 +23,13 @@ class SignupRequest(BaseModel):
                           examples=["산책왕"])
     password: str = Field(description="15~128자, 영문 대문자, 소문자, 숫자, 특수문자 각 1개 이상. 변형 없이 해시",
                           examples=["WalkTogether2026!"])
+    privacy: PrivacyInput = Field(
+        description="개인정보 확인값. document_version은 서버 현재 버전과 같아야 하고 age_14_plus_confirmed는 true. "
+                    "동의 필드는 JSON boolean이며 서버에서 활성화한 항목 중 true인 것만 기록",
+        examples=[{"document_version": "privacy-v1", "collection_use_agreed": True, "age_14_plus_confirmed": True}])
+
+    # A missing field never reaches the validators; ContractRoute uses this for privacy.
+    contract_required_errors: ClassVar[dict] = {"privacy": ("INVALID_PRIVACY_PAYLOAD", INVALID_PRIVACY_PAYLOAD_MESSAGE)}
 
     @field_validator("login_id", mode="before")
     @classmethod
@@ -37,6 +45,11 @@ class SignupRequest(BaseModel):
     @classmethod
     def check_password(cls, value):
         return as_field_error(validate_password, value)
+
+    @field_validator("privacy", mode="before")
+    @classmethod
+    def check_privacy(cls, value):
+        return as_field_error(parse_privacy, value)
 
 
 class SignupUserData(BaseModel):

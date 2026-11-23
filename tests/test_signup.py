@@ -9,7 +9,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.api_contract import too_many_requests
     from app.auth import UNUSABLE_PASSWORD, verify_password
     from app.database import Base, get_db
-    from app.models import User, UserRole
+    from app.models import User, UserConsent, UserRole
     from app.routers import auth, users
 
 from fastapi import FastAPI
@@ -21,9 +21,11 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import CreateIndex
 
+from privacy_test_support import TEST_DOCUMENT_VERSION, privacy, use_test_privacy_policy
+
 ROOT = Path(__file__).resolve().parents[1]
 PASSWORD = "WalkTogether2026!"
-VALID = {"login_id": "walker04", "nickname": "산책왕", "password": PASSWORD}
+VALID = {"login_id": "walker04", "nickname": "산책왕", "password": PASSWORD, "privacy": privacy()}
 # Messages are copied from the Notion API spec, not imported from app code, so a
 # changed string in the app fails here instead of silently updating the expectation.
 REQUIRED = ("REQUIRED_FIELD", "필수 입력 항목을 확인해 주세요.")
@@ -42,6 +44,10 @@ MESSAGES = {
     "NICKNAME_ALREADY_EXISTS": "이미 사용 중인 닉네임입니다.",
     "LOGIN_ID_REQUIRED": "아이디를 입력해 주세요.",
     "NICKNAME_REQUIRED": "닉네임을 입력해 주세요.",
+    "INVALID_PRIVACY_PAYLOAD": "개인정보 확인 정보를 다시 확인해 주세요.",
+    "PRIVACY_CONFIRMATION_REQUIRED": "개인정보 처리 관련 필수 항목을 확인해 주세요.",
+    "AGE_CONFIRMATION_REQUIRED": "연령 확인 항목을 확인해 주세요.",
+    "POLICY_VERSION_MISMATCH": "개인정보 처리방침을 다시 확인해 주세요.",
 }
 AVAILABILITY_LOGIN_ID_FORMAT = "아이디에 사용할 수 없는 문자가 포함되어 있습니다."
 INTERNAL_SERVER_ERROR = "일시적인 오류가 발생했습니다."
@@ -53,6 +59,7 @@ PASSWORD_LENGTH = {"field": "password", "min_length": 15, "max_length": 128}
 
 class SignupTests(unittest.TestCase):
     def setUp(self):
+        use_test_privacy_policy(self)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
@@ -143,7 +150,7 @@ class SignupTests(unittest.TestCase):
     # Input validation
 
     def test_required_fields(self):
-        for field in VALID:
+        for field in ("login_id", "nickname", "password"):
             for label, body in (("missing", {k: v for k, v in VALID.items() if k != field}),
                                 ("null", {**VALID, field: None}),
                                 ("empty", {**VALID, field: ""}),
@@ -204,6 +211,79 @@ class SignupTests(unittest.TestCase):
                 self.assertEqual(self.signup(password=value, login_id=f"len{len(value)}",
                                              nickname=f"len_{len(value)}").status_code, 200)
         self.assertEqual(self.user_count(), 2)
+
+    def test_privacy_object_rejects_unknown_types_and_non_boolean_values(self):
+        cases = (
+            None, True, [], "agreed", {},
+            privacy(document_version=None), privacy(document_version=1),
+            privacy(document_version=" "), privacy(document_version="v" * 33),
+            privacy(collection_use_agreed=None), privacy(collection_use_agreed="true"),
+            privacy(ai_overseas_transfer_agreed=1), privacy(age_14_plus_confirmed=None),
+            privacy(age_14_plus_confirmed="true"),
+            privacy(consent_type="UNSUPPORTED"), privacy(terms_agreed=True),
+        )
+        missing = {key: value for key, value in VALID.items() if key != "privacy"}
+        self.assert_contract(self.client.post("/users/", json=missing), 422,
+                             "INVALID_PRIVACY_PAYLOAD", {"field": "privacy"})
+        for payload in cases:
+            with self.subTest(payload=payload):
+                self.assert_contract(self.signup(privacy=payload), 422,
+                                     "INVALID_PRIVACY_PAYLOAD", {"field": "privacy"})
+        self.assertEqual(self.user_count(), 0)
+
+    def test_required_confirmations_and_exact_document_version(self):
+        for field, code, error_field in (
+            ("collection_use_agreed", "PRIVACY_CONFIRMATION_REQUIRED", "privacy"),
+            ("age_14_plus_confirmed", "AGE_CONFIRMATION_REQUIRED", "privacy.age_14_plus_confirmed"),
+        ):
+            missing = privacy()
+            del missing[field]
+            for payload in (missing, privacy(**{field: False})):
+                with self.subTest(field=field, payload=payload):
+                    self.assert_contract(self.signup(privacy=payload), 422, code, {"field": error_field})
+        for version in ("previous-v1", f" {TEST_DOCUMENT_VERSION}", TEST_DOCUMENT_VERSION.upper()):
+            with self.subTest(version=version):
+                self.assert_contract(self.signup(privacy=privacy(document_version=version)), 409,
+                                     "POLICY_VERSION_MISMATCH", {"field": "privacy.document_version"})
+        self.assertEqual(self.user_count(), 0)
+        with self.Session() as db:
+            self.assertEqual(db.query(UserConsent).count(), 0)
+
+    def test_only_active_consents_with_explicit_agreement_are_recorded(self):
+        cases = (
+            ({"PRIVACY_OPTIONAL_CONSENTS": "AI_OVERSEAS_TRANSFER"}, True,
+             {"AI_OVERSEAS_TRANSFER", "PRIVACY_COLLECTION_USE"}),
+            ({"PRIVACY_OPTIONAL_CONSENTS": "AI_OVERSEAS_TRANSFER"}, False, {"PRIVACY_COLLECTION_USE"}),
+            ({"PRIVACY_OPTIONAL_CONSENTS": ""}, True, {"PRIVACY_COLLECTION_USE"}),
+            ({"PRIVACY_OPTIONAL_CONSENTS": "", "PRIVACY_REQUIRED_CONSENTS": ""}, True, set()),
+        )
+        for index, (settings, answer, expected) in enumerate(cases):
+            with self.subTest(settings=settings, answer=answer), patch.dict(os.environ, settings):
+                response = self.signup(login_id=f"walker{index}", nickname=f"산책왕{index}",
+                                       privacy=privacy(ai_overseas_transfer_agreed=answer))
+                self.assertEqual(response.status_code, 200, response.text)
+                with self.Session() as db:
+                    account = db.get(User, response.json()["data"]["id"])
+                    self.assertIsNotNone(account.age_14_plus_confirmed_at)
+                    records = db.query(UserConsent).filter_by(user_id=account.id).all()
+                    self.assertEqual({row.consent_type for row in records}, expected)
+                    self.assertEqual(len(records), len(expected))
+                    for row in records:
+                        self.assertEqual((row.action, row.document_version, row.recorded_at),
+                                         ("AGREE", TEST_DOCUMENT_VERSION, account.age_14_plus_confirmed_at))
+
+    def test_missing_or_invalid_policy_cannot_create_an_account(self):
+        for overrides in (
+            {"PRIVACY_REQUIRED_CONSENTS": "UNSUPPORTED"},
+            {"PRIVACY_OPTIONAL_CONSENTS": "PRIVACY_COLLECTION_USE"},
+            {"PRIVACY_DOCUMENT_VERSION": "v" * 33},
+        ):
+            with self.subTest(overrides=overrides), patch.dict(os.environ, overrides):
+                self.assert_contract(self.signup(), 500, "INTERNAL_SERVER_ERROR", {}, INTERNAL_SERVER_ERROR)
+        with patch.dict(os.environ):
+            del os.environ["PRIVACY_DOCUMENT_VERSION"]
+            self.assert_contract(self.signup(), 500, "INTERNAL_SERVER_ERROR", {}, INTERNAL_SERVER_ERROR)
+        self.assertEqual(self.user_count(), 0)
 
     # Duplicates
 
@@ -414,7 +494,12 @@ class SignupTests(unittest.TestCase):
     def test_openapi_documents_the_contract(self):
         app = FastAPI()
         app.include_router(users.router)
-        paths = app.openapi()["paths"]
+        spec = app.openapi()
+        paths = spec["paths"]
+        schemas = spec["components"]["schemas"]
+        self.assertIn("privacy", schemas["SignupRequest"]["required"])
+        self.assertEqual(set(schemas["PrivacyInput"]["required"]), {"document_version", "age_14_plus_confirmed"})
+        self.assertFalse(schemas["PrivacyInput"]["additionalProperties"])
         self.assertEqual(set(paths["/users/"]["post"]["responses"]), {"200", "409", "422", "429", "500"})
         for path in ("/users/id-availability", "/users/nickname-availability"):
             self.assertEqual(set(paths[path]["get"]["responses"]), {"200", "422", "429", "500"})

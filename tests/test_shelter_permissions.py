@@ -16,9 +16,12 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from privacy_test_support import privacy, use_test_privacy_policy
+
 
 class ShelterPermissionTests(unittest.TestCase):
     def setUp(self):
+        use_test_privacy_policy(self)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         event.listen(self.engine, "connect", lambda connection, _: connection.execute("PRAGMA foreign_keys=ON"))
         Base.metadata.create_all(self.engine)
@@ -73,7 +76,7 @@ class ShelterPermissionTests(unittest.TestCase):
             response = self.client.post("/users/", json={"login_id": f"new{role}",
                                                         "nickname": f"새사용자_{role}",
                                                         "password": "A sufficiently long password 1!", "role": role,
-                                                        "shelter_id": 1})
+                                                        "shelter_id": 1, "privacy": privacy()})
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["data"]["role"], "user")
             self.assertIsNone(response.json()["data"]["shelter_id"])

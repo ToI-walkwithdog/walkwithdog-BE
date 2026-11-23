@@ -1,11 +1,15 @@
 """Sign-up persistence. Pre-checks give precise errors; unique indexes are the final guard."""
+from datetime import datetime, timezone
+
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api_contract import ContractError
 from app.auth import hash_password
-from app.models import User, UserRole
+from app.models import User, UserConsent, UserRole
+from app.privacy_policy import CONSENT_ACTION_AGREE, PrivacyInput, check_against_policy, current_privacy_policy
+from app.schemas import SignupUserData
 
 DUPLICATE_ERRORS = {
     "login_id": ("LOGIN_ID_ALREADY_EXISTS", "이미 사용 중인 아이디입니다."),
@@ -45,22 +49,39 @@ def conflicted_field(exc: IntegrityError) -> str | None:
     return None
 
 
-def register_user(db: Session, login_id: str, nickname: str, password: str) -> User:
-    """Insert one account in a single transaction; values are already normalized."""
+def register_user(db: Session, login_id: str, nickname: str, password: str, privacy: PrivacyInput) -> SignupUserData:
+    """Store the normalized account, age declaration and actual consents together."""
+    consent_types = check_against_policy(privacy, current_privacy_policy())
     values = {"login_id": login_id, "nickname": nickname}
-    taken = first_taken_field(db, values)
-    if taken:
-        raise duplicate_error(taken)
-    user = User(**values, password=hash_password(password), role=UserRole.USER, shelter_id=None)
-    db.add(user)
     try:
+        taken = first_taken_field(db, values)
+        if taken:
+            raise duplicate_error(taken)
+
+        password_hash = hash_password(password)
+        now = datetime.now(timezone.utc)
+        user = User(**values, password=password_hash, role=UserRole.USER, shelter_id=None,
+                    age_14_plus_confirmed_at=now)
+        db.add(user)
+        try:
+            db.flush()  # Assign the user ID and check the account's unique indexes.
+        except IntegrityError as exc:
+            field = conflicted_field(exc)
+            if field is None:
+                db.rollback()
+                field = first_taken_field(db, values)
+            if field is None:
+                raise
+            raise duplicate_error(field) from None
+
+        db.add_all([
+            UserConsent(user_id=user.id, consent_type=consent_type, document_version=privacy.document_version,
+                        action=CONSENT_ACTION_AGREE, recorded_at=now)
+            for consent_type in consent_types
+        ])
+        data = SignupUserData.model_validate(user, from_attributes=True)
         db.commit()
-    except IntegrityError as exc:
+    except Exception:
         db.rollback()
-        # A concurrent sign-up won the race. Report the field it actually took.
-        field = conflicted_field(exc) or first_taken_field(db, values)
-        if field is None:
-            raise
-        raise duplicate_error(field) from None
-    db.refresh(user)
-    return user
+        raise
+    return data

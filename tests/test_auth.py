@@ -16,6 +16,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from privacy_test_support import privacy, use_test_privacy_policy
+
 PASSWORD = "correct horse battery staple"
 # Sign-up enforces complexity; login (Issue #32 scope) does not re-check it.
 SIGNUP_PASSWORD = "Correct-Horse-Battery-9"
@@ -27,6 +29,7 @@ class AuthTests(unittest.TestCase):
         cls.password_hash = hash_password(PASSWORD)
 
     def setUp(self):
+        use_test_privacy_policy(self)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
@@ -72,7 +75,7 @@ class AuthTests(unittest.TestCase):
 
     def test_registration_without_email_hashes_password_and_logs_in_by_id(self):
         response = self.client.post("/users/", json={"login_id": "NewUser", "nickname": " new ",
-                                                    "password": SIGNUP_PASSWORD})
+                                                    "password": SIGNUP_PASSWORD, "privacy": privacy()})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn("password", response.json()["data"])
         self.assertNotIn("email", response.json()["data"])
@@ -86,7 +89,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.client.get("/users/me").json()["data"]["login_id"], "newuser")
 
     def test_duplicate_login_id_and_invalid_registration(self):
-        body = {"login_id": "newuser", "nickname": "new", "password": SIGNUP_PASSWORD}
+        body = {"login_id": "newuser", "nickname": "new", "password": SIGNUP_PASSWORD, "privacy": privacy()}
         self.assertEqual(self.client.post("/users/", json=body).status_code, 200)
         response = self.client.post("/users/", json={**body, "login_id": "NEWUSER", "nickname": "other"})
         self.assertEqual((response.status_code, response.json()["code"]), (409, "LOGIN_ID_ALREADY_EXISTS"))
@@ -306,7 +309,7 @@ class AuthTests(unittest.TestCase):
 
     def test_role_defaults_cannot_be_selected_during_registration(self):
         response = self.client.post("/users/", json={"login_id": "roleuser", "nickname": "role",
-                                                    "password": SIGNUP_PASSWORD, "role": "admin"})
+                                                    "password": SIGNUP_PASSWORD, "privacy": privacy(), "role": "admin"})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["data"]["role"], "user")
         with self.Session() as db:

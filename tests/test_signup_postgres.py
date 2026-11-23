@@ -1,4 +1,4 @@
-"""Sign-up uniqueness, concurrency and migrations 016 and 017 on real PostgreSQL.
+"""Sign-up uniqueness, consent atomicity, concurrency and migrations 016 to 018 on real PostgreSQL.
 
 SIGNUP_TEST_DATABASE_URL must name an EMPTY local toi_walk_test_* database.
 Each test works in its own new su_<uuid> schema and drops only that schema
@@ -21,7 +21,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app import signup_service
     from app.auth import UNUSABLE_PASSWORD, hash_password
     from app.database import Base, get_db
-    from app.models import User
+    from app.models import User, UserConsent
     from app.routers import auth, users
 
 from fastapi import FastAPI
@@ -30,6 +30,8 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
+from privacy_test_support import TEST_DOCUMENT_VERSION, privacy, use_test_privacy_policy
+
 from scripts.prepare_demo_db import PreparationError, validate_local_engine
 
 TEST_URL = os.getenv("SIGNUP_TEST_DATABASE_URL")
@@ -37,6 +39,7 @@ SCHEMA_NAME = re.compile(r"su_[0-9a-f]{32}")
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (ROOT / "migrations" / "016_onboarding_signup.sql").read_text(encoding="utf-8")
 EMAIL_REMOVAL = (ROOT / "migrations" / "017_remove_user_email.sql").read_text(encoding="utf-8")
+CONSENT_MIGRATION = (ROOT / "migrations" / "018_user_consents.sql").read_text(encoding="utf-8")
 # Real files a dev DB has applied to users and walk tables before 016, in order.
 # 014 (F-08) adds users.phone; 015 (F-09) needs walk_reviews from 007.
 DEV_CHAIN_BEFORE_016 = ("005_user_roles.sql", "006_user_shelters.sql", "007_walk_domain.sql",
@@ -77,6 +80,7 @@ class SignupPostgresTests(unittest.TestCase):
             cls.admin.dispose()
 
     def setUp(self):
+        use_test_privacy_policy(self)
         self.schema = "su_" + uuid4().hex
         with self.admin.begin() as connection:
             connection.exec_driver_sql(f'CREATE SCHEMA "{self.schema}"')
@@ -129,7 +133,7 @@ class SignupPostgresTests(unittest.TestCase):
 
     def body(self, suffix, **changes):
         return {"login_id": "user" + suffix.replace("_", ""), "nickname": f"nick_{suffix}",
-                "password": PASSWORD, **changes}
+                "password": PASSWORD, "privacy": privacy(), **changes}
 
     def count(self):
         with self.Session() as db:
@@ -267,6 +271,10 @@ class SignupPostgresTests(unittest.TestCase):
                 self.assertEqual((loser.status_code, loser.json()["code"], loser.json()["data"]),
                                  (409, code, {"field": field}))
                 self.assertEqual(self.count(), before + 1)
+                with self.Session() as db:
+                    record = db.query(UserConsent).filter_by(user_id=winner.json()["data"]["id"]).one()
+                    self.assertEqual(record.consent_type, "PRIVACY_COLLECTION_USE")
+                    self.assertEqual(db.query(UserConsent).count(), before + 1)
 
     def test_parallel_identical_signups_store_exactly_one_row(self):
         self.start_api()
@@ -287,6 +295,40 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual(statuses, [200] + [409] * (workers - 1))
         self.assertEqual({r.json()["code"] for r in responses if r.status_code == 409}, {"LOGIN_ID_ALREADY_EXISTS"})
         self.assertEqual(self.count(), 1)
+        winning_id = next(response.json()["data"]["id"] for response in responses if response.status_code == 200)
+        with self.Session() as db:
+            consent = db.query(UserConsent).one()
+            self.assertEqual((consent.user_id, consent.consent_type, consent.document_version),
+                             (winning_id, "PRIVACY_COLLECTION_USE", TEST_DOCUMENT_VERSION))
+
+    def test_consent_insert_failure_rolls_back_account_and_all_consents(self):
+        self.start_api()
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE user_consents ADD CONSTRAINT test_reject_one_consent "
+                "CHECK (consent_type <> 'PRIVACY_COLLECTION_USE')"
+            )
+        body = self.body("atomic", privacy=privacy(ai_overseas_transfer_agreed=True))
+        response = self.client.post("/users/", json=body)
+        self.assertEqual((response.status_code, response.json()["code"], response.json()["data"]),
+                         (500, "INTERNAL_SERVER_ERROR", {}))
+        with self.Session() as db:
+            self.assertEqual(db.query(User).count(), 0)
+            self.assertEqual(db.query(UserConsent).count(), 0)
+
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("ALTER TABLE user_consents DROP CONSTRAINT test_reject_one_consent")
+        retry = self.client.post("/users/", json=body)
+        self.assertEqual(retry.status_code, 200, retry.text)
+        with self.Session() as db:
+            account = db.get(User, retry.json()["data"]["id"])
+            self.assertIsNotNone(account.age_14_plus_confirmed_at.utcoffset())
+            records = db.query(UserConsent).all()
+            self.assertEqual({rec.consent_type for rec in records}, {"PRIVACY_COLLECTION_USE", "AI_OVERSEAS_TRANSFER"})
+            self.assertEqual(len(records), 2)
+            for record in records:
+                self.assertEqual((record.user_id, record.document_version, record.action, record.recorded_at),
+                                 (account.id, TEST_DOCUMENT_VERSION, "AGREE", account.age_14_plus_confirmed_at))
 
     # Migration 016
 
@@ -367,6 +409,7 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
         # The current code no longer writes email, so it ships with 017 (same deployment).
         self.run_sql_file(EMAIL_REMOVAL)
+        self.run_sql_file(CONSENT_MIGRATION)
         snapshot = self.schema_snapshot()
         # The ORM and sign-up API work on the migrated tables with no create_all().
         self.start_api(create_schema=False)
@@ -455,7 +498,8 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual(self.user_rows(), before_rows)
         self.run_sql_file(EMAIL_REMOVAL)  # re-running is a no-op
         self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
-        # The new code runs on this schema without create_all(): every role logs in by ID.
+        # The current code requires the consent schema on all user lookups.
+        self.run_sql_file(CONSENT_MIGRATION)
         self.start_api(create_schema=False)
         for identifier, user_id, role in (("walker_one", 1, "user"), ("Shelter01", 2, "shelter"),
                                           (" ADMIN01 ", 3, "admin")):
@@ -474,6 +518,44 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual((clash.status_code, clash.json()["code"]), (409, "LOGIN_ID_ALREADY_EXISTS"))
         new_login = self.client.post("/auth/login", json={"identifier": "newwalker", "password": PASSWORD})
         self.assertEqual(new_login.status_code, 200, new_login.text)
+
+    def test_migration_018_preserves_existing_accounts_and_adds_consent_history(self):
+        self.migrate_dev_chain_through_016_with_accounts()
+        self.run_sql_file(EMAIL_REMOVAL)
+        original_accounts = self.user_rows()
+        before = self.schema_snapshot()
+        self.run_sql_file(CONSENT_MIGRATION)
+        self.assertEqual(self.user_rows(), original_accounts)
+        tables, indexes, constraints = self.schema_snapshot()
+        self.assertEqual(tables["users"], sorted(before[0]["users"] + [
+            ("age_14_plus_confirmed_at", "TIMESTAMP", True),
+        ]))
+        self.assertEqual({k: v for k, v in tables.items() if k not in ("users", "user_consents")},
+                         {k: v for k, v in before[0].items() if k != "users"})
+        self.assertEqual([i for i in indexes if i[0] != "user_consents"], before[1])
+        self.assertEqual([c for c in constraints if c[0] != "user_consents"], before[2])
+        with self.engine.connect() as connection:
+            inspector = inspect(connection)
+            self.assertTrue(next(col["type"].timezone for col in inspector.get_columns("users")
+                                 if col["name"] == "age_14_plus_confirmed_at"))
+            self.assertEqual(inspector.get_pk_constraint("user_consents")["constrained_columns"], ["id"])
+            fk, = inspector.get_foreign_keys("user_consents")
+            self.assertEqual((fk["constrained_columns"], fk["referred_table"]), (["user_id"], "users"))
+            idx, = inspector.get_indexes("user_consents")
+            self.assertEqual(idx["column_names"], ["user_id", "consent_type", "recorded_at"])
+            self.assertEqual(connection.execute(text(
+                "SELECT count(*) FROM users WHERE age_14_plus_confirmed_at IS NULL")).scalar_one(), 3)
+            self.assertEqual(connection.execute(text("SELECT count(*) FROM user_consents")).scalar_one(), 0)
+
+        self.start_api(create_schema=False)
+        response = self.client.post("/users/", json=self.body("consent"))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.run_sql_file(CONSENT_MIGRATION)
+        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        with self.Session() as db:
+            record = db.query(UserConsent).one()
+            self.assertEqual(record.user_id, response.json()["data"]["id"])
+            self.assertEqual(record.document_version, TEST_DOCUMENT_VERSION)
 
     def test_migration_017_aborts_without_changes_before_016(self):
         self.create_dev_schema_before_016()

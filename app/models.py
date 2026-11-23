@@ -1,6 +1,7 @@
 import enum
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, UniqueConstraint, Boolean, Enum, Date, Time, Index
+from sqlalchemy import (BigInteger, CheckConstraint, Column, Integer, String, Text, DateTime, ForeignKey, JSON,
+                        UniqueConstraint, Boolean, Enum, Date, Time, Index)
 from sqlalchemy.sql import func
 from app.database import Base
 from sqlalchemy.orm import relationship
@@ -24,6 +25,10 @@ class User(Base):
     # Existing accounts remain unassigned until an administrator chooses a shelter.
     shelter_id = Column(Integer, ForeignKey("shelters.id", name="fk_users_shelter_id"), nullable=True, index=True)
     phone = Column(String(50), nullable=True)
+    # Sign-up self-declaration "만 14세 이상" (Issue #31), server time. Not an age check:
+    # the birth date is validated later in onboarding Step 1. NULL for accounts made
+    # before #31; never back-filled.
+    age_14_plus_confirmed_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -36,6 +41,26 @@ class User(Base):
 # app.signup_service maps these names to the conflicting field (migrations 016, 017).
 Index("uq_users_login_id_lower", func.lower(User.login_id), unique=True)
 Index("uq_users_nickname_lower", func.lower(User.nickname), unique=True)
+
+
+class UserConsent(Base):
+    """Consent history (Issue #31, migration 018). Sign-up writes AGREE rows only for
+    active items the user agreed to, in the same transaction as the account."""
+    __tablename__ = "user_consents"
+    __table_args__ = (
+        CheckConstraint("consent_type IN ('PRIVACY_COLLECTION_USE', 'AI_OVERSEAS_TRANSFER')",
+                        name="ck_user_consents_consent_type"),
+        CheckConstraint("action IN ('AGREE', 'WITHDRAW')", name="ck_user_consents_action"),
+        Index("ix_user_consents_user_type_recorded", "user_id", "consent_type", "recorded_at"),
+    )
+
+    # BIGINT on PostgreSQL; SQLite only autoincrements INTEGER primary keys.
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", name="fk_user_consents_user_id"), nullable=False)
+    consent_type = Column(String(40), nullable=False)
+    document_version = Column(String(32), nullable=False)
+    action = Column(String(16), nullable=False)
+    recorded_at = Column(DateTime(timezone=True), nullable=False)
 
 
 class SessionToken(Base):
