@@ -65,8 +65,8 @@ class RateLimitApiTests(unittest.TestCase):
 
     def signup(self, client=None, **changes):
         self.sequence += 1
-        body = {"login_id": f"walker_{self.sequence}", "nickname": f"nick_{self.sequence}",
-                "email": f"walker{self.sequence}@example.com", "password": PASSWORD, **changes}
+        body = {"login_id": f"walker{self.sequence}", "nickname": f"nick_{self.sequence}",
+                "password": PASSWORD, **changes}
         return (client or self.client).post("/users/", json=body)
 
     def check(self, path, client=None, value="walker04"):
@@ -141,7 +141,7 @@ class RateLimitApiTests(unittest.TestCase):
 
     def test_id_and_nickname_checks_share_one_budget(self):
         for index in range(30):
-            self.assertEqual(self.check(ID if index % 2 else NICK, value=f"value_{index}").status_code, 200)
+            self.assertEqual(self.check(ID if index % 2 else NICK, value=f"value{index}").status_code, 200)
         self.clock.now += 15
         self.assert_limited(self.check(ID), 45)
         self.assert_limited(self.check(NICK), 45)
@@ -168,8 +168,8 @@ class RateLimitApiTests(unittest.TestCase):
         # A spoofed header from a direct client neither changes its bucket nor frees it.
         for header in ("203.0.113.50", "10.0.0.1, 203.0.113.51"):
             response = self.client.post("/users/", headers={"X-Forwarded-For": header, "X-Real-IP": header},
-                                        json={"login_id": "spoof_id", "nickname": "spoof_nick",
-                                              "email": "spoof@example.com", "password": PASSWORD})
+                                        json={"login_id": "spoofid", "nickname": "spoof_nick",
+                                              "password": PASSWORD})
             self.assert_limited(response, 600)
         self.assertEqual(self.signup(client=other).status_code, 200)
 
@@ -177,7 +177,7 @@ class RateLimitApiTests(unittest.TestCase):
         for _ in range(40):
             self.check(ID)
         self.assertEqual(self.client.get("/users/me").status_code, 401)
-        self.assertEqual(self.client.post("/auth/login", json={"email": "a@example.com", "password": "x"}).status_code, 401)
+        self.assertEqual(self.client.post("/auth/login", json={"identifier": "nobody", "password": "x"}).status_code, 401)
 
     # Concurrency and failures
 
@@ -187,7 +187,7 @@ class RateLimitApiTests(unittest.TestCase):
 
         def request(index):
             barrier.wait(10)
-            return self.check(ID if index % 2 else NICK, value=f"value_{index}").status_code
+            return self.check(ID if index % 2 else NICK, value=f"value{index}").status_code
 
         # The fixture's single shared SQLite connection is not safe for 45 threads, so
         # stub the lookup: this test is about the limiter, not the database.
@@ -258,11 +258,11 @@ class ProductionWiringTests(unittest.TestCase):
 
     def test_real_signup_limiter_returns_429_with_real_clock(self):
         for index in range(5):
-            response = self.client.post("/users/", json={"login_id": f"real_{index}", "nickname": f"real_{index}",
-                                                         "email": f"real{index}@example.com", "password": PASSWORD})
+            response = self.client.post("/users/", json={"login_id": f"real{index}", "nickname": f"real_{index}",
+                                                         "password": PASSWORD})
             self.assertEqual(response.status_code, 200, response.text)
-        response = self.client.post("/users/", json={"login_id": "real_6", "nickname": "real_6",
-                                                     "email": "real6@example.com", "password": PASSWORD})
+        response = self.client.post("/users/", json={"login_id": "real6", "nickname": "real_6",
+                                                     "password": PASSWORD})
         self.assertEqual(response.status_code, 429)
         retry_after = response.json()["data"]["retry_after_seconds"]
         self.assertTrue(590 <= retry_after <= 600, retry_after)

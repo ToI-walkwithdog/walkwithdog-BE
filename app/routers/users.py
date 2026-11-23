@@ -36,10 +36,10 @@ ERROR_RESPONSES = {
 
 
 @onboarding.post("/", response_model=SignupResponse, dependencies=[Depends(SIGNUP_RATE_LIMITER)],
-                 responses={409: {"model": ContractErrorResponse, "description": "아이디, 닉네임, 이메일 중복"},
+                 responses={409: {"model": ContractErrorResponse, "description": "아이디, 닉네임 중복"},
                             **ERROR_RESPONSES})
 def create_user(payload: SignupRequest, db: Session = Depends(get_db)):
-    user = register_user(db, payload.login_id, payload.nickname, payload.email, payload.password)
+    user = register_user(db, payload.login_id, payload.nickname, payload.password)
     data = SignupUserData.model_validate(user, from_attributes=True).model_dump(mode="json")
     return ok(data, "회원가입이 완료되었습니다.")
 

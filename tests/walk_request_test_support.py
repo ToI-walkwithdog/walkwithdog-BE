@@ -50,7 +50,7 @@ class RequestFixture:
                 (3, UserRole.SHELTER, 1), (4, UserRole.SHELTER, 2),
                 (5, UserRole.ADMIN, None), (6, UserRole.USER, None), (7, UserRole.SHELTER, None),
             ):
-                db.add(User(id=identifier, login_id=f"req_user_{identifier}", email=f"req-{identifier}@example.com",
+                db.add(User(id=identifier, login_id=f"req_user_{identifier}",
                             nickname=f"사용자{identifier}", password=UNUSABLE_PASSWORD, role=role, shelter_id=shelter_id))
             for identifier in range(1, 10):
                 db.add(Dog(id=identifier, name=f"강아지{identifier}",

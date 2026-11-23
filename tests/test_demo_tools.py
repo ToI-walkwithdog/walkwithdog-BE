@@ -10,7 +10,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.auth import UNUSABLE_PASSWORD
     from app.models import User, Shelter, Dog, Survey, MatchingResult
     from app.routers import surveys, matching
-    from scripts.seed_demo import seed, EMAIL, SHELTER_KEY
+    from scripts.seed_demo import seed, LOGIN_ID, SHELTER_KEY
 
 import httpx
 from fastapi import FastAPI
@@ -80,20 +80,20 @@ class DemoToolTests(unittest.TestCase):
 
     def test_existing_records_are_untouched(self):
         with self.Session.begin() as db:
-            db.add(User(email="existing@example.com", login_id="existing_user", nickname="기존 사용자", password="unchanged"))
+            db.add(User(login_id="existing_user", nickname="기존 사용자", password="unchanged"))
             db.add(Shelter(name="기존 보호소"))
             db.add(Dog(name="기존 강아지", energy_level=5))
         result = self.seed()
         self.assertEqual(self.counts(), (2, 2, 7, 0, 0))
         with self.Session() as db:
-            user = db.query(User).filter(User.email == "existing@example.com").one()
+            user = db.query(User).filter(User.login_id == "existing_user").one()
             self.assertEqual(user.password, "unchanged")
             self.assertNotEqual(user.id, result["user_id"])
             self.assertEqual(db.query(Dog).filter(Dog.name == "기존 강아지").one().energy_level, 5)
 
     def test_user_key_collision_aborts(self):
         with self.Session.begin() as db:
-            db.add(User(email=EMAIL, login_id="other_user", nickname="다른 사용자", password=UNUSABLE_PASSWORD))
+            db.add(User(login_id=LOGIN_ID, nickname="다른 사용자", password=UNUSABLE_PASSWORD))
         with self.assertRaises(ValueError):
             self.seed()
         self.assertEqual(self.counts(), (1, 0, 0, 0, 0))
@@ -146,7 +146,7 @@ class DemoToolTests(unittest.TestCase):
 
     def test_demo_fails_without_dogs(self):
         with self.Session.begin() as db:
-            user = User(email="no-dogs@example.invalid", login_id="no_dogs", nickname="테스트", password=UNUSABLE_PASSWORD)
+            user = User(login_id="no_dogs", nickname="테스트", password=UNUSABLE_PASSWORD)
             db.add(user)
             db.flush()
             user_id = user.id

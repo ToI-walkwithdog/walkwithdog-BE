@@ -47,14 +47,14 @@ def verify(live_ai=False):
                 accounts = []
                 for _ in range(2):
                     suffix = secrets.token_hex(6)
-                    email = f"auth-verify-{suffix}@example.com"
-                    response = client.post("/users/", json={"login_id": f"verify_{suffix}", "nickname": f"VERIFY_{suffix}",
-                                                            "email": email, "password": password})
+                    login_id = f"verify{suffix}"
+                    response = client.post("/users/", json={"login_id": login_id, "nickname": f"VERIFY_{suffix}",
+                                                            "password": password})
                     assert response.status_code == 200, "registration failed"
-                    accounts.append((email, response.json()["data"]["id"]))
-                response = client.post("/auth/login", json={"email": accounts[0][0], "password": password})
+                    accounts.append((login_id, response.json()["data"]["id"]))
+                response = client.post("/auth/login", json={"identifier": accounts[0][0], "password": password})
                 assert response.status_code == 200, "login failed"
-                client.headers["Authorization"] = "Bearer " + response.json()["access_token"]
+                client.headers["Authorization"] = "Bearer " + response.json()["data"]["access_token"]
                 assert client.get("/users/me").json()["id"] == accounts[0][1]
                 assert client.get(f"/users/{accounts[1][1]}").status_code == 403
                 assert client.post("/surveys/", json={"user_id": accounts[1][1]}).status_code == 403

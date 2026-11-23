@@ -8,16 +8,15 @@ import re
 import string
 import unicodedata
 
-from email_validator import EmailNotValidError, validate_email
-
 from app.api_contract import REQUIRED_FIELD_MESSAGE, ContractError
 
 LOGIN_ID_MIN_LENGTH, LOGIN_ID_MAX_LENGTH = 4, 20
 NICKNAME_MIN_LENGTH, NICKNAME_MAX_LENGTH = 3, 20
-EMAIL_MAX_LENGTH = 100
+LOGIN_IDENTIFIER_MAX_LENGTH = 100
 PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH = 15, 128
 
-LOGIN_ID_PATTERN = re.compile(r"[a-z0-9_]+")
+# Checked after ASCII lowercasing, so this equals the client rule ^[A-Za-z0-9]{4,20}$.
+LOGIN_ID_PATTERN = re.compile(r"[a-z0-9]+")
 NICKNAME_PATTERN = re.compile(r"[가-힣A-Za-z0-9_]+")
 PASSWORD_SPECIAL_CHARACTERS = frozenset(string.punctuation)
 
@@ -26,13 +25,15 @@ def invalid(code, message, data):
     return ContractError(422, code, message, data)
 
 
-# Availability checks use their own *_REQUIRED codes; sign-up uses REQUIRED_FIELD.
+# Availability checks and login use their own *_REQUIRED codes; sign-up uses REQUIRED_FIELD.
 REQUIRED_MESSAGES = {"LOGIN_ID_REQUIRED": "아이디를 입력해 주세요.",
-                     "NICKNAME_REQUIRED": "닉네임을 입력해 주세요."}
+                     "NICKNAME_REQUIRED": "닉네임을 입력해 주세요.",
+                     "IDENTIFIER_REQUIRED": "아이디를 입력해 주세요.",
+                     "PASSWORD_REQUIRED": "비밀번호를 입력해 주세요."}
 
 # Same rule, different wording: sign-up explains the allowed characters, while the
 # availability check only says the value contains a disallowed one.
-SIGNUP_LOGIN_ID_FORMAT_MESSAGE = "아이디에는 영문 소문자, 숫자, 밑줄만 사용할 수 있습니다."
+SIGNUP_LOGIN_ID_FORMAT_MESSAGE = "아이디에는 영문과 숫자만 사용할 수 있습니다."
 AVAILABILITY_LOGIN_ID_FORMAT_MESSAGE = "아이디에 사용할 수 없는 문자가 포함되어 있습니다."
 
 
@@ -60,6 +61,25 @@ def normalize_login_id(value, required_code="REQUIRED_FIELD", format_message=SIG
     return value
 
 
+def normalize_login_identifier(value):
+    """Login lookup key: the same trim and ASCII lowercasing as sign-up.
+
+    Sign-up length and character rules are not applied, so accounts whose IDs
+    predate the current rule can still log in. Unknown values fail as 401 later.
+    """
+    value = required_text(value, "identifier", "IDENTIFIER_REQUIRED").strip()
+    if value.isascii():
+        value = value.lower()
+    if len(value) > LOGIN_IDENTIFIER_MAX_LENGTH:
+        raise invalid("INVALID_IDENTIFIER_FORMAT", "아이디 형식을 확인해 주세요.", {"field": "identifier"})
+    return value
+
+
+def require_login_password(value):
+    """Return the password unchanged; login does not re-apply sign-up complexity rules."""
+    return required_text(value, "password", "PASSWORD_REQUIRED")
+
+
 def normalize_nickname(value, required_code="REQUIRED_FIELD"):
     value = required_text(value, "nickname", required_code)
     value = unicodedata.normalize("NFC", value).strip()
@@ -69,20 +89,6 @@ def normalize_nickname(value, required_code="REQUIRED_FIELD"):
         raise invalid("INVALID_NICKNAME_FORMAT", "닉네임에 사용할 수 없는 문자가 포함되어 있습니다.",
                       {"field": "nickname"})
     return value
-
-
-def normalize_email(value):
-    value = required_text(value, "email", "REQUIRED_FIELD").strip()
-    error = invalid("INVALID_EMAIL", "올바른 이메일을 입력해 주세요.", {"field": "email"})
-    if len(value) > EMAIL_MAX_LENGTH:
-        raise error
-    try:
-        normalized = validate_email(value, check_deliverability=False).normalized.lower()
-    except EmailNotValidError:
-        raise error from None
-    if len(normalized) > EMAIL_MAX_LENGTH:
-        raise error
-    return normalized
 
 
 PASSWORD_RULES = (

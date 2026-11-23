@@ -149,7 +149,7 @@ class MatchingAPITests(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1)
         self.client = TestClient(app)
         with self.Session() as db:
-            db.add(User(id=1, login_id="test_user", email="test@example.com", nickname="테스트", password=UNUSABLE_PASSWORD))
+            db.add(User(id=1, login_id="test_user", nickname="테스트", password=UNUSABLE_PASSWORD))
             db.add(Shelter(id=1, name="테스트 보호소", phone="02-123-4567", address="서울"))
             db.commit()
             for index in range(1, 8):

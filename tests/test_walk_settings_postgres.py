@@ -60,7 +60,7 @@ class WalkSettingsPostgresTests(unittest.TestCase):
             db.add_all([own, other])
             db.flush()
             self.shelter_id, self.other_shelter_id = own.id, other.id
-            staff = User(email=f"{token}@example.com", login_id=f"staff_{token[:12]}", nickname=f"담당_{token[:8]}", password=UNUSABLE_PASSWORD, role=UserRole.SHELTER, shelter_id=own.id)
+            staff = User(login_id=f"staff_{token[:12]}", nickname=f"담당_{token[:8]}", password=UNUSABLE_PASSWORD, role=UserRole.SHELTER, shelter_id=own.id)
             db.add(staff)
             dog = Dog(name="테스트 강아지", shelter_id=own.id, energy_level=2)
             db.add(dog)

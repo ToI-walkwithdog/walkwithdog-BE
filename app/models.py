@@ -15,10 +15,9 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    # Sign-up stores login_id and email lowercased and nickname NFC-trimmed.
+    # Sign-up stores login_id lowercased and nickname NFC-trimmed. Email is not collected.
     # Case-insensitive uniqueness comes from the lower() indexes below the class.
     login_id = Column(String(20), nullable=False)
-    email = Column(String(100), unique=True, nullable=False)
     nickname = Column(String(20), nullable=False)
     password = Column(String(255), nullable=False)
     role = Column(Enum(UserRole), default=UserRole.USER, server_default="USER", nullable=False)
@@ -34,10 +33,9 @@ class User(Base):
     walk_incidents = relationship("WalkIncident", foreign_keys="WalkIncident.reported_by", back_populates="reporter", passive_deletes="all")
 
 
-# app.signup_service maps these names to the conflicting field (migration 016).
+# app.signup_service maps these names to the conflicting field (migrations 016, 017).
 Index("uq_users_login_id_lower", func.lower(User.login_id), unique=True)
 Index("uq_users_nickname_lower", func.lower(User.nickname), unique=True)
-Index("uq_users_email_lower", func.lower(User.email), unique=True)
 
 
 class SessionToken(Base):
