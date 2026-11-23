@@ -27,7 +27,7 @@
 | `app/routers/onboarding_basic.py` | API 4개 |
 | `app/pledge_service.py`, `app/routers/users.py` | #33 서약의 상태 검증 연결 |
 | `app/models.py`, `app/main.py` | 모델 3개와 `users` 컬럼 2개, 라우터 등록 |
-| `migrations/020_onboarding_basic_info.sql` | 컬럼 2개, 테이블 3개 |
+| `migrations/024_onboarding_basic_info.sql` | 컬럼 2개, 테이블 3개 |
 | `scripts/purge_phone_verifications.py` | 인증 기록 정리 수동 실행(기본 dry-run) |
 | `.env.example` | 설정 이름(값 없음) |
 | `tests/test_onboarding_basic_info.py`, `tests/test_pledge.py`, `tests/test_signup_postgres.py` | 테스트 |
@@ -59,7 +59,7 @@
 
 ## 5. DB와 마이그레이션
 
-`migrations/020_onboarding_basic_info.sql` (한 트랜잭션, 재실행 시 변경 없음, 되돌리는 SQL은 파일 주석)
+`migrations/024_onboarding_basic_info.sql` (한 트랜잭션, 재실행 시 변경 없음, 되돌리는 SQL은 파일 주석)
 
 - `users.account_status VARCHAR(24) NOT NULL DEFAULT 'ACTIVE'`, CHECK `ck_users_account_status`(`ACTIVE`, `AGE_REVIEW_REQUIRED`). 기존 행은 기본값으로 `ACTIVE`가 된다(PostgreSQL 11 이상에서 메타데이터 변경).
 - `users.age_review_required_at TIMESTAMPTZ`: 처음 연령 확인 필요 상태가 된 시각. #41 정정 성공 시 `NULL`
@@ -154,8 +154,8 @@
 
 - 실패 2건은 선행 브랜치에서도 실패하는 `test_walk_settings_api.py::test_invalid_scalar_types_and_unknown_fields_are_422`다. 건너뛴 82건은 각자 빈 DB가 필요한 산책 PostgreSQL 테스트로 실행하지 않았다.
 - SQLite: 서약 전 4개 API 409와 무발송, 역할 403, 401, 정상 흐름과 조회, 번호 형식, 300초, 60초, 15분, 실패 5회, 성공 재확인, 타인 요청 404, 일일 5회와 KST 자정, 번호별 한도, 공급자 실패, 시간 초과 `UNKNOWN`과 조회 확정, 연결 오류, 공급자와 HMAC 키 미설정, Mock 운영 차단, 만 14세와 120세 경계, 2월 29일, 미만 계정 상태 전환과 서약 유지, 상태 전환 후 4개 API와 서약 403, 저장 실패 롤백, 정리 함수, 로그에 번호와 인증번호 없음
-- PostgreSQL: 020 적용과 재실행, 기존 계정과 `users.phone` 유지, 같은 계정 동시 발송 6건 중 1건 발송, 같은 번호 동시 발송 한도, 두 계정 같은 번호 동시 저장 1건 성공, 같은 계정 동시 저장 1행, 서약 공유 잠금 중 상태 전환 대기, 상태 전환 후 서약 403과 기록 없음
-- 기존 016~019 마이그레이션 테스트는 새 코드를 띄우기 전에 020까지 적용하도록 바꿨다(새 코드가 `users.account_status`를 읽음).
+- PostgreSQL: 024 적용과 재실행, 기존 계정과 `users.phone` 유지, 같은 계정 동시 발송 6건 중 1건 발송, 같은 번호 동시 발송 한도, 두 계정 같은 번호 동시 저장 1건 성공, 같은 계정 동시 저장 1행, 서약 공유 잠금 중 상태 전환 대기, 상태 전환 후 서약 403과 기록 없음
+- 기존 016~019 마이그레이션 테스트는 단계별 검증을 마친 뒤 새 코드를 띄우기 전에 023과 024를 적용한다(새 코드가 `users.account_status`를 읽음).
 - 미실행: **실제 SOLAPI 발송과 단말 수신 E2E**, 개발 DB 검증, FE 실연동
 
 ## 12. FE 연동
@@ -192,10 +192,10 @@
 
 ## 15. 개발 DB와 배포 대기
 
-- 020은 016~019 다음에 적용한다. 실제 개발 DB 적용 여부는 확인하지 못했다. 적용은 승인 후 진행한다.
-- 이 브랜치 이후 코드는 모든 사용자 조회에서 `users.account_status`를 읽는다. 020 적용 전에는 로그인도 실패하므로 API를 멈추고 016~020을 적용한 뒤 새 코드를 띄운다.
+- 024는 023 서약 다음에 적용한다. 실제 개발 DB 적용 여부는 확인하지 못했다. 적용은 승인 후 진행한다.
+- 이 브랜치 이후 코드는 모든 사용자 조회에서 `users.account_status`를 읽는다. 024 적용 전에는 로그인도 실패하므로 019 첫 산책 가이드를 포함해 manifest의 정식 순서에 따라 024까지 적용한 뒤 새 코드를 띄운다.
 - 운영 설정: `PHONE_VERIFICATION_HMAC_KEY`, `SMS_PROVIDER`, `APP_ENV`, SOLAPI 키 3종. 값은 문서에 남기지 않는다.
-- 마이그레이션 번호: `origin/dev`에 `017_f10_behavior_marker.sql`, `018_f11_walk_overtime.sql`이 들어와 017, 018 번호가 각각 두 파일이다. 020 자체는 `dev`와 겹치지 않지만, 온보딩 파일 전체의 번호 정리가 병합 전 과제로 남아 있다. 이 문서 작성 시점에 파일 이름과 SQL은 바꾸지 않았다.
+- 기본 정보 SQL을 024로 배정했다. 기존 017, 018 예외와 020 보호소 평가 파일은 보존했다.
 
 ## 16. 후속 Issue와 의존 관계
 
