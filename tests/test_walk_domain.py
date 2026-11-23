@@ -46,12 +46,12 @@ class WalkMetadataTests(unittest.TestCase):
             "rejection_reason_code", "last_latitude", "last_longitude",
             "last_accuracy_m", "last_point_recorded_at", "last_point_received_at",
             "end_reason", "client_report_id", "acknowledged_at", "acknowledged_by",
-            "rating", "comment",
+            "rating", "comment", "location_source",
         }
         post_007_constraints = {n for n in motion["constraints"]} | {
             "ck_walk_last_coordinate_pair", "ck_walk_last_latitude", "ck_walk_last_longitude",
             "ck_walk_last_accuracy", "ck_walk_end_reason", "ck_incident_acknowledgement",
-            "ck_walk_review_rating",
+            "ck_walk_review_rating", "ck_location_source", "ck_marker_other_memo",
         }
         post_007_indexes = {
             "uq_walk_incidents_reported_client_report_id", "ix_walk_incidents_unacknowledged",
@@ -68,6 +68,8 @@ class WalkMetadataTests(unittest.TestCase):
                     ddl = ddl.replace(", 'INTERMEDIATE'", "")
                 for new_type in ("POOP_NO_BAG", "ATE_FOREIGN_OBJECT", "ABNORMAL_BEHAVIOR"):
                     ddl = ddl.replace(f", '{new_type}'", "")
+                # F-10 (017): marker types CROSSWALK_WAIT/OTHER; OTHER also exists in the 007 incident types
+                ddl = ddl.replace(", 'CROSSWALK_WAIT', 'OTHER'", "")
                 if "rating IS NOT NULL OR " in ddl:
                     ddl = ddl.replace("rating IS NOT NULL OR ", "")
                 # Clean up any trailing comma before closing parenthesis
@@ -104,6 +106,9 @@ class WalkMetadataTests(unittest.TestCase):
                     {"name": "comment", "type": "character varying(100)", "not_null": False, "default": None},
                 ])
                 snapshot["constraints"].update({"ck_walk_review_rating": None})
+            if table.name == "walk_markers":
+                snapshot["columns"].append({"name": "location_source", "type": "character varying(12)", "not_null": True, "default": "'CURRENT'::character varying"})
+                snapshot["constraints"].update({"ck_location_source": None, "ck_marker_other_memo": None})
             if table.name == "walk_incidents":
                 snapshot["columns"].extend([
                     {"name": "client_report_id", "type": "character varying(36)", "not_null": False, "default": None},

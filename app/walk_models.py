@@ -190,7 +190,9 @@ class WalkMarker(Base):
     __tablename__ = "walk_markers"
     __table_args__ = (
         *coordinates(),
-        choices("marker_type", "SNIFF POOP DOG_ENCOUNTER PERSON_ENCOUNTER BARKING"),
+        choices("marker_type", "SNIFF POOP DOG_ENCOUNTER PERSON_ENCOUNTER BARKING CROSSWALK_WAIT OTHER"),
+        choices("location_source", "CURRENT LAST_KNOWN"),
+        CheckConstraint("marker_type <> 'OTHER' OR (memo IS NOT NULL AND trim(memo) <> '')", name="ck_marker_other_memo"),
         Index("ix_walk_markers_time", "walk_id", "recorded_at"),
     )
 
@@ -201,6 +203,7 @@ class WalkMarker(Base):
     longitude = Column(Numeric(9, 6), nullable=False)
     recorded_at = Column(DateTime(timezone=True), nullable=False)
     memo = Column(Text, nullable=True)
+    location_source = Column(String(12), nullable=False, default="CURRENT", server_default="CURRENT")
 
     walk = relationship("Walk", back_populates="markers")
 
