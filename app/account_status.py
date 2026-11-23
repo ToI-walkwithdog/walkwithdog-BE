@@ -24,10 +24,14 @@ def age_review_required() -> ContractError:
     return ContractError(403, "AGE_REVIEW_REQUIRED", AGE_REVIEW_REQUIRED_MESSAGE)
 
 
+def is_active(user: User) -> bool:
+    return user.account_status == ACCOUNT_ACTIVE
+
+
 def ensure_active(user: User) -> None:
     """403 AGE_REVIEW_REQUIRED unless ACTIVE. A request-start check alone is not enough:
     call it again on the row returned by lock_user() in the writing transaction."""
-    if user.account_status != ACCOUNT_ACTIVE:
+    if not is_active(user):
         raise age_review_required()
 
 

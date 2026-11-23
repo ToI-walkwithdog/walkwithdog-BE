@@ -25,6 +25,7 @@ Number counters (PHONE scope) are kept: they hold only an HMAC of a number, limi
 abuse per number, and are removed by the daily purge after two days.
 """
 from datetime import date, datetime
+import logging
 import os
 
 from sqlalchemy import or_
@@ -37,6 +38,8 @@ from app.models import (AuthSession, ChatSession, MatchingResult, PhoneVerificat
                         SessionToken, Survey, User, UserConsent, UserPledgeAcknowledgement, VolunteerOnboardingBasic)
 from app.onboarding_common import age_years, first_incomplete_step, kst_date, step1_completed
 from app.walk_models import VolunteerProfile, WalkIncident, WalkRequest
+
+logger = logging.getLogger(__name__)
 
 MINIMUM_AGE, MAXIMUM_AGE = 14, 120
 RECORD_POLICY_DELETE = "delete"
@@ -126,9 +129,13 @@ def delete_account(db: Session, user_id: int) -> None:
             raise contract_unauthorized("USER_NOT_FOUND")
         if user.account_status != ACCOUNT_AGE_REVIEW_REQUIRED:
             raise exit_not_required()
+        # Both refusals share the contract code (Notion). The log keeps them apart for
+        # operations; it names only the reason, never the account.
         if has_retained_activity(db, user_id):
+            logger.info("account exit refused: activity records")
             raise retained_activity()
         if has_policy_pending_records(db, user_id) and not record_deletion_enabled():
+            logger.info("account exit refused: consent or pledge retention policy pending")
             raise retained_activity()
         # Rows of other tables first, in FK order; users last. Sessions are deleted
         # after the users lock, so a login racing this request either committed its

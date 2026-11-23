@@ -8,6 +8,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.account_status import AGE_REVIEW_REQUIRED_MESSAGE, is_active
 from app.api_contract import ContractError
 from app.database import get_db
 from app.models import AuthSession, User
@@ -95,9 +96,18 @@ def get_current_session(credentials: HTTPAuthorizationCredentials = Depends(bear
 
 
 def get_current_user(session=Depends(get_current_session), db: Session = Depends(get_db)):
+    """User for the `detail`-format APIs (walks, chat, surveys, matching, shelters, admin).
+
+    An AGE_REVIEW_REQUIRED account gets 403 here in the existing `detail` format
+    (Issue #41). The routes it may still use (login, logout, GET /users/me, age
+    review correction and exit) use the contract dependencies below, not this one.
+    Shelter and admin accounts are always ACTIVE, so they are unaffected.
+    """
     user = db.get(User, session.user_id)
     if user is None:
         raise unauthorized()
+    if not is_active(user):
+        raise HTTPException(403, AGE_REVIEW_REQUIRED_MESSAGE)
     return user
 
 
