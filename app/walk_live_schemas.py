@@ -11,7 +11,7 @@ class LiveWalkUTCModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     @field_validator(
-        "started_at", "scheduled_end_at", "last_location_at",
+        "started_at", "scheduled_end_at", "expected_end_at", "last_location_at",
         "occurred_at", "recorded_at",
         check_fields=False,
     )
@@ -30,6 +30,9 @@ class LiveWalkCardResponse(LiveWalkUTCModel):
     elapsed_seconds: int
     scheduled_duration_minutes: int
     scheduled_end_at: datetime
+    expected_end_at: datetime | None = None
+    is_overdue: bool = False
+    overdue_minutes: int = 0
     last_latitude: Decimal | None = None
     last_longitude: Decimal | None = None
     last_location_at: datetime | None = None
@@ -37,11 +40,12 @@ class LiveWalkCardResponse(LiveWalkUTCModel):
 
 
 class LiveWalkMarkerResponse(LiveWalkUTCModel):
-    marker_type: Literal["START", "INCIDENT"]
+    marker_type: Literal["START", "INCIDENT", "BEHAVIOR"]
     latitude: Decimal | None = None
     longitude: Decimal | None = None
     occurred_at: datetime
     incident_type: str | None = None
+    behavior_type: str | None = None
     description: str | None = None
 
 
@@ -61,6 +65,9 @@ class LiveWalkDetailResponse(LiveWalkCardResponse):
 class LiveWalkUpdatesResponse(LiveWalkUTCModel):
     walk_id: int
     is_stale: bool
+    expected_end_at: datetime | None = None
+    is_overdue: bool = False
+    overdue_minutes: int = 0
     last_location_at: datetime | None = None
     last_latitude: Decimal | None = None
     last_longitude: Decimal | None = None

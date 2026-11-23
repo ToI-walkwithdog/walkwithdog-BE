@@ -11,10 +11,12 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.schemas import DogCardResponse
-from app.walk_record_schemas import UTCResponse, WalkResponse
+from app.walk_record_schemas import UTCResponse, WalkIncidentResponse, WalkMarkerResponse, WalkResponse
 from app.walk_request_schemas import VolunteerProfileResponse
+from app.walk_review_schemas import WalkReviewResponse
 
 WalkStatus = Literal["IN_PROGRESS", "COMPLETED", "INTERRUPTED", "CANCELLED"]
+WalkEndReason = Literal["USER", "STAFF", "AUTO_TIMEOUT"]
 
 
 class MapPoint(BaseModel):
@@ -81,6 +83,7 @@ class UserWalkItem(UTCResponse, MotionMetrics):
     walk_request_id: int
     dog: DogCardResponse
     status: WalkStatus
+    end_reason: WalkEndReason | None = None
     started_at: datetime
     ended_at: datetime | None
     total_distance_m: Decimal | None
@@ -96,3 +99,45 @@ class UserWalksResponse(BaseModel):
     limit: int
     offset: int
     walks: list[UserWalkItem]
+
+
+class ShelterWalkDog(BaseModel):
+    id: int
+    name: str
+
+
+class ShelterWalkWalker(BaseModel):
+    id: int
+    nickname: str
+
+
+class ShelterWalkHistoryItem(UTCResponse, MotionMetrics):
+    walk_id: int
+    walk_request_id: int
+    dog: ShelterWalkDog
+    walker: ShelterWalkWalker
+    status: WalkStatus
+    end_reason: WalkEndReason | None = None
+    started_at: datetime
+    ended_at: datetime | None
+    total_distance_m: Decimal | None
+    duration_seconds: int | None
+    marker_count: int = 0
+    incident_count: int = 0
+    rating: int | None = None
+    has_review: bool = False
+
+
+class ShelterWalkHistoryResponse(BaseModel):
+    shelter_id: int
+    total: int
+    limit: int
+    offset: int
+    walks: list[ShelterWalkHistoryItem]
+
+
+class ShelterWalkHistoryDetailResponse(ShelterWalkHistoryItem):
+    points: list[MapPoint]
+    markers: list[WalkMarkerResponse]
+    incidents: list[WalkIncidentResponse]
+    review: WalkReviewResponse | None = None
