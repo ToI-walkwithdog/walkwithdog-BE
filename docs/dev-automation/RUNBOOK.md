@@ -10,7 +10,7 @@
 
 1. 사람이 구축 PR과 hosted CI의 실제 결과를 확인한다. 다음으로 dev에 GitHub Actions 앱의 `Dev quality gate`를 지정해 필수 상태 검사로 만들고 최신 Base 반영을 요구한다. 동일 이름의 다른 앱이나 일반 커밋 상태는 허용하지 않는다.
 2. dev와 main 모두 classic 브랜치 보호에서 Require a pull request before merging을 켜고 Required approving reviews를 0으로 둔다. 마지막 Push 승인과 CODEOWNERS 승인 요구는 끈다. 관리자 포함 적용, 직접 Push, Force Push 및 브랜치 삭제 차단을 유지하고 예외 주체를 두지 않는다. dev에서는 Merge commit을 허용한다. PR 설정 객체가 없거나 보호를 확인할 수 없으면 CLI가 중단한다. 현재 CLI는 classic 보호 응답을 검증한다.
-3. 관리자가 사용자 착수 승인자의 GitHub 로그인을 `TOI_ISSUE_APPROVERS`에 설정한다. 신규 Issue는 운영용 intake Issue를 지정해 `TOI_ISSUE_APPROVAL_INBOX`에 그 번호를 설정한다. 별도 GitHub 리뷰 계정과 `TOI_ISSUE_REVIEWERS`는 필요하지 않다.
+3. GitHub 댓글 승인 경로를 사용할 때만 승인자 GitHub 로그인을 `TOI_ISSUE_APPROVERS`에 설정한다. 신규 Issue의 GitHub 승인 댓글은 운영용 intake Issue를 지정해 `TOI_ISSUE_APPROVAL_INBOX`에 그 번호를 설정한다. 별도 GitHub 리뷰 계정과 `TOI_ISSUE_REVIEWERS`는 필요하지 않다.
 4. 활성화 승인 이후에만 `TOI_ISSUE_DELIVERY_ENABLED=true`를 설정한다. 값이 없거나 false면 CLI의 신규 Issue 등록, PR 생성, 병합이 차단된다. 승인 전에 `merge` 미리보기와 차단 경로를 확인한다. GitHub auto-merge는 사용하지 않는다. 브랜치 보호는 개인 세션의 Issue 승인 근거까지 판정하지 않으므로, 운영 계정은 승인된 배포 CLI를 통해 병합한다.
 
 병합 CLI는 보호된 dev에서 배포한 스크립트를 독립된 작업 디렉터리에서 실행한다. CI는 코드와 테스트를 실행하는 읽기 전용 GitHub Actions 작업이다. 설치 PR의 워크플로와 비교기, 초기 실패 기준은 후보에 있으므로 사람이 기존 dev 재현 증거와 diff를 검토해 승인한다. 설치 중에는 기존 dev 트리도 별도로 수집해 보존할 ID를 확인한다. 설치 후 비교기, 수집기, 기준 목록을 이벤트의 정확한 dev Base에서 읽는다. PR 워크플로 자체와 테스트는 후보 코드에서 실행되므로, 워크플로와 테스트 설정 변경은 일반 Issue의 조건부 병합에서 차단하고 별도 유지보수로 승인한다. 새 PR은 같은 저장소의 승인된 브랜치에서만 전달한다.
@@ -25,19 +25,30 @@
 
 ## 승인과 작업 준비
 
-1. Notion, 최신 FE, dev, 기존 Issue와 PR을 검색해 겹치는 기능과 선행 조건을 확인한다. 기존 Issue면 현재 제목과 본문을 제시하고, 신규면 템플릿을 따르는 제목과 전체 본문을 제시한다. 범위에 요구사항, 테스트 설계와 정확한 변경 경로를 포함한다. 접근 권한이나 정책 결정이 빠지면 착수를 보류한다.
-2. 현재 제목과 본문을 `{"title":"...","body":"..."}` JSON 파일에 넣고 `python -m scripts.issue_delivery digest draft.json`의 SHA-256을 확인한다. 승인자가 기존 Issue 또는 신규 Issue용 intake에 아래 메타데이터가 담긴 댓글을 남기면 그것이 **한 번의 착수 승인**이다. 기존 Issue는 번호를 넣고, 신규 초안은 issue를 null로 둔다. 새 정책이나 승인 밖 경로가 필요해진 경우에만 변경 범위를 다시 승인받는다.
+1. Notion, 최신 FE, dev, 기존 Issue와 PR을 검색해 겹치는 기능과 선행 조건을 확인한다. 기존 Issue의 제목과 본문을 확인하고 요구사항, 검증 범위와 실제로 바꿀 정확한 경로를 제시한다. 접근 권한 또는 정책 결정이 빠지면 착수를 보류한다.
+2. 현재 제목과 본문을 `{"title":"...","body":"..."}` JSON 파일에 넣고 `python -m scripts.issue_delivery digest ISSUE.json`으로 제목과 본문의 SHA-256을 계산한다. 사용자에게 제시하는 Codex 최종 답변에 검토할 범위 설명과 아래 코드 블록을 한 번 포함한다. 예시 값은 현재 Issue 데이터로 채운다.
+
+````toi-approval-request
+{"repository":"ToI-walkwithdog/walkwithdog-BE","issue":44,"title":"<현재 GitHub Issue 제목>","issue_digest":"<제목과 본문의 전체 SHA-256>","paths":["app/routers/example.py","tests/test_example.py"]}
+````
+
+3. 사용자가 같은 대화에서 아래 문장을 독립된 메시지로 직접 보내면 한 번의 착수 승인으로 처리한다. Issue 번호는 승인 대상에 맞춘다. 인용이나 예시를 포함한 다른 문장, 이미 진행 중인 일에 대한 요약, AI가 쓴 문장은 승인 증빙으로 사용하지 않는다. 중간에 질문이나 변경이 있었다면 최종 범위를 다시 제시한다.
+
+```text
+Issue #44의 확정된 요구사항과 변경 경로를 확인했어. 해당 Issue의 구현, 독립 리뷰, 테스트, PR 생성, 조건부 dev 병합까지 승인해.
+````
+
+4. 승인 직후 같은 Codex 세션에서 `python -m scripts.issue_delivery prepare ISSUE ../toi-issue-ISSUE --codex-approval --state STATE.json`을 실행한다. CLI는 현재 `CODEX_THREAD_ID`의 표준 로컬 세션 로그(`~/.codex/sessions`)에서 실제 사용자 이벤트와 직전 제안을 읽는다. 전용 worktree 밖의 개인 상태 파일에 원문, 세션과 시각, Issue 번호와 제목, 제목과 본문의 해시, 허용 경로를 보관한다. 재개, PR 생성 및 병합 때 같은 원본 기록과 현재 GitHub Issue를 다시 확인한다. 저장소, Issue 내용, 승인 범위가 달라지거나 로그를 찾을 수 없으면 멈춘다. 추가 경로가 필요하면 구현 전에 확장된 범위를 다시 승인받는다.
+
+대화 승인은 로컬 Codex 기록과 실행 환경을 신뢰한다. GitHub는 메시지 작성자의 신원을 독립적으로 검증할 수 없다. 같은 로컬 사용자 권한으로 세션 기록이나 상태 파일을 변경할 수 있으므로 서명된 증빙으로 사용하지 않는다. 운영 세션은 승인 로그를 직접 작성, 수정하거나 임의 텍스트로 대체하지 않는다. 다른 대화, 복사본, 계획 문서, 추론으로 만든 승인을 사용하지 않는다. 상태 파일과 대화 원문은 Git이나 PR에 올리지 않는다.
+
+기존 GitHub 방식도 지원한다. 승인자는 기존 Issue 또는 신규 Issue용 intake에 아래 메타데이터가 담긴 댓글을 남긴다. 신규 등록은 전체 초안을 승인받고 issue를 null로 둔 뒤 `python -m scripts.issue_delivery register draft.json --approval-comment COMMENT_ID --state STATE.json`으로 진행한다. 등록 전 중복을 확인한다. 댓글 방식의 착수와 재개에는 `prepare ISSUE ../toi-issue-ISSUE --approval-comment COMMENT_ID --state STATE.json`을 사용한다.
 
 ```text
 <!-- toi-approval
 {"issue":44,"issue_digest":"<전체 SHA-256>","paths":["app/routers/example.py","tests/test_example.py"]}
 -->
 ```
-
-현재 게이트는 GitHub의 인증된 댓글을 승인 증빙으로 사용한다. 채팅의 텍스트만으로 GitHub 승인자로 가장할 수 없으며, 채팅 1회 승인을 그대로 사용하려면 신뢰된 승인 기록 연동이 별도로 필요하다. 사용자가 GitHub 댓글에서 한 번 승인하는 경로에는 병합 시 추가 사용자 승인이 없다.
-
-3. 신규 초안만 `python -m scripts.issue_delivery register draft.json --approval-comment COMMENT_ID --state STATE.json`으로 등록한다. 등록 전에 의미상 중복을 검색한다. 기존 Issue는 내용을 쓰지 않고 진행한다.
-4. 프로젝트 전용 복제본에서 `python -m scripts.issue_delivery prepare ISSUE ../toi-issue-ISSUE --approval-comment COMMENT_ID --state STATE.json`을 실행한다. 승인이 바인딩된 Issue와 최신 원격 dev SHA가 일치하는 상태에서 `issue/ISSUE` worktree를 만든다. STATE.json은 전용 worktree 밖의 개인 작업 폴더에 보관한다. 다른 Issue는 별도 상태 파일을 쓴다.
 
 ## 구현, 테스트, 독립 검토
 

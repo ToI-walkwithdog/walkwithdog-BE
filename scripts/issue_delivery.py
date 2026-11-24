@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -16,6 +17,8 @@ ENABLE = "TOI_ISSUE_DELIVERY_ENABLED"
 WORKFLOW = ".github/workflows/dev-ci.yml"
 CHECK = "Dev quality gate"
 APPROVAL = re.compile(r"<!-- toi-approval\n(.*?)\n-->", re.DOTALL)
+CODEX_REQUEST = re.compile(r"```toi-approval-request\n(.*?)\n```", re.DOTALL)
+CODEX_THREAD = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 REVIEW = re.compile(r"<!-- toi-review\n(.*?)\n-->", re.DOTALL)
 PROTECTED = (".github/", "docs/dev-automation/", "scripts/dev_", "scripts/issue_delivery.py",
              "scripts/check_migrations.py", "tests/test_dev_delivery.py", "CLAUDE.md", "AGENTS.md", ".gitignore")
@@ -74,8 +77,78 @@ def read_approval(comment_id):
     return approval, comment["created_at"]
 
 
+def codex_session(thread):
+    if not isinstance(thread, str) or not CODEX_THREAD.fullmatch(thread):
+        raise GateError("A verified Codex thread ID is required")
+    root = (Path.home() / ".codex" / "sessions").resolve()
+    matches = list(root.glob(f"*/*/*/rollout-*-{thread}.jsonl"))
+    if len(matches) != 1 or matches[0].resolve() != matches[0] or not matches[0].is_file():
+        raise GateError("The original local Codex session log is missing or ambiguous")
+    return matches[0]
+
+
+def codex_approval_message(issue):
+    return (f"Issue #{issue}의 확정된 요구사항과 변경 경로를 확인했어. "
+            "해당 Issue의 구현, 독립 리뷰, 테스트, PR 생성, 조건부 dev 병합까지 승인해.")
+
+
+def read_codex_approval(issue, thread, timestamp=None):
+    """Bind one user event to the preceding proposal in the same local Codex session."""
+    matched_session = False
+    previous_proposal = None
+    selected = None
+    with codex_session(thread).open(encoding="utf-8") as rollout:
+        for line in rollout:
+            if not line.endswith("\n"):
+                break  # The runtime may still be appending the last record.
+            record = json.loads(line)
+            payload = record.get("payload", {})
+            if record["type"] == "session_meta":
+                if payload["id"] != thread:
+                    raise GateError("Codex session metadata does not match the thread")
+                matched_session = True
+            if record["type"] != "event_msg":
+                continue
+            if payload["type"] == "agent_message" and payload.get("phase") == "final_answer":
+                previous_proposal = payload.get("message")
+            if payload["type"] == "user_message":
+                if timestamp is None or record["timestamp"] == timestamp:
+                    if timestamp is not None and selected is not None:
+                        raise GateError("The recorded Codex approval is ambiguous")
+                    selected = (record["timestamp"], payload.get("message"), previous_proposal)
+                previous_proposal = None
+
+    if not matched_session or selected is None or not selected[0]:
+        raise GateError("The original Codex user approval event is missing")
+    approved_at, prompt, proposal = selected
+    if not isinstance(prompt, str) or prompt.strip() != codex_approval_message(issue):
+        raise GateError("The Codex user message is not explicit approval for this Issue")
+    if not isinstance(proposal, str):
+        raise GateError("The Codex approval must immediately follow the approved scope proposal")
+    scope = marker(proposal, CODEX_REQUEST)
+    if (set(scope) != {"repository", "issue", "title", "issue_digest", "paths"}
+            or scope["repository"] != REPO or type(scope["issue"]) is not int or scope["issue"] != issue
+            or not isinstance(scope["title"], str) or not scope["title"].strip()
+            or not isinstance(scope["issue_digest"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", scope["issue_digest"])):
+        raise GateError("The preceding Codex proposal must identify this repository, Issue and exact scope")
+    return {**scope, "paths": sorted(paths(scope["paths"])), "thread": thread,
+            "timestamp": approved_at, "message": prompt}
+
+
+def saved_codex_approval(state):
+    saved = state.get("codex_approval")
+    if not isinstance(saved, dict) or "approval_comment" in state or not saved.get("timestamp"):
+        raise GateError("An unambiguous local Codex approval record is required")
+    current = read_codex_approval(state["issue"], saved["thread"], saved["timestamp"])
+    if current != saved:
+        raise GateError("The saved Codex approval no longer matches the original session log")
+    return current
+
+
 def check_issue(issue, approval, approval_time):
     if ("pull_request" in issue or issue["state"] != "open"
+            or ("title" in approval and issue["title"] != approval["title"])
             or issue_digest(issue["title"], issue["body"]) != approval["issue_digest"]):
         raise GateError("Issue is closed or its approved title/body has changed")
     if approval["issue"] is None:
@@ -88,7 +161,7 @@ def check_issue(issue, approval, approval_time):
 def write_state(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
 
 
@@ -148,10 +221,21 @@ def dev_sha():
 
 
 def prepare(args):
-    approval, approved_at = read_approval(args.approval_comment)
+    previous = load_json(args.state) if args.state.exists() else None
+    if args.codex_approval:
+        approval = (saved_codex_approval(previous) if previous is not None
+                    else read_codex_approval(args.issue, os.environ.get("CODEX_THREAD_ID")))
+        approved_at = approval["timestamp"]
+        state = {"issue": args.issue, "issue_digest": approval["issue_digest"],
+                 "paths": approval["paths"], "codex_approval": approval}
+    else:
+        if previous is not None and "codex_approval" in previous:
+            raise GateError("Resume the original Codex approval source")
+        approval, approved_at = read_approval(args.approval_comment)
+        state = initial_state(args, args.issue, approval)
     check_issue(api(f"issues/{args.issue}"), approval, approved_at)
-    state = initial_state(args, args.issue, approval)
-    previous = load_json(args.state) if args.state.exists() else state
+    if previous is None:
+        previous = state
     if any(previous.get(key) != value for key, value in state.items()):
         raise GateError("State already belongs to another task")
     if approval["issue"] is None and not args.state.exists():
@@ -240,7 +324,13 @@ def check_change_scope(state, actual, declared):
 
 
 def check_live_approval(state):
-    approval, approved_at = read_approval(state["approval_comment"])
+    if ("approval_comment" in state) == ("codex_approval" in state):
+        raise GateError("Exactly one recorded approval source is required")
+    if "codex_approval" in state:
+        approval = saved_codex_approval(state)
+        approved_at = approval["timestamp"]
+    else:
+        approval, approved_at = read_approval(state["approval_comment"])
     if (approval["issue_digest"] != state["issue_digest"]
             or paths(approval["paths"]) != set(state["paths"])):
         raise GateError("Approval changed since the worktree was prepared")
@@ -401,8 +491,10 @@ def main():
     merge.add_argument("--execute", action="store_true")
     for command in (create, setup, pr, merge):
         command.add_argument("--state", type=Path, required=True)
-    for command in (create, setup):
-        command.add_argument("--approval-comment", type=positive, required=True)
+    create.add_argument("--approval-comment", type=positive, required=True)
+    source = setup.add_mutually_exclusive_group(required=True)
+    source.add_argument("--approval-comment", type=positive)
+    source.add_argument("--codex-approval", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "digest":
