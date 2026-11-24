@@ -21,7 +21,7 @@ from app.api_contract import ContractError
 from app.auth import contract_unauthorized
 from app.models import (CHALLENGE_CODES, DIFFICULTY_CODES, DOG_SIZE_CODES, WALKING_FREQUENCY_CODES, User,
                         VolunteerExperienceChallenge, VolunteerOnboardingExperience)
-from app.onboarding_common import (STEP_BASIC_INFORMATION, STEP_PET_EXPERIENCE, STEP_PLEDGE, as_utc,
+from app.onboarding_common import (STEP_BASIC_INFORMATION, STEP_PLEDGE, as_utc,
                                    first_incomplete_step, previous_step_required)
 
 # Notion proposal, not final (Issue #42 open item); the column is VARCHAR(200).
@@ -109,7 +109,7 @@ def read_experience(db: Session, user_id: int) -> dict:
     """Read only: no write."""
     experience = db.get(VolunteerOnboardingExperience, user_id)
     if experience is None:
-        return {"step2_completed": False, "experience": None, "next_onboarding_step": STEP_PET_EXPERIENCE}
+        return {"step2_completed": False, "experience": None, "next_onboarding_step": _next_step(db, user_id)}
     return {"step2_completed": True, "experience": _stored(db, experience), "next_onboarding_step": _next_step(db, user_id)}
 
 

@@ -1907,7 +1907,7 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual((data["step3_completed"], data["onboarding_completed"], data["next_onboarding_step"]),
                          (True, True, None))
 
-    def test_users_me_answers_from_one_snapshot_when_status_and_steps_change_meanwhile(self):
+    def test_users_me_takes_status_and_steps_from_the_progress_query_not_the_authenticated_row(self):
         headers = self.start_step3_api()
         authenticated, release = Event(), Event()
         original = sys.modules["app.onboarding_common"].load_progress
@@ -1929,7 +1929,8 @@ class SignupPostgresTests(unittest.TestCase):
             release.set()
             reader.join(10)
         data = results["me"].json()["data"]
-        # Status and records come from the same statement: one consistent, current snapshot.
+        # The status comes from the progress statement, not the row read at authentication. That
+        # statement reads status and records together (one statement is shown by the SELECT count test).
         self.assertEqual((data["account_status"], data["step3_completed"], data["onboarding_completed"],
                           data["next_onboarding_step"]), ("AGE_REVIEW_REQUIRED", True, False, "AGE_REVIEW"))
 

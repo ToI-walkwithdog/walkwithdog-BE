@@ -85,8 +85,8 @@ Issue #45의 "오류 코드 정합성" 항목은 미확정으로 남아 있다. 
 
 | 범위 | 파일 | 내용 |
 |---|---|---|
-| 기능 | `tests/test_users_me_onboarding.py` | 단계별 진행(서약, Step 1 SMS 실제 흐름, Step 2, Step 3)과 각 단계 API 응답 일치, #44에서 넘어온 완료 테스트, 서약만 완료, 순서를 어긴 기록, 서약 버전 변경과 기록 보존, 연령 확인 우선과 정정 후 복귀, 보호소와 관리자 null, SELECT 3개와 쓰기 없음, 민감 정보 비노출, 서약 버전 미설정 500, 401 코드와 `no-store`, 재로그인 후 같은 상태 |
-| PostgreSQL | `tests/test_signup_postgres.py` | SELECT 3개와 쓰기 없음, 조회 도중 Step 3 저장과 상태 변경이 커밋돼도 한 스냅샷으로 답함, 동시 요청 8건이 같은 상태 |
+| 기능 | `tests/test_users_me_onboarding.py` | 단계별 진행(서약, Step 1 SMS 실제 흐름, Step 2, Step 3)과 각 단계 API 응답 일치, #44에서 넘어온 완료 테스트, 서약만 완료, 순서를 어긴 기록, 서약 버전 변경과 기록 보존, 연령 확인 우선과 정정 후 복귀, 보호소와 관리자 null, SELECT 3개와 쓰기 없음, 민감 정보 비노출, 서약 버전 미설정 500, 401 코드와 `no-store`, 실제 가입 종료 후 401, 만 120세 초과 입력 뒤 `BASIC_INFORMATION` 유지, 재로그인 후 같은 상태 |
+| PostgreSQL | `tests/test_signup_postgres.py` | SELECT 3개와 쓰기 없음, 인증 뒤 조회 전에 Step 3 저장과 상태 변경이 커밋되면 상태와 기록을 인증 시점 행이 아니라 진행 상태 문장에서 함께 읽음, 동시 요청 8건이 같은 상태 |
 | 회귀 | `tests/test_auth.py`, `tests/test_pledge.py`, `tests/test_signup.py`, `tests/test_shelter_permissions.py` | 응답 전체 비교와 서약 뒤 상태를 새 계약으로 갱신, 서약 버전 테스트값 설정 |
 
 - Step 2 병렬 저장 테스트 두 개는 장벽을 "스레드당 첫 호출"에만 두도록 바꿨다. 저장 응답이 다음 단계를 계산하려고 같은 함수를 한 번 더 부르기 때문이다(D2). 검증 내용은 같다.

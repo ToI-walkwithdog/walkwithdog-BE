@@ -271,15 +271,37 @@ class UsersMeOnboardingTests(unittest.TestCase):
         self.assertEqual((missing.status_code, missing.json()["code"]), (401, "AUTHENTICATION_REQUIRED"))
         self.assertEqual(missing.headers["cache-control"], "no-store")
         with self.Session.begin() as db:
-            db.get(AuthSession, token_digest("token-1")).expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-        self.assertEqual(self.call("GET", ME).json()["code"], "SESSION_EXPIRED")
-        with self.Session.begin() as db:
-            db.query(UserPledgeAcknowledgement).filter_by(user_id=PLEDGED).delete()
-            db.query(AuthSession).filter_by(user_id=PLEDGED).delete()
             db.add(AuthSession(token_hash=token_digest("orphan"), user_id=999,
                                expires_at=datetime.now(timezone.utc) + timedelta(hours=1)))
-        orphan = self.client.get(ME, headers={"Authorization": "Bearer orphan"})
-        self.assertEqual((orphan.status_code, orphan.json()["code"]), (401, "USER_NOT_FOUND"))
+            db.get(AuthSession, token_digest("token-4")).expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        for headers, code in (({"Authorization": "Bearer orphan"}, "USER_NOT_FOUND"),
+                              ({"Authorization": "Bearer token-4"}, "SESSION_EXPIRED")):
+            response = self.client.get(ME, headers=headers)
+            self.assertEqual((response.status_code, response.json()["code"]), (401, code))
+            self.assertEqual(response.headers["cache-control"], "no-store")
+        # A real sign-up exit of an age review account: its tokens get 401 afterwards.
+        with self.Session.begin() as db:
+            db.get(User, USER).account_status = "AGE_REVIEW_REQUIRED"
+            db.get(User, USER).age_review_required_at = START
+        self.assertEqual(self.me()["next_onboarding_step"], "AGE_REVIEW")
+        exited = self.call("DELETE", ME, json={"password": PASSWORD})
+        self.assertEqual(exited.status_code, 200, exited.text)
+        after = self.call("GET", ME)
+        self.assertEqual((after.status_code, after.json()["code"]), (401, "INVALID_ACCESS_TOKEN"))
+        self.assertEqual(after.headers["cache-control"], "no-store")
+
+    def test_a_birth_date_over_120_years_keeps_the_account_at_step1(self):
+        sent = self.call("POST", "/users/me/phone-verifications", PLEDGED, json={"phone_number": "010-1234-5678"})
+        verification_id = sent.json()["data"]["verification_id"]
+        code = re.search(r"\d{6}", self.sms.outbox[-1]["text"]).group()
+        self.call("POST", "/users/me/phone-verifications/confirm", PLEDGED,
+                  json={"verification_id": verification_id, "code": code})
+        refused = self.call("PUT", "/users/me/onboarding/basic-info", PLEDGED,
+                            json={"full_name": "김민지", "birth_date": "1900-01-01",
+                                  "phone_verification_id": verification_id})
+        self.assertEqual((refused.status_code, refused.json()["code"]), (422, "AGE_ABOVE_MAXIMUM"))
+        self.assertEqual(self.progress(PLEDGED), self.expected(
+            pledge_completed=True, pledge_acknowledged_at=START.isoformat(), next_onboarding_step="BASIC_INFORMATION"))
 
     def test_logging_in_again_restores_the_same_server_state(self):
         self.add_records(PLEDGED, step1=True)
