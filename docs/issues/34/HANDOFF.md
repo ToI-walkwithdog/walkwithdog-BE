@@ -19,7 +19,7 @@
 | 원인 | `app/routers/users.py`의 지역 `as_utc()`(#33)는 시간대가 없는 값에만 UTC를 붙이고, 시간대가 있는 값은 그대로 돌려줬다. PostgreSQL은 `TIMESTAMPTZ`를 세션 시간대로 돌려주므로(로컬 테스트 DB는 `Asia/Seoul`) 서약 API의 응답이 DB 서버 설정에 따라 달라졌다. SQLite 테스트는 시간대를 버려서 드러나지 않았다 |
 | 영향 | 서약 API 응답의 시각 표현만. 저장 데이터와 최초 서약 시각은 바뀌지 않았다. 다른 API(`/users/me`, Step 1~3, 산책 신청 서비스)는 이미 UTC로 변환한다 |
 | 수정 | 지역 `as_utc()`를 지우고 `onboarding_common.as_utc()`(항상 UTC로 변환)를 쓴다. 응답은 #45에서 정한 UTC ISO 8601이다 |
-| 검증 | 통합 흐름 A1, A2의 문자열 비교(서약 응답 = `/users/me`)를 그대로 두고 통과. 새 테스트로 세션 시간대 `Asia/Seoul`과 `UTC` 모두에서 두 API가 같은 `+00:00` 문자열을 주고, 재요청은 최초 시각을 유지하며, 저장 시점이 바뀌지 않음을 확인. 수정 전 함수를 다시 넣으면 새 테스트와 A1이 실패한다 |
+| 검증 | 통합 흐름 A1, A2의 문자열 비교(서약 응답 = `/users/me`)를 그대로 두고 통과. 새 테스트로 세션 시간대 `Asia/Seoul`과 `UTC` 모두에서 두 API가 같은 `+00:00` 문자열을 주고, 재요청은 최초 시각을 유지하며, 저장 시점이 바뀌지 않음을 확인. 수정 전 함수를 다시 넣으면 새 테스트(E2)가 실패한다. A1과 A2는 DB 서버 기본 시간대가 UTC가 아닐 때(로컬 `Asia/Seoul`)만 함께 실패하고, CI의 PostgreSQL 기본값은 UTC이므로 CI에서 이 결함을 잡는 것은 세션 시간대를 명시하는 E2다 |
 
 ## 3. 통합 테스트 목록
 
@@ -39,13 +39,14 @@
 | H1 | `test_an_under_14_birth_date_blocks_onboarding_until_the_correction` | 서약 후 만 14세 미만: 422 `AGE_BELOW_MINIMUM`, `AGE_REVIEW`, 프로필 미저장, 서약과 SMS와 Step 2는 403 `AGE_REVIEW_REQUIRED`, Step 3은 403 `ONBOARDING_NOT_ALLOWED`. 정정 후 `ACTIVE`, `age_review_required_at=NULL`, 서약 유지, SMS부터 다시 진행해 완료 |
 | H2 | `test_an_exit_of_an_age_review_account_revokes_every_device` | 두 기기 로그인 후 가입 종료(테스트 환경 정책 `delete`): 두 토큰 모두 401, 로그인 401, 사용자, 세션, 동의, 서약, 인증 기록 정리 |
 | I1 | `test_shelter_and_admin_log_in_by_id_and_are_not_onboarding_targets` | 보호소와 관리자: 아이디 로그인, `email` 없음, 온보딩 필드 `null`과 서약 필드 유지, 서약 403 `PLEDGE_NOT_ALLOWED`, 온보딩 API 403 `ONBOARDING_NOT_ALLOWED`, 기록 없음 |
-| K1 | `test_a_step1_failure_after_the_insert_rolls_back_on_postgres` | Step 1 저장 중 실패: 500, 기본 정보 행 없음, 인증 소비 취소, 재시도 성공 |
+| K1 | `test_a_step1_failure_after_the_insert_rolls_back_on_postgres` | 기본 정보 INSERT와 인증 소비 UPDATE가 PostgreSQL에 반영된 뒤(flush 후 같은 트랜잭션에서 1행씩 확인) COMMIT이 실패: 500(`OperationalError`), 기본 정보 행 없음, 인증 소비 취소, 재시도 성공 |
+| H3 | `test_an_exit_is_refused_and_keeps_everything_when_activity_must_be_retained` | 보존 대상 활동(설문)이 있는 연령 확인 계정의 가입 종료: 기록 삭제 정책(`delete`)이어도 409 `ACCOUNT_HAS_RETAINED_ACTIVITY`, 사용자, 세션, 동의, 서약, 인증, 설문 행이 모두 그대로, 세션 계속 사용 가능 |
 
 ## 4. 테스트 환경
 
 - `SIGNUP_TEST_DATABASE_URL`: 빈 로컬 격리 DB `toi_walk_test_*`. CI의 같은 그룹에서 실행된다. 테스트마다 `su_<uuid>` 스키마를 만들고 지운다. 클래스 시작과 끝에 DB가 비어 있는지 확인한다.
-- 주요 흐름은 `create_all()` 없이 실제 SQL로 만든 스키마에서 실행한다: 016 이전 dev 기본 테이블과 005, 006, 007, 014, 015 다음에 002, 016~019, 023~025, 022, 026. manifest의 `requires`가 먼저 적용됐는지와 모델 컬럼이 일치하는지도 확인한다.
-- 가입 종료(H2)는 채팅과 매칭 활동 테이블을 읽으므로 모델 스키마(`create_all`)에서 실행한다. 이 테이블은 이 SQL 체인이 만들지 않는 기본 스키마다.
+- 주요 흐름은 `create_all()` 없이 실제 SQL로 만든 스키마에서 실행한다. 016 이전 dev 기본 테이블과 `005_user_roles`, `006_user_shelters`, `007_walk_domain`, `014_f08_live_walk`, `015_f09_walk_review` 다음에 `002_auth_sessions`, `016_onboarding_signup`, `017_remove_user_email`, `018_user_consents`, `019_first_walk_guide`, `023_user_pledge_acknowledgements`, `024_onboarding_basic_info`, `025_onboarding_dog_experience`, `022_regions`, `026_onboarding_walking_routine`을 적용한다. 각 파일의 manifest `requires`가 이미 적용됐는지와 모델 컬럼이 일치하는지 확인한다.
+- 가입 종료(H2, H3)는 채팅과 매칭 활동 테이블을 읽으므로 모델 스키마(`create_all`)에서 실행한다. 이 테이블은 이 SQL 체인이 만들지 않는 기본 스키마다.
 - 설정: `DATABASE_URL=sqlite://`(가져오기용), `PLEDGE_CURRENT_VERSION=pledge-test-v1`, 테스트용 `PHONE_VERIFICATION_HMAC_KEY`, 테스트용 개인정보 문서 버전, 주입 시계. H2만 `APP_ENV=test`, `ACCOUNT_EXIT_RECORD_POLICY=delete`.
 - 요청 제한 의존성은 이 파일에서만 끈다(`test_rate_limit`에서 따로 검증).
 
@@ -53,9 +54,9 @@
 
 | 구분 | 항목 |
 |---|---|
-| 기존 테스트로 검증 완료 | 가입과 동의 원자성, 선가입과 동시 가입, 필수 동의와 문서 버전, 토큰 만료, 동시 서약과 단계별 동시 저장(PG), SMS 실패, 시간 초과, 한도 세부, 만 14세와 120세 경계와 121세 거부, 정정 세부 규칙, 보존 대상 활동이 있는 가입 종료 차단, 403 접근 분류 |
+| 기존 테스트로 검증 완료 | 가입과 동의 원자성, 선가입과 동시 가입, 필수 동의와 문서 버전, 토큰 만료, 동시 서약과 단계별 동시 저장(PG), SMS 실패, 시간 초과, 한도 세부, 만 14세와 120세 경계와 121세 거부, 정정 세부 규칙, 서약 전 `PUT /basic-info` 409(SQLite), 403 접근 분류 |
 | 이번에 통합으로 추가 | 3절 전체 |
-| 현재 미구현으로 검증 불가 | 현재 위치 판별(#46)과 위치 공급자 장애, 실제 SMS 공급자 |
+| 현재 미구현으로 검증 불가 | 현재 위치 판별(#46)과 위치 공급자 장애, 실제 SMS 공급자. A1과 A2는 `POST /regions/resolve-location` 없이 수동 지역 선택만으로 완료되므로 위치 판별이 온보딩 완료의 필수 조건이 아님을 보여 준다 |
 
 기존 실패 5건(`test_walk_domain` 3건, `test_walk_settings_api` 1건과 하위 1건)은 #66 범위로 두고 신규 회귀와 구분한다.
 

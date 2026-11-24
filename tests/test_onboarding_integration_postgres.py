@@ -1,8 +1,9 @@
 """Onboarding integration on real PostgreSQL (Issue #34): sign-up to home through the real API routers.
 
-The main flows run on a schema built only by the checked-in SQL files, in manifest order, without
-create_all(): the base tables of a dev database before 016, then 002, 016 to 019, 023 to 025, 022
-and 026. Account exit reads activity tables (chat, matching) that those files do not create, so
+The main flows run on a schema built only by the checked-in SQL files, in an order that satisfies
+every manifest `requires`, without create_all(): the base tables of a dev database before 016
+(005, 006, 007, 014, 015), then 002, 016_onboarding_signup, 017_remove_user_email, 018_user_consents,
+019, 023, 024, 025, 022 and 026. Account exit reads activity tables (chat, matching) that those files do not create, so
 its scenario runs on the model schema instead.
 
 Synthetic accounts and regions only. SMS goes to the in-memory MockSmsProvider; nothing is sent.
@@ -23,8 +24,8 @@ from uuid import uuid4
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.auth import hash_password
     from app.database import Base, get_db
-    from app.models import (AuthSession, PhoneVerification, PhoneVerificationDailyCount, User, UserConsent,
-                            UserPledgeAcknowledgement, UserRole, VolunteerExperienceChallenge,
+    from app.models import (AuthSession, PhoneVerification, PhoneVerificationDailyCount, Survey, User,
+                            UserConsent, UserPledgeAcknowledgement, UserRole, VolunteerExperienceChallenge,
                             VolunteerOnboardingBasic, VolunteerOnboardingExperience, VolunteerOnboardingRoutine,
                             VolunteerRoutineRegion, VolunteerRoutineTimeSlot)
     from app.onboarding_common import get_clock
@@ -36,7 +37,8 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session as OrmSession, sessionmaker
 
 from privacy_test_support import privacy, use_test_privacy_policy
 
@@ -53,7 +55,7 @@ PASSWORD = "WalkTogether2026!"
 # Base tables of a dev database before 016 come from these files (as in test_signup_postgres).
 DEV_CHAIN_BEFORE_016 = ("005_user_roles.sql", "006_user_shelters.sql", "007_walk_domain.sql",
                         "014_f08_live_walk.sql", "015_f09_walk_review.sql")
-# The onboarding chain, in manifest order; 022 has no prerequisite and must precede 026.
+# The onboarding chain in dependency order; 022 has no prerequisite and must precede 026.
 ONBOARDING_CHAIN = ("002_auth_sessions.sql", "016_onboarding_signup.sql", "017_remove_user_email.sql",
                     "018_user_consents.sql", "019_first_walk_guide.sql", "023_user_pledge_acknowledgements.sql",
                     "024_onboarding_basic_info.sql", "025_onboarding_dog_experience.sql", "022_regions.sql",
@@ -165,7 +167,7 @@ class OnboardingIntegrationPostgresTests(unittest.TestCase):
                 "CREATE TABLE surveys (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id))")
         applied = set()
         for name in DEV_CHAIN_BEFORE_016 + ONBOARDING_CHAIN:
-            self.assertLessEqual(set(requires[name]), applied | set(DEV_CHAIN_BEFORE_016), name)
+            self.assertLessEqual(set(requires[name]), applied, name)  # every prerequisite already applied
             self.run_sql_file(name)
             applied.add(name)
         with self.engine.connect() as connection:
@@ -436,13 +438,12 @@ class OnboardingIntegrationPostgresTests(unittest.TestCase):
 
         def fail_once(*args, **kwargs):
             calls.append("next_step")
-            if len(calls) == 1:
-                raise RuntimeError("answer lost after the commit")
-            return original(*args, **kwargs)
+            raise RuntimeError("answer lost after the commit")
 
         with patch("app.basic_info_service.next_step", side_effect=fail_once), \
                 self.assertLogs("app.api_contract", "ERROR"):
             self.assert_error(self.save_basic(token, verification_id), 500, "INTERNAL_SERVER_ERROR")
+        self.assertEqual(calls, ["next_step"])  # failed once, after the commit; the retry runs unpatched
         state = self.me(token)
         self.assertEqual((state["step1_completed"], state["next_onboarding_step"]), (True, "PET_EXPERIENCE"))
         retried = self.ok(self.save_basic(token, verification_id))
@@ -459,14 +460,23 @@ class OnboardingIntegrationPostgresTests(unittest.TestCase):
         token = self.log_in()
         self.pledge(token)
         verification_id = self.verified(token)
-        model = sys.modules["app.basic_info_service"].VolunteerOnboardingBasic
+        original, written = OrmSession.commit, {}
 
-        def broken_row(**values):
-            return model(**{**values, "full_name": None})  # NOT NULL fails inside the transaction
+        def fail_after_writing(session):
+            if not written and any(isinstance(row, VolunteerOnboardingBasic) for row in session.new):
+                session.flush()  # the INSERT and the consumed_at UPDATE reach PostgreSQL first
+                written["basic_rows"] = session.execute(text(
+                    "SELECT count(*) FROM volunteer_onboarding_basics")).scalar_one()
+                written["consumed"] = session.execute(text(
+                    "SELECT count(*) FROM phone_verifications WHERE consumed_at IS NOT NULL")).scalar_one()
+                raise OperationalError("COMMIT", {}, Exception("connection lost at commit"))
+            return original(session)
 
-        with patch("app.basic_info_service.VolunteerOnboardingBasic", side_effect=broken_row), \
-                self.assertLogs("app.api_contract", "ERROR"):
+        with patch.object(OrmSession, "commit", fail_after_writing), \
+                self.assertLogs("app.api_contract", "ERROR") as logs:
             self.assert_error(self.save_basic(token, verification_id), 500, "INTERNAL_SERVER_ERROR")
+        self.assertEqual(written, {"basic_rows": 1, "consumed": 1})  # both writes happened before the failure
+        self.assertIn("OperationalError", logs.output[0])
         with self.Session() as db:
             self.assertEqual(db.query(VolunteerOnboardingBasic).count(), 0)
             self.assertIsNone(db.query(PhoneVerification).one().consumed_at)  # consumption rolled back
@@ -611,6 +621,32 @@ class OnboardingIntegrationPostgresTests(unittest.TestCase):
         self.assertEqual((self.rows(User), self.rows(AuthSession), self.rows(UserConsent, user_id=user_id),
                           self.rows(UserPledgeAcknowledgement, user_id=user_id),
                           self.rows(PhoneVerification, user_id=user_id)), (0, 0, 0, 0, 0))
+
+    def test_an_exit_is_refused_and_keeps_everything_when_activity_must_be_retained(self):
+        # The record policy would delete consents and pledges here; the activity alone must block it.
+        exit_policy = patch.dict(os.environ, {"ACCOUNT_EXIT_RECORD_POLICY": "delete", "APP_ENV": "test"})
+        exit_policy.start()
+        self.addCleanup(exit_policy.stop)
+        self.start(migrated=False)
+        user_id = self.sign_up()["id"]
+        token = self.log_in()
+        self.pledge(token)
+        self.assert_error(self.save_basic(token, self.verified(token), birth_date="2015-01-01"), 422,
+                          "AGE_BELOW_MINIMUM")
+        with self.Session.begin() as db:
+            db.add(Survey(user_id=user_id))  # retained activity (Issue #41 list)
+
+        def kept():
+            return (self.rows(User), self.rows(AuthSession), self.rows(UserConsent, user_id=user_id),
+                    self.rows(UserPledgeAcknowledgement, user_id=user_id),
+                    self.rows(PhoneVerification, user_id=user_id), self.rows(Survey, user_id=user_id))
+
+        before = kept()
+        self.assertEqual((before[0], before[-1]), (1, 1))
+        refused = self.call("DELETE", "/users/me", token, json={"password": PASSWORD})
+        self.assert_error(refused, 409, "ACCOUNT_HAS_RETAINED_ACTIVITY")
+        self.assertEqual(kept(), before)  # nothing was deleted
+        self.assertEqual(self.me(token)["next_onboarding_step"], "AGE_REVIEW")  # the session still works
 
     # Roles
 

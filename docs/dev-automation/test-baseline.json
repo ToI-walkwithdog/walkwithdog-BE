@@ -1010,6 +1010,7 @@
     "tests/test_onboarding_integration_postgres.py::OnboardingIntegrationPostgresTests::test_a_step1_answer_that_fails_after_its_commit_is_recovered_by_the_retry",
     "tests/test_onboarding_integration_postgres.py::OnboardingIntegrationPostgresTests::test_a_step1_failure_after_the_insert_rolls_back_on_postgres",
     "tests/test_onboarding_integration_postgres.py::OnboardingIntegrationPostgresTests::test_an_empty_region_master_blocks_the_choice_until_regions_are_loaded",
+    "tests/test_onboarding_integration_postgres.py::OnboardingIntegrationPostgresTests::test_an_exit_is_refused_and_keeps_everything_when_activity_must_be_retained",
     "tests/test_onboarding_integration_postgres.py::OnboardingIntegrationPostgresTests::test_an_exit_of_an_age_review_account_revokes_every_device",
     "tests/test_onboarding_integration_postgres.py::OnboardingIntegrationPostgresTests::test_an_sms_failure_is_recovered_by_a_new_send",
     "tests/test_onboarding_integration_postgres.py::OnboardingIntegrationPostgresTests::test_an_under_14_birth_date_blocks_onboarding_until_the_correction",
