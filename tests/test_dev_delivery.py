@@ -172,6 +172,122 @@ class TestRegressionGate(unittest.TestCase):
                 dev_gate.paths([path])
 
 
+class TestCodexApproval(unittest.TestCase):
+    def setUp(self):
+        home = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.enterContext(patch.object(issue_delivery.Path, "home", return_value=home))
+        self.thread = "01234567-89ab-4cde-8fab-0123456789ab"
+        self.timestamp = "2026-01-02T03:04:05Z"
+        self.log = (home / ".codex" / "sessions" / "2026" / "01" / "02"
+                    / f"rollout-2026-01-02T03-00-00-{self.thread}.jsonl")
+        self.log.parent.mkdir(parents=True)
+        self.issue = {"state": "open", "number": 44, "title": "Onboarding", "body": "Approved details"}
+        self.scope = {"repository": issue_delivery.REPO, "issue": 44, "title": self.issue["title"],
+                      "issue_digest": issue_delivery.issue_digest(self.issue["title"], self.issue["body"]),
+                      "paths": ["app/x.py"]}
+        self.prompt = issue_delivery.codex_approval_message(44)
+
+    def write_events(self, *events):
+        meta = {"type": "session_meta", "payload": {"id": self.thread}}
+        self.log.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in (meta, *events)),
+                            encoding="utf-8")
+
+    def event(self, kind, message, timestamp=None, phase=None):
+        return {"type": "event_msg", "timestamp": timestamp or self.timestamp,
+                "payload": {"type": kind, "message": message, "phase": phase}}
+
+    def proposal(self, **edits):
+        scope = {**self.scope, **edits}
+        text = "Review the exact scope\n```toi-approval-request\n" + json.dumps(scope) + "\n```"
+        return self.event("agent_message", text, phase="final_answer")
+
+    def saved_state(self):
+        return {"issue": 44, "issue_digest": self.scope["issue_digest"], "paths": self.scope["paths"],
+                "codex_approval": issue_delivery.read_codex_approval(44, self.thread)}
+
+    def test_user_event_binds_proposal_and_can_be_revalidated_after_later_messages(self):
+        actual = "\n" + self.prompt + "\n"
+        self.write_events(self.proposal(), self.event("user_message", actual))
+        state = self.saved_state()
+        proof = state["codex_approval"]
+        self.assertEqual(proof["message"], actual)
+        self.assertEqual(proof["title"], "Onboarding")
+        self.assertEqual(proof["thread"], self.thread)
+        self.write_events(self.proposal(), self.event("user_message", actual),
+                          self.event("user_message", "A later question", timestamp="2026-01-02T03:05:05Z"))
+        with patch.object(issue_delivery, "api", return_value=self.issue) as api:
+            issue_delivery.check_live_approval(state)
+            api.assert_called_once_with("issues/44")
+        with self.assertRaisesRegex(dev_gate.GateError, "not explicit approval"):
+            issue_delivery.read_codex_approval(44, self.thread)
+
+    def test_quoted_inferred_and_assistant_approvals_are_rejected(self):
+        good = self.event("user_message", self.prompt)
+        cases = (
+            ((self.proposal(), self.event("agent_message", self.prompt, phase="final_answer")), "missing"),
+            ((self.proposal(), self.event("user_message", f'Example: "{self.prompt}"')), "not explicit"),
+            ((self.proposal(), self.event("user_message", "Please continue")), "not explicit"),
+            ((self.proposal(), self.event("user_message", "Question", timestamp="2026-01-02T03:03:05Z"), good),
+             "immediately follow"),
+            ((self.proposal(issue=45), good), "preceding Codex proposal"),
+            ((self.proposal(repository="another/repo"), good), "preceding Codex proposal"),
+        )
+        for rows, message in cases:
+            with self.subTest(message=message):
+                self.write_events(*rows)
+                with self.assertRaisesRegex(dev_gate.GateError, message):
+                    issue_delivery.read_codex_approval(44, self.thread)
+
+    def test_missing_changed_and_mixed_evidence_block_before_delivery(self):
+        user = self.event("user_message", self.prompt)
+        self.write_events(self.proposal(), user)
+        state = self.saved_state()
+        with patch.object(issue_delivery, "api", return_value={**self.issue, "body": "Edited"}) as api:
+            with self.assertRaisesRegex(dev_gate.GateError, "title/body has changed"):
+                issue_delivery.check_live_approval(state)
+            with self.assertRaisesRegex(dev_gate.GateError, "Approval changed"):
+                issue_delivery.check_live_approval({**state, "paths": ["app/extra.py"]})
+            with self.assertRaisesRegex(dev_gate.GateError, "Exactly one"):
+                issue_delivery.check_live_approval({**state, "approval_comment": 42})
+            with self.assertRaisesRegex(dev_gate.GateError, "Exactly one"):
+                issue_delivery.check_live_approval({"issue": 44})
+            self.assertEqual(api.call_count, 1)
+        self.write_events(self.proposal(paths=["app/extra.py"]), user)
+        with self.assertRaisesRegex(dev_gate.GateError, "no longer matches"):
+            issue_delivery.check_live_approval(state)
+        self.log.unlink()
+        with self.assertRaisesRegex(dev_gate.GateError, "missing or ambiguous"):
+            issue_delivery.check_live_approval(state)
+
+    def test_prepare_records_active_conversation_without_github_comment(self):
+        self.write_events(self.proposal(), self.event("user_message", self.prompt))
+        target = self.log.parent / "worktree"
+        state_file = self.log.parent / "state.json"
+        args = argparse.Namespace(issue=44, state=state_file, worktree=target,
+                                  codex_approval=True, approval_comment=None)
+        base = "a" * 40
+
+        def git(*args):
+            if args[0] == "remote":
+                return f"https://github.com/{issue_delivery.REPO}.git\n".encode()
+            if args[0] == "rev-parse":
+                return f"{base}\n".encode()
+            self.assertIn(args[0], {"fetch", "worktree"})
+            return b""
+
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": self.thread}), \
+                patch.object(issue_delivery, "api", return_value=self.issue) as api, \
+                patch.object(issue_delivery, "dev_sha", return_value=base), \
+                patch.object(issue_delivery, "git", side_effect=git) as git_mock:
+            issue_delivery.prepare(args)
+            api.assert_called_once_with("issues/44")
+            git_mock.assert_any_call("worktree", "add", "-b", "issue/44", str(target), base)
+        state = dev_gate.load_json(state_file)
+        self.assertEqual(state["codex_approval"]["message"], self.prompt)
+        self.assertEqual(state["paths"], self.scope["paths"])
+        self.assertNotIn("approval_comment", state)
+
+
 class TestDeliveryGate(unittest.TestCase):
     def test_independent_review_for_the_exact_head(self):
         head = "b" * 40
