@@ -133,11 +133,20 @@ class WalkRecordingTests(MotionRecordingAssertions, WalkFixture, unittest.TestCa
         self.assertEqual(len(self.rows(WalkPoint)), 4)
 
     def test_teleport_rejected_and_corrected_retry_accepted(self):
+        """Issue #89 changed this contract (the test ID is kept for the baseline inventory): a GPS
+        jump is stored as a raw observation instead of rejecting the batch, later normal batches
+        are accepted, and the jump is still left out of the confirmed distance."""
         walk = self.begin()
         self.advance(120)
-        self.assertEqual(self.upload(walk["id"], [self.point(), self.point(1, 1, longitude=1)]).status_code, 409)
-        self.assertEqual(self.rows(WalkPoint), [])
-        self.assertEqual(self.upload(walk["id"], [self.point(), self.point(1, 10, longitude="0.0001")]).status_code, 200)
+        jump = self.upload(walk["id"], [self.point(), self.point(1, 1, longitude=1)])
+        self.assertEqual(jump.status_code, 200, jump.text)
+        self.assertEqual((jump.json()["accepted_count"], jump.json()["last_sequence_no"]), (2, 1))
+        self.assertEqual(len(self.rows(WalkPoint)), 2)
+        self.assertEqual(self.upload(walk["id"], [self.point(2, 10, longitude=1),
+                                                 self.point(3, 20, longitude="1.0001")]).status_code, 200)
+        ended = self.end(walk["id"])
+        self.assertEqual(ended.status_code, 200, ended.text)
+        self.assertLess(float(ended.json()["total_distance_m"]), 20)  # only the 1.0000 -> 1.0001 step counts
 
     def test_precision_canonicalization_and_equivalent_offset_retry(self):
         walk = self.begin()

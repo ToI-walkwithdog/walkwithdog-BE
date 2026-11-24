@@ -65,3 +65,13 @@
 - `POST /walks`: 요청과 성공 응답은 그대로다. 현재 발급의 만료되지 않은 미사용 검증이 있어야 하고, Walk 생성과 검증 사용을 한 트랜잭션에 저장한다. 409는 `detail.code`로 나눈다: `WALK_START_CODE_REQUIRED`(코드 다시 확인), `WALK_START_BOOKING_NOT_ELIGIBLE`(예약 상세 갱신), `WALK_START_ALREADY_STARTED`, `WALK_START_RETRYABLE`(활성 산책 먼저 조회). 온보딩 게이트(#81)는 그대로다.
 - 시작 응답이 유실되면 `GET /walks/active`의 `walk_request_id`가 같은 예약일 때만 이어 간다(#84). 예약 상세에는 코드나 검증 데이터가 없다.
 - `030_shelter_code_verification.sql`은 029 다음에 적용하며 추가만 한다. 재실행해도 바뀌지 않는다. 배포 환경에 `SHELTER_CODE_HMAC_KEY`(32자 이상 비밀 값)가 필요하다. 개발 DB 적용과 FE 연동은 별도 승인으로 진행한다.
+
+## GPS, 행동 마커, 안전 신고, 산책 종료 (#89)
+
+- 무수신 자동 종료 정산은 `GET /walks/active`, `POST /walks`, 좌표와 마커 저장 전에 별도 트랜잭션으로 먼저 커밋된다. 그래서 이후 404나 409가 나도 `COMPLETED/AUTO_TIMEOUT`이 남는다. 자동 종료 기준은 그대로 마지막 신규 좌표 서버 수신(없으면 시작) 뒤 1시간 초과이며, 예약 종료나 최대 산책 시간은 `is_overdue` 안내만 한다.
+- `GET /walks/active`에 `last_point_received_at`(서버 수신 시각)과 `auto_end_at`을 추가했다. `auto_end_at`을 지나면(초과 시점부터) 자동 종료된다. 정확히 그 시각에는 아직 진행 중이다.
+- `PATCH /walks/{walk_id}/end`: 이미 무수신 만료된 산책은 사용자 종료나 직원 안전 중단 대신 200과 `COMPLETED/AUTO_TIMEOUT`(종료 시각은 마지막 활동 시각)을 돌려준다. 이미 종료된 산책은 기존 409다.
+- `POST /walks/{walk_id}/points`: 5m/s를 넘는 급이동 관측도 원본 순번으로 저장하고, 거리와 이동 통계에서만 뺀다. 순번, 시각, 중복 규칙은 그대로다.
+- `POST /walks/{walk_id}/markers`: 선택 필드 `client_marker_id`(UUID)와 `position_recorded_at`. 같은 키와 같은 본문은 200과 기존 마커(종료나 상한 뒤에도), 다른 본문은 409다. 좌표는 정확도 50m 이하이고 관측이 선택 시각 이전 30초 이내면 `CURRENT`, 아니면 같은 산책의 2분 이내 저장 좌표를 `LAST_KNOWN`으로 쓴다. 둘 다 없으면 409 `detail.code=MARKER_LOCATION_UNAVAILABLE`이다. 키 없는 기존 호출도 동작한다.
+- `POST /walks/{walk_id}/incidents`: `OTHER`는 trim 후 1~1,000자가 필수이고 모든 설명은 1,000자 이하다(422). 좌표를 생략하면 사건 시각 이전 30초 이내의 저장 좌표만 쓰고, 없으면 `null`로 접수한다. GPS가 없어도 신고는 막지 않는다. 좌표를 생략한 같은 `client_report_id` 재시도는 이후 GPS가 바뀌어도 처음 접수 결과를 200으로 돌려준다.
+- `031_walk_marker_idempotency.sql`은 030 다음에 적용하며 추가만 한다. 재실행해도 바뀌지 않는다. 개발 DB 적용과 FE 연동은 별도 승인으로 진행한다.

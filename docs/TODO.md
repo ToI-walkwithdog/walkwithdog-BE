@@ -70,3 +70,11 @@
 - [ ] 시작 실패가 같은 요청 안의 자동 종료 정산(`close_stale_walks`)을 롤백하지 않도록 커밋 경계를 나눈다(GPS와 종료 보완 Issue).
 - [ ] 발급, 검증, 시작, 취소의 공통 잠금 그래프를 정리하고, 코드 시도 제한의 운영값과 오래된 발급과 시도 기록의 정리 주기를 정한다.
 - [ ] 자동 개발 게이트: 저장된 Codex 승인을 확인할 때 현재 `CODEX_THREAD_ID`도 대조하도록 Claude Code 승인 확인(`CLAUDE_CODE_SESSION_ID`)과 맞춘다(#84 후속). 게이트 변경은 별도 유지보수 PR로 진행한다.
+
+## GPS, 행동 마커, 안전 신고, 산책 종료 (#89)
+
+- [ ] 승인 후 개발 DB에 `030_shelter_code_verification.sql` 다음으로 `031_walk_marker_idempotency.sql`을 적용한다.
+- [ ] FE `/5-1`~`/5-7`, `/5-5-other` 연동: 마커 `client_marker_id`와 `position_recorded_at` 전송, 409 `MARKER_LOCATION_UNAVAILABLE` 안내, 기타 신고 본문 1~1,000자, 활성 응답 `auto_end_at` 기반 장시간 일시정지 안내.
+- [ ] 위치 기준(마커 30초와 2분, 신고 30초, 정확도 50m)의 운영값을 현장 검증 후 정한다.
+- [ ] 신고 좌표의 출처와 관측 시각 필드, 신고 최초 요청 스냅샷 해시로 200과 409 판정 강화.
+- [ ] 마커 키 충돌과 종료 상태 409의 `detail.code` 등 산책 API 오류 형식 통일, 공통 잠금 그래프 정리.

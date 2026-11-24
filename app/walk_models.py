@@ -247,6 +247,10 @@ class WalkMarker(Base):
         choices("location_source", "CURRENT LAST_KNOWN"),
         CheckConstraint("marker_type <> 'OTHER' OR (memo IS NOT NULL AND trim(memo) <> '')", name="ck_marker_other_memo"),
         Index("ix_walk_markers_time", "walk_id", "recorded_at"),
+        # Issue #89 (031): optional client retry key; legacy rows keep both NULL.
+        CheckConstraint("(client_marker_id IS NULL) = (request_fingerprint IS NULL)", name="ck_marker_client_key"),
+        Index("uq_walk_markers_client_marker_id", "walk_id", "client_marker_id", unique=True,
+              postgresql_where=text("client_marker_id IS NOT NULL"), sqlite_where=text("client_marker_id IS NOT NULL")),
     )
 
     id = Column(Integer, primary_key=True)
@@ -257,6 +261,9 @@ class WalkMarker(Base):
     recorded_at = Column(DateTime(timezone=True), nullable=False)
     memo = Column(Text, nullable=True)
     location_source = Column(String(12), nullable=False, default="CURRENT", server_default="CURRENT")
+    client_marker_id = Column(Uuid, nullable=True)
+    request_fingerprint = Column(String(64), nullable=True)
+    position_recorded_at = Column(DateTime(timezone=True), nullable=True)
 
     walk = relationship("Walk", back_populates="markers")
 
