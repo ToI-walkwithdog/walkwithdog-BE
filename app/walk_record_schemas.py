@@ -4,7 +4,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from app.walk_request_schemas import WalkRequestCreate, WalkRequestResponse
 
@@ -154,17 +154,60 @@ class WalkEnd(BaseModel):
     status: Literal["COMPLETED", "INTERRUPTED"] = "COMPLETED"
 
 
+HandoverResult = Literal["COMPLETE", "ISSUE"]
+HandoverReceiptStatus = Literal["SELF_REPORTED", "ISSUE_REPORTED"]
+HandoverStatus = Literal["NOT_REQUIRED", "NOT_CONFIRMED", HandoverReceiptStatus]
+
+
+class WalkHandoverCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    handover_result: HandoverResult
+    dog_returned: StrictBool
+    equipment_returned: StrictBool
+    condition_shared: StrictBool
+    acknowledge_auto_timeout: StrictBool = False
+    issue_description: str | None = None
+
+    @model_validator(mode="after")
+    def validate_checklist(self):
+        all_checked = self.dog_returned and self.equipment_returned and self.condition_shared
+        description = (self.issue_description or "").strip()
+        if self.handover_result == "COMPLETE":
+            if not all_checked or description:
+                raise ValueError("정상 인계는 세 항목을 모두 확인하고 문제 설명을 비워야 합니다.")
+        elif all_checked or not 1 <= len(description) <= 500 or "\x00" in description:
+            raise ValueError("인계 문제는 미완료 항목과 1~500자의 설명이 필요합니다.")
+        self.issue_description = description or None
+        return self
+
+
 class UTCResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     @field_validator(
         "started_at", "ended_at", "expected_end_at", "created_at", "updated_at",
         "recorded_at", "occurred_at", "last_point_recorded_at", "last_point_received_at", "auto_end_at",
+        "self_confirmed_at", "issue_reported_at",
         check_fields=False,
     )
     @classmethod
     def utc_time(cls, value):
         return WalkRequestResponse.utc_datetime(value)
+
+
+class WalkHandoverDetails(UTCResponse):
+    handover_result: HandoverResult
+    dog_returned: bool
+    equipment_returned: bool
+    condition_shared: bool
+    issue_description: str | None
+    self_confirmed_at: datetime | None
+    issue_reported_at: datetime | None
+
+
+class WalkHandoverReceipt(WalkHandoverDetails):
+    walk_id: int
+    handover_status: HandoverReceiptStatus
 
 
 class WalkResponse(UTCResponse):
@@ -278,6 +321,8 @@ class ShelterIncidentItem(UTCResponse):
 
 class WalkDetailResponse(BaseModel):
     walk: WalkResponse
+    handover_status: HandoverStatus
+    handover: WalkHandoverDetails | None
     user_id: int
     dog_id: int
     shelter_id: int

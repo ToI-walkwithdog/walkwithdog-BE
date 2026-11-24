@@ -12,14 +12,15 @@ from app.dependencies import require_role
 from app.models import User, UserRole
 from app.onboarding_common import require_onboarding_for_new_walk
 from app.walk_request_service import owns_date_request, start_conflict
-from app.walk_map_schemas import UserWalksResponse
+from app.walk_map_schemas import WalkHistoryResponse
 from app.walk_map_service import user_walk_history
 from app.walk_record_schemas import (
-    ActiveWalkResponse, PointsReceipt, WalkDetailResponse, WalkEnd, WalkIncidentCreate, WalkIncidentResponse,
-    WalkMarkerCreate, WalkMarkerResponse, WalkPointsBatch, WalkResponse, WalkStart,
+    ActiveWalkResponse, PointsReceipt, WalkDetailResponse, WalkEnd, WalkHandoverCreate, WalkHandoverReceipt,
+    WalkIncidentCreate, WalkIncidentResponse, WalkMarkerCreate, WalkMarkerResponse, WalkPointsBatch, WalkResponse,
+    WalkStart,
 )
 from app.walk_service import (add_marker, append_points, close_stale_walks, end_walk, get_active_walk, report_incident,
-                              start_walk, walk_detail)
+                              save_handover, start_walk, walk_detail)
 
 router = APIRouter(prefix="/walks", tags=["walks"])
 require_volunteer = require_role(UserRole.USER)
@@ -124,6 +125,22 @@ def end(walk_id: int, payload: WalkEnd, actor: User = Depends(get_current_user),
     return persist(db, lambda: end_walk(db, walk_id, actor, payload), WalkResponse, actor)
 
 
+@router.post(
+    "/{walk_id}/handover", response_model=WalkHandoverReceipt, status_code=201,
+    responses={200: {"model": WalkHandoverReceipt, "description": "동일 본문으로 접수된 기존 인계 기록"}},
+)
+def handover(walk_id: int, payload: WalkHandoverCreate, response: Response,
+             actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
+    """종료된 본인 산책의 인계 자가 확인 또는 문제를 접수합니다."""
+    def operation():
+        stored, created = save_handover(db, walk_id, actor, payload)
+        if not created:
+            response.status_code = 200
+        return stored
+
+    return persist(db, operation, WalkHandoverReceipt, actor)
+
+
 @router.get("/active", response_model=ActiveWalkResponse)
 def active(actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
     """현재 로그인한 봉사자의 진행 중인 산책을 복원 조회합니다. 무수신 자동 종료 정산은 먼저 커밋되므로
@@ -132,7 +149,7 @@ def active(actor: User = Depends(require_volunteer), db: Session = Depends(get_d
     return persist(db, lambda: get_active_walk(db, actor), ActiveWalkResponse, actor)
 
 
-@router.get("/history", response_model=UserWalksResponse)
+@router.get("/history", response_model=WalkHistoryResponse)
 def history(
     status: Literal["COMPLETED", "INTERRUPTED"] | None = Query(None),
     end_reason: Literal["USER", "STAFF", "AUTO_TIMEOUT"] | None = Query(None),
@@ -140,9 +157,10 @@ def history(
     offset: int = Query(0, ge=0),
     actor: User = Depends(require_volunteer),
     db: Session = Depends(get_db),
+    handover_status: Literal["NOT_CONFIRMED"] | None = Query(None),
 ):
     """F-12 SC-09: 로그인한 봉사자의 종료된 산책 이력 목록을 시작 시각 최신순으로 조회합니다."""
-    return user_walk_history(db, actor.id, status, end_reason, limit, offset)
+    return user_walk_history(db, actor.id, status, end_reason, limit, offset, handover_status=handover_status)
 
 
 @router.get("/{walk_id}", response_model=WalkDetailResponse)

@@ -63,6 +63,7 @@ class WalkMetadataTests(unittest.TestCase):
             "request_fingerprint", "creation_receipt",
             "cancel_reason_code", "cancelled_at", "cancelled_by", "cancelled_actor_role",
             "client_marker_id", "position_recorded_at",  # Issue #89 (031); request_fingerprint is above
+            "handover_required",  # Issue #93 (032)
         }
         post_007_constraints = {n for n in motion["constraints"]} | {
             "ck_walk_last_coordinate_pair", "ck_walk_last_latitude", "ck_walk_last_longitude",
@@ -188,6 +189,7 @@ class WalkMetadataTests(unittest.TestCase):
                     {"name": "end_reason", "type": "character varying(20)", "not_null": False, "default": None},
                     {"name": "planned_duration_minutes", "type": "integer", "not_null": False, "default": None},
                     {"name": "expected_end_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                    {"name": "handover_required", "type": "boolean", "not_null": True, "default": "false"},
                 ])
                 snapshot["constraints"].update({
                     "ck_walk_last_coordinate_pair": None,

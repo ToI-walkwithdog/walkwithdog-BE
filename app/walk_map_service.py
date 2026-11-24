@@ -9,7 +9,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import NamedTuple
 
 from fastapi import HTTPException
-from sqlalchemy import and_, distinct, func, or_
+from sqlalchemy import and_, distinct, func, or_, true
 from sqlalchemy.orm import contains_eager, joinedload
 
 from app.models import (
@@ -27,6 +27,11 @@ PUBLIC_MAX_ROUTE_POINTS = 100
 PUBLIC_TRIM_M = 150            # drop this much of the route at the start and at the end
 PUBLIC_COORD_DECIMALS = 3      # ~110 m grid
 FINISHED_WALK_STATUSES = ("COMPLETED", "INTERRUPTED")
+WALK_REVIEW_LOADERS = (
+    joinedload(Walk.review),
+    joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.tags),
+    joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.shelter),
+)
 
 
 class Point(NamedTuple):
@@ -43,15 +48,14 @@ def completed_filter(**keys):
     return conditions
 
 
-def walk_page(db, conditions, limit, offset, order=(Walk.started_at.desc(), Walk.id.desc())):
+def walk_page(db, conditions, limit, offset, order=(Walk.started_at.desc(), Walk.id.desc()), *, extra_options=()):
     total = (db.query(func.count(Walk.id)).select_from(Walk)
              .join(WalkRequest, Walk.walk_request_id == WalkRequest.id).filter(*conditions).scalar())
     walks = (db.query(Walk).join(WalkRequest, Walk.walk_request_id == WalkRequest.id)
              .options(
                  contains_eager(Walk.walk_request).joinedload(WalkRequest.dog),
-                 joinedload(Walk.review),
-                 joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.tags),
-                 joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.shelter),
+                 *WALK_REVIEW_LOADERS,
+                 *extra_options,
              )
              .filter(*conditions).order_by(*order).limit(limit).offset(offset).all())
     return total, walks
@@ -175,8 +179,8 @@ def dog_map(db, dog_id, limit, offset):
     }
 
 
-def _serialize_user_walk_items(walks):
-    return [{
+def _serialize_user_walk_item(walk):
+    return {
         "walk_id": walk.id, "walk_request_id": walk.walk_request_id, "dog": walk.walk_request.dog,
         "status": walk.status, "end_reason": walk.end_reason,
         "started_at": walk.started_at, "ended_at": walk.ended_at,
@@ -185,7 +189,7 @@ def _serialize_user_walk_items(walks):
         "rating": walk.review.rating if walk.review is not None else None,
         "has_review": walk.review is not None,
         "shelter_review": serialize_shelter_volunteer_review(walk.volunteer_review),
-    } for walk in walks]
+    }
 
 
 def user_walks(db, user_id, status, limit, offset):
@@ -195,11 +199,36 @@ def user_walks(db, user_id, status, limit, offset):
     total, walks = walk_page(db, conditions, limit, offset)
     return {
         "user_id": user_id, "total": total, "limit": limit, "offset": offset,
-        "walks": _serialize_user_walk_items(walks),
+        "walks": [_serialize_user_walk_item(walk) for walk in walks],
     }
 
 
-def user_walk_history(db, user_id, status, end_reason, limit, offset):
+def pending_handover_page(db, conditions, limit, offset):
+    """Count and page in the same snapshot even when another request submits a handover."""
+    eligible = (
+        db.query(Walk.id, Walk.started_at)
+        .join(WalkRequest)
+        .filter(*conditions, Walk.handover_required.is_(True), ~Walk.handover.has())
+        .cte("pending_handovers")
+    )
+    total = db.query(func.count().label("total")).select_from(eligible).subquery()
+    page_order = (eligible.c.started_at.desc(), eligible.c.id.desc())
+    page = db.query(eligible).order_by(*page_order).limit(limit).offset(offset).subquery()
+    # Begin with the one-row total so an offset past the last page still returns it.
+    rows = (
+        db.query(total.c.total, Walk)
+        .select_from(total)
+        .outerjoin(page, true())
+        .outerjoin(Walk, Walk.id == page.c.id)
+        .options(joinedload(Walk.walk_request).joinedload(WalkRequest.dog), joinedload(Walk.handover),
+                 *WALK_REVIEW_LOADERS)
+        .order_by(page.c.started_at.desc(), page.c.id.desc())
+        .all()
+    )
+    return rows[0].total, [walk for _, walk in rows if walk is not None]
+
+
+def user_walk_history(db, user_id, status, end_reason, limit, offset, *, handover_status=None):
     """F-12 SC-09: 종료된 산책 이력 목록 (COMPLETED, INTERRUPTED 및 AUTO_TIMEOUT 포함, 시작 시각 최신순)."""
     conditions = [WalkRequest.user_id == user_id]
     if status is not None:
@@ -208,10 +237,13 @@ def user_walk_history(db, user_id, status, end_reason, limit, offset):
         conditions.append(Walk.status.in_(FINISHED_WALK_STATUSES))
     if end_reason is not None:
         conditions.append(Walk.end_reason == end_reason)
-    total, walks = walk_page(db, conditions, limit, offset)
+    if handover_status == "NOT_CONFIRMED":
+        total, walks = pending_handover_page(db, conditions, limit, offset)
+    else:
+        total, walks = walk_page(db, conditions, limit, offset, extra_options=(joinedload(Walk.handover),))
     return {
         "user_id": user_id, "total": total, "limit": limit, "offset": offset,
-        "walks": _serialize_user_walk_items(walks),
+        "walks": [dict(_serialize_user_walk_item(walk), handover_status=walk.handover_status) for walk in walks],
     }
 
 

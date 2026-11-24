@@ -440,6 +440,20 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "032_walk_handovers.sql",
+      "sha256": "33c58984dabb9ac1b1058e43ac128b27959cf1301142a9b8673b6a3d34711a2d",
+      "requires": [
+        "031_walk_marker_idempotency.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [
