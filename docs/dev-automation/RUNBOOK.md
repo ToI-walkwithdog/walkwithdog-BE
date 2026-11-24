@@ -26,17 +26,31 @@
 ## 이름 규칙
 
 - 브랜치명, PR 제목, 커밋 메시지에는 Codex, Claude, ChatGPT 등 특정 AI 개발 도구 이름을 넣지 않는다. 작업 목적과 기능을 기준으로 쓴다.
-- 기능 Issue 브랜치는 CLI가 요구하는 `issue/ISSUE`를 쓴다. 수동 유지보수 브랜치는 `chore/<목적>` 형식을 쓴다. 예를 들어 브랜치 `chore/issue-approval`, PR 제목 `[CHORE] Issue 착수 승인 방식 개선`, 커밋 메시지 `chore: Issue 착수 승인 방식 개선`처럼 쓴다.
+- 브랜치명은 Issue 번호가 아니라 작업 종류와 목적으로 짓는다. 영문 소문자와 숫자의 kebab-case만 쓴다.
+
+  | 작업 | 형식 | 예 |
+  |---|---|---|
+  | 기능 개발 | `feature/<기능명>` | `feature/onboarding-status` |
+  | 버그 수정 | `fix/<수정 대상>` | `fix/walk-timer` |
+  | 리팩토링 | `refactor/<대상>` | `refactor/region-service` |
+  | 유지보수 | `chore/<작업명>` | `chore/branch-naming` |
+  | 테스트 | `test/<테스트 대상>` | `test/onboarding-e2e` |
+  | 문서 | `docs/<문서명>` | `docs/runbook` |
+
+- CLI(`branch_name`)는 위 여섯 종류와 `<종류>/<소문자-kebab>` 형식, 80자 이하, AI 도구 이름(`codex`, `claude`, `chatgpt`, `gpt`, `openai`, `anthropic`, `copilot`, `gemini`) 미포함을 검사한다.
+- Issue 번호와 브랜치명은 따로 관리한다. Issue와 PR의 연결은 브랜치명이 아니라 상태 파일의 `issue`, PR 본문의 `toi-scope`와 `Closes #ISSUE`로 유지한다.
+- 수동 유지보수 PR도 같은 규칙을 따른다. 예를 들어 브랜치 `chore/branch-naming`, PR 제목 `[CHORE] 기능 중심 브랜치 네이밍 적용`, 커밋 메시지 `chore: 기능 중심 브랜치 네이밍 적용`처럼 쓴다.
+- `branch`가 없는 기존 승인 기록(예: Issue #44)은 예전 규칙인 `issue/ISSUE`로 해석해 재검증한다. 새 착수 승인 요청에는 항상 `branch`를 넣는다.
 - 도구별 세션 검증 로직, CLI 옵션(`--codex-approval`, `--claude-approval`), 환경 변수(`CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`), 기술 문서에서는 정확한 구분을 위해 필요한 도구명을 쓴다.
 - GitHub Actions 워크플로 이름과 실행 이름은 `CI`, 필수 Job 이름은 `Dev quality gate`로 유지한다. 이미 병합된 PR과 과거 브랜치 이름은 바꾸지 않는다.
 
 ## 승인과 작업 준비
 
 1. Notion, 최신 FE, dev, 기존 Issue와 PR을 검색해 겹치는 기능과 선행 조건을 확인한다. 기존 Issue의 제목과 본문을 확인하고 요구사항, 검증 범위와 실제로 바꿀 정확한 경로를 제시한다. 접근 권한 또는 정책 결정이 빠지면 착수를 보류한다.
-2. 현재 제목과 본문을 `{"title":"...","body":"..."}` JSON 파일에 넣고 `python -m scripts.issue_delivery digest ISSUE.json`으로 제목과 본문의 SHA-256을 계산한다. 사용자에게 제시하는 Codex 또는 Claude Code 최종 답변에 검토할 범위 설명과 아래 코드 블록을 한 번 포함한다. 같은 답변에 이 블록을 두 번 넣거나 도구 호출 중간의 설명에 넣지 않는다. 예시 값은 현재 Issue 데이터로 채운다.
+2. 현재 제목과 본문을 `{"title":"...","body":"..."}` JSON 파일에 넣고 `python -m scripts.issue_delivery digest ISSUE.json`으로 제목과 본문의 SHA-256을 계산한다. 예정 브랜치명을 이름 규칙대로 정한다. 사용자에게 제시하는 Codex 또는 Claude Code 최종 답변에 Issue 번호, 요구사항, 변경 경로, digest, 예정 브랜치명과 아래 코드 블록을 한 번 포함한다. 같은 답변에 이 블록을 두 번 넣거나 도구 호출 중간의 설명에 넣지 않는다. 예시 값은 현재 Issue 데이터로 채운다.
 
 ````toi-approval-request
-{"repository":"ToI-walkwithdog/walkwithdog-BE","issue":44,"title":"<현재 GitHub Issue 제목>","issue_digest":"<제목과 본문의 전체 SHA-256>","paths":["app/routers/example.py","tests/test_example.py"]}
+{"repository":"ToI-walkwithdog/walkwithdog-BE","issue":45,"title":"<현재 GitHub Issue 제목>","issue_digest":"<제목과 본문의 전체 SHA-256>","paths":["app/routers/example.py","tests/test_example.py"],"branch":"feature/example-feature"}
 ````
 
 3. 사용자가 같은 대화에서 아래 문장을 독립된 메시지로 직접 보내면 한 번의 착수 승인으로 처리한다. Issue 번호는 승인 대상에 맞춘다. 인용이나 예시를 포함한 다른 문장, 이미 진행 중인 일에 대한 요약, AI가 쓴 문장은 승인 증빙으로 사용하지 않는다. 중간에 질문이나 변경이 있었다면 최종 범위를 다시 제시한다.
@@ -45,7 +59,7 @@
 Issue #44의 확정된 요구사항과 변경 경로를 확인했어. 해당 Issue의 구현, 독립 리뷰, 테스트, PR 생성, 조건부 dev 병합까지 승인해.
 ````
 
-4. 승인 직후 승인을 받은 세션에서 도구에 맞는 명령을 실행한다. 두 방식 모두 전용 worktree 밖의 개인 상태 파일에 원문, 세션과 시각, Issue 번호와 제목, 제목과 본문의 해시, 허용 경로를 보관한다. 재개, PR 생성 및 병합 때 같은 원본 기록과 현재 GitHub Issue를 다시 확인한다. 저장소, Issue 내용, 승인 범위가 달라지거나 로그를 찾을 수 없으면 멈춘다. 추가 경로가 필요하면 구현 전에 확장된 범위를 다시 승인받는다. 이후 변경 범위, 테스트, 독립 리뷰, CI와 병합 게이트는 승인 방식과 관계없이 같다.
+4. 승인 직후 승인을 받은 세션에서 도구에 맞는 명령을 실행한다. 두 방식 모두 전용 worktree 밖의 개인 상태 파일에 원문, 세션과 시각, Issue 번호와 제목, 제목과 본문의 해시, 허용 경로, 승인된 브랜치명을 보관한다. 새 착수에서는 승인된 브랜치가 로컬과 GitHub에 없고 그 이름을 쓴 PR도 없을 때만 그 브랜치로 worktree를 만든다. 재개 때는 기존 worktree의 현재 브랜치가 승인된 브랜치와 같아야 한다. 상태 파일의 브랜치가 승인 기록과 다르면 착수, PR 생성, 병합을 모두 막는다. 재개, PR 생성 및 병합 때 같은 원본 기록과 현재 GitHub Issue를 다시 확인한다. 저장소, Issue 내용, 승인 범위가 달라지거나 로그를 찾을 수 없으면 멈춘다. 추가 경로가 필요하면 구현 전에 확장된 범위를 다시 승인받는다. 이후 변경 범위, 테스트, 독립 리뷰, CI와 병합 게이트는 승인 방식과 관계없이 같다.
    - Codex: `python -m scripts.issue_delivery prepare ISSUE ../toi-issue-ISSUE --codex-approval --state STATE.json`. CLI는 현재 `CODEX_THREAD_ID`의 표준 로컬 세션 로그(`~/.codex/sessions`)에서 실제 사용자 이벤트와 직전 제안을 읽는다.
    - Claude Code: `python -m scripts.issue_delivery prepare ISSUE ../toi-issue-ISSUE --claude-approval --state STATE.json`. CLI는 Claude Code가 설정한 `CLAUDE_CODE_SESSION_ID`로 `~/.claude/projects/<프로젝트 폴더>/<세션 ID>.jsonl` 세션 기록을 정확히 하나 찾는다. 아래 기준은 Claude Code 2.1.330의 VS Code 확장과 CLI 기록에서 확인했다.
      - 승인 근거는 그 기록의 마지막 사람 입력 레코드다. `type`이 `user`, `origin`이 `{"kind":"human"}`, `turnOrigin`이 `human`, `userType`이 `external`, `promptSource`가 `sdk`(VS Code) 또는 `typed`(CLI)이고 `isSidechain`이 false인 레코드만 사람 입력으로 본다. 도구 결과(`toolUseResult`), 압축 요약, 메타 레코드, 작업 알림, 하위 에이전트 기록은 제외한다.
@@ -60,7 +74,7 @@ Issue #44의 확정된 요구사항과 변경 경로를 확인했어. 해당 Iss
 
 ```text
 <!-- toi-approval
-{"issue":44,"issue_digest":"<전체 SHA-256>","paths":["app/routers/example.py","tests/test_example.py"]}
+{"issue":45,"issue_digest":"<전체 SHA-256>","paths":["app/routers/example.py","tests/test_example.py"],"branch":"feature/example-feature"}
 -->
 ```
 
@@ -90,7 +104,7 @@ CLI는 동일 Issue와 Head, 리뷰 참조와 요약, 빈 차단 목록을 확�
 
 ## PR과 병합 및 복구
 
-- 기존 브랜치에는 일반 merge로 최신 dev를 반영하고 승인된 `issue/ISSUE` 브랜치를 Push한다. `python -m scripts.issue_delivery pr --title "PR 제목" --body PR.md --state STATE.json`은 GitHub에서 같은 브랜치의 기존 PR을 먼저 찾는다. 없으면 정확한 파일 범위와 승인 증빙을 확인한 뒤 Draft를 생성한다. 결과가 모호하면 동일 상태 파일과 생성 요청 기록을 기준으로 GitHub에서 복구한다. 확인 전 재생성은 차단한다. 같은 Issue에는 단일 상태 파일과 실행 잠금을 공유한다. 새 SQL은 정식 등록과 예약 상태를 PR에 설명한다.
+- 기존 브랜치에는 일반 merge로 최신 dev를 반영하고 승인된 브랜치를 Push한다. `python -m scripts.issue_delivery pr --title "PR 제목" --body PR.md --state STATE.json`은 상태 파일의 승인된 브랜치로 GitHub의 기존 PR을 먼저 찾는다. 병합 게이트는 PR의 Head 브랜치가 승인된 브랜치와 같은지도 확인한다. 없으면 정확한 파일 범위와 승인 증빙을 확인한 뒤 Draft를 생성한다. 결과가 모호하면 동일 상태 파일과 생성 요청 기록을 기준으로 GitHub에서 복구한다. 확인 전 재생성은 차단한다. 같은 Issue에는 단일 상태 파일과 실행 잠금을 공유한다. 새 SQL은 정식 등록과 예약 상태를 PR에 설명한다.
 - GitHub CI 결과와 별도 컨텍스트의 리뷰 기록을 확인한 뒤 Ready로 전환한다. `python -m scripts.issue_delivery merge PR --state STATE.json`은 쓰기 없는 미리보기다. 사용자 착수 승인과 경로, 브랜치 보호, 최신 dev 포함, CLEAN, 정확한 Head의 리뷰 기록과 동일 Base 및 Head에서 필수 CI 성공이 모두 필요하다. 승인된 운영 모드에서만 `--execute`를 붙인다. Merge commit과 전체 Head SHA를 사용하고, 병합 커밋 부모, 트리와 dev 반영을 다시 읽는다.
 - 셸 오류나 종료가 있으면 새 Issue나 PR을 먼저 만들지 않는다. 상태 파일을 다시 읽고 GitHub의 Issue, Head 브랜치, PR과 CI 실행을 기준으로 복구한다. 등록 호출의 결과가 불명확하면 같은 제목과 승인 본문을 서버에서 찾아 바인딩한다. 서버에서도 확인이 불가능하면 중복 생성 대신 멈춘다. merge 재실행은 같은 PR의 병합 결과와 현재 dev 도달 가능성을 확인한다. 모호한 응답 또는 예상 밖 트리는 자동으로 되돌리거나 강제 Push하지 않는다.
 - CI나 리뷰 불통과, 신규 회귀, 정책 미확정, 보안 또는 데이터 손실 위험, Notion과 FE의 중대한 충돌, 승인 밖 경로, 충돌이 있으면 중단한다. 기능 Issue의 착수 승인으로는 실제 유료 공급자 호출, 개인정보 삭제 정책 변경, 개발 DB와 운영 DB의 직접 변경, 공용 서버 배포를 수행할 수 없다. 진행 상황과 변경 근거는 PR과 Issue별 상태 파일에 남긴다. 완료 보고에 Issue, PR, 실제 병합 SHA, 구현 결과, 검증과 운영 대기 항목을 적고 다음 Issue 초안을 제시한다.

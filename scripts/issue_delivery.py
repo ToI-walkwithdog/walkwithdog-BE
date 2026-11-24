@@ -25,6 +25,10 @@ CLAUDE_IDE_CONTEXT = re.compile(r"<(ide_opened_file|ide_selection)>.*</\1>", re.
 CLAUDE_PROMPT_SOURCES = {"sdk", "typed"}
 CLAUDE_TURN_MARKERS = {"turn_duration", "away_summary"}
 CONVERSATION_SOURCES = ("codex_approval", "claude_approval")
+# Approved branch names: <type>/<lowercase kebab-case purpose>, no Issue number required.
+BRANCH = re.compile(r"(feature|fix|refactor|chore|test|docs)/[a-z0-9]+(?:-[a-z0-9]+)*")
+BRANCH_MAX_LENGTH = 80
+AI_TOOL_NAMES = ("codex", "claude", "chatgpt", "gpt", "openai", "anthropic", "copilot", "gemini")
 REVIEW = re.compile(r"<!-- toi-review\n(.*?)\n-->", re.DOTALL)
 PROTECTED = (".github/", "docs/dev-automation/", "scripts/dev_", "scripts/issue_delivery.py",
              "scripts/check_migrations.py", "tests/test_dev_delivery.py", "CLAUDE.md", "AGENTS.md", ".gitignore")
@@ -63,16 +67,44 @@ def issue_digest(title, body):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def branch_name(value):
+    if (not isinstance(value, str) or len(value) > BRANCH_MAX_LENGTH or not BRANCH.fullmatch(value)
+            or any(name in value for name in AI_TOOL_NAMES)):
+        raise GateError("The approved branch must be <type>/<lowercase-kebab-name> (feature, fix, refactor, "
+                        "chore, test or docs) without AI tool names")
+    return value
+
+
+def approved_branch(approval, issue):
+    """The branch an approval names. Records approved before branch names were part of the
+    approval have no "branch" field and keep the former issue/<number> branch."""
+    if "branch" not in approval:
+        return f"issue/{issue}"
+    return branch_name(approval["branch"])
+
+
+def check_branch_available(branch):
+    """A new Issue branch must not exist locally or on GitHub, and no PR may have used it."""
+    if git("branch", "--list", branch).strip():
+        raise GateError("The approved branch already exists in this clone; resume its state or approve another name")
+    if git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip():
+        raise GateError("The approved branch already exists on GitHub; approve another name")
+    if rows(f"pulls?state=all&head={REPO.split('/')[0]}:{branch}&per_page=100"):
+        raise GateError("A pull request already used the approved branch name; approve another name")
+
+
 def read_approval(comment_id):
     comment = api(f"issues/comments/{comment_id}")
     user = comment["user"]["login"].lower()
     if comment["user"]["type"] != "User" or user not in logins("TOI_ISSUE_APPROVERS"):
         raise GateError("Approval writer is not in the repository's trusted approver list")
     approval = marker(comment["body"], APPROVAL)
-    if (set(approval) != {"issue", "issue_digest", "paths"} or not
+    if (set(approval) - {"branch"} != {"issue", "issue_digest", "paths"} or not
             re.fullmatch(r"[a-f0-9]{64}", approval["issue_digest"])):
-        raise GateError("Approval requires issue, issue_digest and exact paths")
+        raise GateError("Approval requires issue, issue_digest, exact paths and an optional branch")
     paths(approval["paths"])
+    if "branch" in approval:
+        branch_name(approval["branch"])
     if approval["issue"] is None:
         inbox = positive(variable("TOI_ISSUE_APPROVAL_INBOX"))
         if not comment["issue_url"].endswith(f"/issues/{inbox}"):
@@ -103,12 +135,14 @@ codex_approval_message = approval_message
 
 def conversation_scope(proposal, issue, tool):
     scope = marker(proposal, CODEX_REQUEST)
-    if (set(scope) != {"repository", "issue", "title", "issue_digest", "paths"}
+    if (set(scope) - {"branch"} != {"repository", "issue", "title", "issue_digest", "paths"}
             or scope["repository"] != REPO or type(scope["issue"]) is not int or scope["issue"] != issue
             or not isinstance(scope["title"], str) or not scope["title"].strip()
             or not isinstance(scope["issue_digest"], str)
             or not re.fullmatch(r"[a-f0-9]{64}", scope["issue_digest"])):
         raise GateError(f"The preceding {tool} proposal must identify this repository, Issue and exact scope")
+    if "branch" in scope:
+        branch_name(scope["branch"])
     return {**scope, "paths": sorted(paths(scope["paths"]))}
 
 
@@ -369,10 +403,12 @@ def prepare(args):
             raise GateError("Resume the original conversation approval source")
         approval, approved_at = read_approval(args.approval_comment)
         state = initial_state(args, args.issue, approval)
+    branch = approved_branch(approval, args.issue)
     check_issue(api(f"issues/{args.issue}"), approval, approved_at)
     if previous is None:
         previous = state
-    if any(previous.get(key) != value for key, value in state.items()):
+    if (any(previous.get(key) != value for key, value in state.items())
+            or previous.get("branch", branch) != branch):
         raise GateError("State already belongs to another task")
     if approval["issue"] is None and not args.state.exists():
         raise GateError("Use register to bind the approved new Issue first")
@@ -380,7 +416,6 @@ def prepare(args):
     if remote not in {f"https://github.com/{REPO}", f"git@github.com:{REPO}", f"ssh://git@github.com/{REPO}"}:
         raise GateError("origin must point to the approved repository")
     target = args.worktree.resolve()
-    branch = f"issue/{args.issue}"
     if args.state.resolve().is_relative_to(target):
         raise GateError("Keep the state file outside the feature worktree")
     if "worktree" in previous and previous["worktree"] != str(target):
@@ -401,6 +436,7 @@ def prepare(args):
     git("fetch", "--no-tags", "origin", "refs/heads/dev:refs/remotes/origin/dev")
     if git("rev-parse", "refs/remotes/origin/dev").decode().strip() != base or dev_sha() != base:
         raise GateError("dev moved during fetch; retry preparation")
+    check_branch_available(branch)
     git("worktree", "add", "-b", branch, str(target), base)
     write_state(args.state, {**state, "base": base, "branch": branch, "worktree": str(target)})
     print(f"Prepared {branch} at {base} in {target}")
@@ -444,7 +480,7 @@ def check_pr(pr, state, actual):
     issue, declared = parse_scope(pr["body"])
     if (pr["base"]["ref"] != "dev" or pr["head"]["repo"]["full_name"] != REPO
             or pr["base"]["repo"]["full_name"] != REPO
-            or pr["head"]["ref"] != f"issue/{state['issue']}" or issue != state["issue"]):
+            or not state.get("branch") or pr["head"]["ref"] != state["branch"] or issue != state["issue"]):
         raise GateError("PR repository, Issue or branch does not match the approved scope")
     check_change_scope(state, actual, declared)
     if pr.get("auto_merge"):
@@ -473,16 +509,18 @@ def check_live_approval(state):
     if (approval["issue_digest"] != state["issue_digest"]
             or paths(approval["paths"]) != set(state["paths"])):
         raise GateError("Approval changed since the worktree was prepared")
+    if approved_branch(approval, state["issue"]) != state.get("branch"):
+        raise GateError("The recorded branch is not the approved branch")
     check_issue(api(f"issues/{state['issue']}"), approval, approved_at)
 
 
 def open_pr(args):
     require_enabled()
     state = load_json(args.state)
-    branch = f"issue/{state['issue']}"
-    if state.get("branch") != branch:
+    branch = state.get("branch")
+    if not isinstance(branch, str) or not branch or "worktree" not in state:
         raise GateError("State does not belong to a prepared Issue branch")
-    check_live_approval(state)
+    check_live_approval(state)  # also checks that this branch is the approved one
     candidates = rows(f"pulls?state=all&base=dev&head={REPO.split('/')[0]}:{branch}&per_page=100")
     if len(candidates) > 1:
         raise GateError("Multiple PRs exist on the Issue branch; reconcile on GitHub")
