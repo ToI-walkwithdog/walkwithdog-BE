@@ -1,4 +1,4 @@
-"""Prepare a worktree or deliver one approved dev PR using authenticated GitHub CLI."""
+"""Prepare or deliver one approved dev PR using authenticated GitHub CLI."""
 
 import argparse
 import hashlib
@@ -25,6 +25,11 @@ CLAUDE_IDE_CONTEXT = re.compile(r"<(ide_opened_file|ide_selection)>.*</\1>", re.
 CLAUDE_PROMPT_SOURCES = {"sdk", "typed"}
 CLAUDE_TURN_MARKERS = {"turn_duration", "away_summary"}
 CONVERSATION_SOURCES = ("codex_approval", "claude_approval")
+MODES = ("main", "worktree")
+# Approved branch names: <type>/<lowercase kebab-case purpose>, no Issue number required.
+BRANCH = re.compile(r"(feature|fix|refactor|chore|test|docs)/[a-z0-9]+(?:-[a-z0-9]+)*")
+BRANCH_MAX_LENGTH = 80
+AI_TOOL_NAMES = ("codex", "claude", "chatgpt", "gpt", "openai", "anthropic", "copilot", "gemini")
 REVIEW = re.compile(r"<!-- toi-review\n(.*?)\n-->", re.DOTALL)
 PROTECTED = (".github/", "docs/dev-automation/", "scripts/dev_", "scripts/issue_delivery.py",
              "scripts/check_migrations.py", "tests/test_dev_delivery.py", "CLAUDE.md", "AGENTS.md", ".gitignore")
@@ -63,16 +68,59 @@ def issue_digest(title, body):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def branch_name(value):
+    if (not isinstance(value, str) or len(value) > BRANCH_MAX_LENGTH or not BRANCH.fullmatch(value)
+            or any(name in value for name in AI_TOOL_NAMES)):
+        raise GateError("The approved branch must be <type>/<lowercase-kebab-name> (feature, fix, refactor, "
+                        "chore, test or docs) without AI tool names")
+    return value
+
+
+def approved_branch(approval, issue):
+    """The branch an approval names. Records approved before branch names were part of the
+    approval have no "branch" field and keep the former issue/<number> branch."""
+    if "branch" not in approval:
+        return f"issue/{issue}"
+    return branch_name(approval["branch"])
+
+
+def work_mode(value):
+    if value not in MODES:
+        raise GateError("Work mode must be main or worktree")
+    return value
+
+
+def approved_mode(approval, state):
+    if "mode" in approval:
+        branch_name(approval.get("branch"))
+        return work_mode(approval["mode"])
+    # Approvals predating work modes keep their already recorded worktree.
+    return "worktree" if "worktree" in state and "mode" not in state else "main"
+
+
+def check_branch_available(branch):
+    """A new Issue branch must not exist locally or on GitHub, and no PR may have used it."""
+    if git("branch", "--list", branch).strip():
+        raise GateError("The approved branch already exists in this clone; resume its state or approve another name")
+    if git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip():
+        raise GateError("The approved branch already exists on GitHub; approve another name")
+    if rows(f"pulls?state=all&head={REPO.split('/')[0]}:{branch}&per_page=100"):
+        raise GateError("A pull request already used the approved branch name; approve another name")
+
+
 def read_approval(comment_id):
     comment = api(f"issues/comments/{comment_id}")
     user = comment["user"]["login"].lower()
     if comment["user"]["type"] != "User" or user not in logins("TOI_ISSUE_APPROVERS"):
         raise GateError("Approval writer is not in the repository's trusted approver list")
     approval = marker(comment["body"], APPROVAL)
-    if (set(approval) != {"issue", "issue_digest", "paths"} or not
+    if (set(approval) - {"branch", "mode"} != {"issue", "issue_digest", "paths"} or not
             re.fullmatch(r"[a-f0-9]{64}", approval["issue_digest"])):
-        raise GateError("Approval requires issue, issue_digest and exact paths")
+        raise GateError("Approval requires issue, issue_digest and exact paths, with branch and mode for new work")
     paths(approval["paths"])
+    if "branch" in approval:
+        branch_name(approval["branch"])
+    approved_mode(approval, {})
     if approval["issue"] is None:
         inbox = positive(variable("TOI_ISSUE_APPROVAL_INBOX"))
         if not comment["issue_url"].endswith(f"/issues/{inbox}"):
@@ -103,12 +151,15 @@ codex_approval_message = approval_message
 
 def conversation_scope(proposal, issue, tool):
     scope = marker(proposal, CODEX_REQUEST)
-    if (set(scope) != {"repository", "issue", "title", "issue_digest", "paths"}
+    if (set(scope) - {"branch", "mode"} != {"repository", "issue", "title", "issue_digest", "paths"}
             or scope["repository"] != REPO or type(scope["issue"]) is not int or scope["issue"] != issue
             or not isinstance(scope["title"], str) or not scope["title"].strip()
             or not isinstance(scope["issue_digest"], str)
             or not re.fullmatch(r"[a-f0-9]{64}", scope["issue_digest"])):
         raise GateError(f"The preceding {tool} proposal must identify this repository, Issue and exact scope")
+    if "branch" in scope:
+        branch_name(scope["branch"])
+    approved_mode(scope, {})
     return {**scope, "paths": sorted(paths(scope["paths"]))}
 
 
@@ -276,8 +327,8 @@ def saved_claude_approval(state):
     return current
 
 
-def check_issue(issue, approval, approval_time):
-    if ("pull_request" in issue or issue["state"] != "open"
+def check_issue(issue, approval, approval_time, merged=False):
+    if ("pull_request" in issue or (issue["state"] != "open" and not (merged and issue["state"] == "closed"))
             or ("title" in approval and issue["title"] != approval["title"])
             or issue_digest(issue["title"], issue["body"]) != approval["issue_digest"]):
         raise GateError("Issue is closed or its approved title/body has changed")
@@ -311,8 +362,9 @@ def register(args):
     draft = load_json(args.draft)
     if approval["issue"] is not None or issue_digest(draft["title"], draft["body"]) != approval["issue_digest"]:
         raise GateError("Draft differs from the approved new Issue")
-    pending = {"approval_comment": args.approval_comment, "issue_digest": approval["issue_digest"],
-               "paths": sorted(approval["paths"])}
+    pending = {**initial_state(args, None, approval),
+               **{key: approval[key] for key in ("branch", "mode") if key in approval}}
+    del pending["issue"]
     recorded = load_json(args.state) if args.state.exists() else None
     if recorded is not None:
         if any(recorded.get(key) != value for key, value in pending.items()):
@@ -339,7 +391,7 @@ def register(args):
             json.dump(pending, stream)
         issue = api("issues", "--method", "POST", "-f", f"title={draft['title']}", "-f", f"body={draft['body']}")
         check_issue(issue, approval, approved_at)
-    write_state(args.state, initial_state(args, issue["number"], approval))
+    write_state(args.state, {**pending, "issue": issue["number"]})
     print(issue["html_url"])
 
 
@@ -348,6 +400,76 @@ def dev_sha():
     if not OBJECT_ID.fullmatch(sha):
         raise GateError("GitHub did not return a full dev SHA")
     return sha
+
+
+def fetch_dev():
+    base = dev_sha()
+    git("fetch", "--no-tags", "origin", "refs/heads/dev:refs/remotes/origin/dev")
+    if git("rev-parse", "refs/remotes/origin/dev").decode().strip() != base or dev_sha() != base:
+        raise GateError("dev moved during fetch; retry with the latest dev")
+    return base
+
+
+def repository_paths():
+    remote = git("remote", "get-url", "origin").decode().strip().removesuffix(".git")
+    if remote not in {f"https://github.com/{REPO}", f"git@github.com:{REPO}", f"ssh://git@github.com/{REPO}"}:
+        raise GateError("origin must point to the approved repository")
+    checkout = Path(git("rev-parse", "--show-toplevel").decode().strip()).resolve()
+    entries = git("worktree", "list", "--porcelain", "-z").decode().split("\0")
+    worktrees = [Path(entry.removeprefix("worktree ")).resolve()
+                 for entry in entries if entry.startswith("worktree ")]
+    if not worktrees or checkout not in worktrees or Path.cwd().resolve() != checkout:
+        raise GateError("Run from the root of a registered checkout in the approved repository")
+    return checkout, worktrees
+
+
+def worktree_path(main, branch):
+    target = main.parent / f"{REPO.split('/')[1]}-worktrees" / branch.split("/")[-1]
+    if target.resolve() != target:
+        raise GateError("The approved worktree path must not redirect to another directory")
+    return target
+
+
+def checkout_branch(target, worktrees):
+    if target not in worktrees:
+        raise GateError("The recorded checkout is missing from this clone")
+    prefix = ("-C", str(target), "rev-parse")
+    top = Path(git(*prefix, "--show-toplevel").decode().strip()).resolve()
+    common_args = ("--path-format=absolute", "--git-common-dir")
+    common = Path(git("rev-parse", *common_args).decode().strip()).resolve()
+    if top != target or Path(git(*prefix, *common_args).decode().strip()).resolve() != common:
+        raise GateError("The recorded checkout belongs to another clone")
+    return git("-C", str(target), "branch", "--show-current").decode().strip()
+
+
+def require_clean(target):
+    prefix = ("-C", str(target))
+    if git(*prefix, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none").strip():
+        raise GateError("The checkout has uncommitted or untracked changes; preserve them before continuing")
+    for name in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-apply", "rebase-merge", "sequencer",
+                 "BISECT_START"):
+        path = Path(git(*prefix, "rev-parse", "--git-path", name).decode().strip())
+        if (target / path).exists():
+            raise GateError("Finish the current Git operation before continuing")
+
+
+def prepared_checkout(state, branches=None):
+    if "mode" not in state:
+        if "worktree" not in state or "checkout" in state:
+            raise GateError("State does not belong to a prepared Issue branch")
+        return None  # Historical PR and merge commands did not require a local checkout.
+    if "checkout" not in state or "worktree" in state or state.get("preparing"):
+        raise GateError("State does not belong to a prepared Issue branch")
+    mode = work_mode(state["mode"])
+    checkout, worktrees = repository_paths()
+    main = worktrees[0]
+    target = main if mode == "main" else worktree_path(main, state["branch"])
+    if Path(state["checkout"]) != target or checkout not in {main, target}:
+        raise GateError("Run from the recorded repository or approved worktree")
+    allowed = branches if branches is not None else {state["branch"]}
+    if checkout_branch(target, worktrees) not in allowed:
+        raise GateError("The recorded checkout is not on the approved branch")
+    return target
 
 
 def prepare(args):
@@ -369,40 +491,62 @@ def prepare(args):
             raise GateError("Resume the original conversation approval source")
         approval, approved_at = read_approval(args.approval_comment)
         state = initial_state(args, args.issue, approval)
+    branch = approved_branch(approval, args.issue)
     check_issue(api(f"issues/{args.issue}"), approval, approved_at)
     if previous is None:
         previous = state
-    if any(previous.get(key) != value for key, value in state.items()):
+    if (any(previous.get(key) != value for key, value in state.items())
+            or previous.get("branch", branch) != branch):
         raise GateError("State already belongs to another task")
     if approval["issue"] is None and not args.state.exists():
         raise GateError("Use register to bind the approved new Issue first")
-    remote = git("remote", "get-url", "origin").decode().strip().removesuffix(".git")
-    if remote not in {f"https://github.com/{REPO}", f"git@github.com:{REPO}", f"ssh://git@github.com/{REPO}"}:
-        raise GateError("origin must point to the approved repository")
-    target = args.worktree.resolve()
-    branch = f"issue/{args.issue}"
-    if args.state.resolve().is_relative_to(target):
-        raise GateError("Keep the state file outside the feature worktree")
-    if "worktree" in previous and previous["worktree"] != str(target):
-        raise GateError("Resume the originally recorded worktree")
-    if target.exists():
-        branch_name = git("-C", str(target), "branch", "--show-current").decode().strip()
-        top = Path(git("-C", str(target), "rev-parse", "--show-toplevel").decode().strip()).resolve()
-        common = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir").decode().strip()).resolve()
-        selected = Path(git("-C", str(target), "rev-parse", "--path-format=absolute", "--git-common-dir").decode().strip()).resolve()
-        if branch_name != branch or top != target or common != selected:
-            raise GateError("Existing worktree is not the recorded Issue branch in this clone")
-        write_state(args.state, {**previous, "worktree": str(target), "branch": branch})
+    mode = approved_mode(approval, previous)
+    requested_mode = getattr(args, "mode", None)
+    if previous.get("mode", mode) != mode or (requested_mode is not None and requested_mode != mode):
+        raise GateError("The selected or recorded work mode was not approved")
+    checkout, worktrees = repository_paths()
+    main = worktrees[0]
+    legacy = "worktree" in previous
+    if legacy and ("mode" in approval or "mode" in previous or "checkout" in previous):
+        raise GateError("The legacy state cannot authorize a different work mode")
+    if legacy:
+        target = Path(previous["worktree"])
+    else:
+        target = main if mode == "main" else worktree_path(main, branch)
+    supplied = getattr(args, "worktree", None)
+    if supplied is not None and (mode != "worktree" or supplied.resolve() != target):
+        raise GateError("The worktree path does not match the approved checkout")
+    if any(args.state.resolve().is_relative_to(path) for path in (main, target)):
+        raise GateError("Keep the state file outside the clone and approved checkout")
+    if previous.get("checkout", str(target)) != str(target) or checkout not in {main, target}:
+        raise GateError("Resume from the originally recorded repository or worktree")
+    if "merge_sha" in previous:
+        raise GateError("This Issue already has a verified merge")
+    if legacy or ("checkout" in previous and not previous.get("preparing")):
+        if checkout_branch(target, worktrees) != branch:
+            raise GateError("The recorded checkout is not on the approved branch")
         print(f"Resume {branch} at {target}")
         return
-    if "worktree" in previous:
-        raise GateError("Recorded worktree is missing; recover its branch before continuing")
-    base = dev_sha()
-    git("fetch", "--no-tags", "origin", "refs/heads/dev:refs/remotes/origin/dev")
-    if git("rev-parse", "refs/remotes/origin/dev").decode().strip() != base or dev_sha() != base:
-        raise GateError("dev moved during fetch; retry preparation")
-    git("worktree", "add", "-b", branch, str(target), base)
-    write_state(args.state, {**state, "base": base, "branch": branch, "worktree": str(target)})
+    if "checkout" in previous and target in worktrees and checkout_branch(target, worktrees) == branch:
+        # The checkout succeeded before the state could be finalized.
+        base = previous["base"]
+        if git("-C", str(target), "rev-parse", "HEAD").decode().strip() != base:
+            raise GateError("Interrupted preparation has an unexpected branch HEAD")
+    else:
+        if checkout != main or (mode == "worktree" and target.exists()):
+            raise GateError("Start from the main checkout and use a new approved worktree path")
+        if mode == "main":
+            require_clean(main)
+        base = fetch_dev()
+        check_branch_available(branch)
+        write_state(args.state, {**previous, "base": base, "branch": branch, "mode": mode,
+                                 "checkout": str(target), "preparing": True})
+        if mode == "main":
+            git("switch", "--no-overwrite-ignore", "-c", branch, base)
+        else:
+            git("worktree", "add", "-b", branch, str(target), base)
+    write_state(args.state, {**{k: v for k, v in previous.items() if k != "preparing"},
+                             "base": base, "branch": branch, "mode": mode, "checkout": str(target)})
     print(f"Prepared {branch} at {base} in {target}")
 
 
@@ -444,7 +588,7 @@ def check_pr(pr, state, actual):
     issue, declared = parse_scope(pr["body"])
     if (pr["base"]["ref"] != "dev" or pr["head"]["repo"]["full_name"] != REPO
             or pr["base"]["repo"]["full_name"] != REPO
-            or pr["head"]["ref"] != f"issue/{state['issue']}" or issue != state["issue"]):
+            or not state.get("branch") or pr["head"]["ref"] != state["branch"] or issue != state["issue"]):
         raise GateError("PR repository, Issue or branch does not match the approved scope")
     check_change_scope(state, actual, declared)
     if pr.get("auto_merge"):
@@ -459,7 +603,7 @@ def check_change_scope(state, actual, declared):
         raise GateError("Maintenance or gate changes require separate human review and merge")
 
 
-def check_live_approval(state):
+def check_live_approval(state, merged=False):
     if sum(key in state for key in ("approval_comment", *CONVERSATION_SOURCES)) != 1:
         raise GateError("Exactly one recorded approval source is required")
     if "codex_approval" in state:
@@ -472,18 +616,25 @@ def check_live_approval(state):
         approval, approved_at = read_approval(state["approval_comment"])
     if (approval["issue_digest"] != state["issue_digest"]
             or paths(approval["paths"]) != set(state["paths"])):
-        raise GateError("Approval changed since the worktree was prepared")
-    check_issue(api(f"issues/{state['issue']}"), approval, approved_at)
+        raise GateError("Approval changed since the checkout was prepared")
+    if approved_branch(approval, state["issue"]) != state.get("branch"):
+        raise GateError("The recorded branch is not the approved branch")
+    mode = approved_mode(approval, state)
+    if state.get("mode", "worktree" if "worktree" in state else "main") != mode or (
+            "mode" in approval and "mode" not in state):
+        raise GateError("The recorded work mode is not the approved work mode")
+    check_issue(api(f"issues/{state['issue']}"), approval, approved_at, merged=merged)
 
 
 def open_pr(args):
     require_enabled()
     state = load_json(args.state)
-    branch = f"issue/{state['issue']}"
-    if state.get("branch") != branch:
+    branch = state.get("branch")
+    if not isinstance(branch, str) or not branch or not {"worktree", "checkout"}.intersection(state):
         raise GateError("State does not belong to a prepared Issue branch")
-    check_live_approval(state)
-    candidates = rows(f"pulls?state=all&base=dev&head={REPO.split('/')[0]}:{branch}&per_page=100")
+    check_live_approval(state)  # also checks that this branch is the approved one
+    target = prepared_checkout(state)
+    candidates = rows(f"pulls?state=all&head={REPO.split('/')[0]}:{branch}&per_page=100")
     if len(candidates) > 1:
         raise GateError("Multiple PRs exist on the Issue branch; reconcile on GitHub")
     if candidates:
@@ -504,6 +655,8 @@ def open_pr(args):
             raise GateError("PR body must link the prepared Issue")
         base = dev_sha()
         head = api(f"git/ref/heads/{branch}")["object"]["sha"]
+        if target is not None:
+            require_clean_head(target, head)
         comparison = api(f"compare/{base}...{head}")
         files = comparison["files"]
         if (comparison["merge_base_commit"]["sha"] != base or not files or len(files) >= 300):
@@ -568,6 +721,32 @@ def check_ci(number, base, head):
     return run
 
 
+def require_clean_head(target, head):
+    require_clean(target)
+    if git("-C", str(target), "rev-parse", "HEAD").decode().strip() != head:
+        raise GateError("Local HEAD differs from the pushed PR Head")
+
+
+def sync_main_dev(state_path, state, receipt, head):
+    target = prepared_checkout(state, {state["branch"], "dev"})
+    if git("branch", "--show-current").decode().strip() == state["branch"]:
+        require_clean_head(target, head)
+    else:
+        require_clean(target)
+    latest = fetch_dev()
+    git("merge-base", "--is-ancestor", receipt["merge_sha"], latest)
+    if git("branch", "--list", "dev").strip():
+        git("merge-base", "--is-ancestor", "refs/heads/dev", latest)
+        git("switch", "--no-overwrite-ignore", "dev")
+        git("merge", "--ff-only", "--no-overwrite-ignore", latest)
+    else:
+        git("switch", "--no-overwrite-ignore", "-c", "dev", "--track", "origin/dev")
+    if (git("branch", "--show-current").decode().strip() != "dev"
+            or git("rev-parse", "HEAD").decode().strip() != latest):
+        raise GateError("Local dev did not reach the verified dev commit; re-run the merge receipt")
+    write_state(state_path, {**state, "synced_dev": latest})
+
+
 def deliver(args):
     pr = api(f"pulls/{args.pr}")
     if parse_scope(pr["body"])[0] is None:
@@ -581,10 +760,17 @@ def deliver(args):
     check_pr(pr, state, pull_paths(pr))
     if pr["merged"]:
         result = verify_merge(pr, head)
-        write_state(args.state, {**state, "pr": args.pr, "verified_head": head, **result})
         print(json.dumps(result))
+        if args.execute and "mode" in state:
+            check_live_approval(state, merged=True)
+            complete = {**state, "pr": args.pr, "verified_head": head, **result}
+            if "merge_sha" not in state:
+                write_state(args.state, complete)
+            if state["mode"] == "main" and "synced_dev" not in state:
+                sync_main_dev(args.state, complete, result, head)
         return
     check_live_approval(state)
+    target = prepared_checkout(state)
     base = dev_sha()
     check_current_pr(pr, base, head)
     check_protection(api("branches/dev/protection"))
@@ -596,6 +782,8 @@ def deliver(args):
         return
     require_enabled()
     check_live_approval(state)
+    if target is not None:
+        require_clean_head(target, head)
     current = api(f"pulls/{args.pr}")
     if (dev_sha() != base or current["base"]["sha"] != base or current["head"]["sha"] != head
             or current["mergeable_state"] != "clean" or current["state"] != "open"
@@ -608,8 +796,11 @@ def deliver(args):
     receipt = verify_merge(api(f"pulls/{args.pr}"), head)
     if result["sha"] != receipt["merge_sha"]:
         raise GateError("GitHub receipts disagree")
-    write_state(args.state, {**load_json(args.state), **receipt})
+    complete = {**load_json(args.state), **receipt}
+    write_state(args.state, complete)
     print(json.dumps(receipt))
+    if state.get("mode") == "main":
+        sync_main_dev(args.state, complete, receipt, head)
 
 
 def main():
@@ -621,7 +812,8 @@ def main():
     create.add_argument("draft", type=Path)
     setup = commands.add_parser("prepare")
     setup.add_argument("issue", type=positive)
-    setup.add_argument("worktree", type=Path)
+    setup.add_argument("worktree", type=Path, nargs="?")
+    setup.add_argument("--mode", choices=MODES)
     pr = commands.add_parser("pr")
     pr.add_argument("--title", required=True)
     pr.add_argument("--body", type=Path, required=True)
