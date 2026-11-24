@@ -198,6 +198,8 @@ class WalkHandoverTests(HandoverFixture, unittest.TestCase):
             self.assertEqual((history["total"], history["offset"]), (2, offset))
             self.assertEqual([item["walk_id"] for item in history["walks"]], [expected])
             self.assertEqual(history["walks"][0]["handover_status"], "NOT_CONFIRMED")
+        past_end = self.history(handover_status="NOT_CONFIRMED", limit=1, offset=2).json()
+        self.assertEqual((past_end["total"], past_end["walks"]), (2, []))
         filtered = self.history(handover_status="NOT_CONFIRMED", status="INTERRUPTED", end_reason="STAFF").json()
         self.assertEqual([item["walk_id"] for item in filtered["walks"]], [newer])
         self.assertEqual(filtered["total"], 1)

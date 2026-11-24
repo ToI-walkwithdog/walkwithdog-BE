@@ -198,3 +198,30 @@ class WalkHandoverPostgresTests(IsolatedPostgres, HandoverFixture, unittest.Test
         self.assertEqual((replay.status_code, replay.json()), (200, stored.json()))
         self.assertEqual(len(reads), 2)
         self.assertEqual(len(self.handover_rows()), 1)
+
+    def test_pending_history_count_and_page_use_same_snapshot_during_submission(self):
+        self.finish()
+        selected, submitted = Event(), Event()
+
+        def hold_history_result(connection, cursor, statement, parameters, context, executemany):
+            if "FROM walk_handovers" in statement and not selected.is_set():
+                selected.set()
+                if not submitted.wait(8):
+                    raise AssertionError("handover was not submitted during history lookup")
+
+        event.listen(self.engine, "after_cursor_execute", hold_history_result)
+        self.addCleanup(event.remove, self.engine, "after_cursor_execute", hold_history_result)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            response = pool.submit(self.history, handover_status="NOT_CONFIRMED")
+            try:
+                self.assertTrue(selected.wait(8), "history did not execute its pending-walk SELECT")
+                self.assertEqual(self.handover().status_code, 201)
+            finally:
+                submitted.set()
+            history = response.result(timeout=10).json()
+
+        self.assertEqual(history["total"], 1)
+        self.assertEqual([(walk["walk_id"], walk["handover_status"]) for walk in history["walks"]],
+                         [(self.walk_id, "NOT_CONFIRMED")])
+        refreshed = self.history(handover_status="NOT_CONFIRMED").json()
+        self.assertEqual((refreshed["total"], refreshed["walks"]), (0, []))
