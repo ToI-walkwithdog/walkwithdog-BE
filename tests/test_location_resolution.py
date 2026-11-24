@@ -135,6 +135,8 @@ def test_active_general_user_required_before_provider_call(location_app, token, 
     '{"latitude":91,"longitude":127}', '{"latitude":-91,"longitude":127}',
     '{"latitude":37,"longitude":181}', '{"latitude":37,"longitude":-181}',
     '{"latitude":NaN,"longitude":127}', '{"latitude":37,"longitude":1e309}',
+    pytest.param(b'{"latitude":37,"longitude":"\xff"}', id="invalid-utf8"),
+    pytest.param('{"latitude":' + "9" * 5000 + ',"longitude":127}', id="oversized-json-number"),
 ])
 def test_invalid_json_coordinates_are_rejected_without_provider_or_echo(location_app, raw_body, monkeypatch):
     client, build_opener, _ = location_app

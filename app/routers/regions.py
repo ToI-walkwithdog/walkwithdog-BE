@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.account_status import is_active
 from app.api_contract import ContractError, ContractErrorResponse, ContractRoute, ok
@@ -49,15 +50,25 @@ def get_sigungu(sido_code: str | None = Query(None, description="시도 코드 2
     return _no_store(ok({"sido_code": sido_code, "regions": regions}, "시군구 목록을 조회했습니다."))
 
 
+def _invalid_coordinates() -> ContractError:
+    return ContractError(422, "INVALID_COORDINATES", "위치 정보를 확인해 주세요.")
+
+
 class LocationResolutionRoute(ContractRoute):
     def validation_error(self, exc):
-        return ContractError(422, "INVALID_COORDINATES", "위치 정보를 확인해 주세요.")
+        return _invalid_coordinates()
 
     def get_route_handler(self):
         handler = super().get_route_handler()
 
         async def location_handler(request):
-            response = await handler(request)
+            try:
+                response = await handler(request)
+            except StarletteHTTPException as exc:
+                # FastAPI uses 400 when JSON decoding fails before validation (e.g. invalid UTF-8).
+                if exc.status_code != 400:
+                    raise
+                response = _invalid_coordinates().response()
             if response.status_code == 401:
                 response = contract_unauthorized("AUTHENTICATION_REQUIRED").response()
             return _no_store(response)
