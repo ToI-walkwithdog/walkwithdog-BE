@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+import logging
 import os
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +13,10 @@ from app.routers import shelter_codes, walk_requests
 from app.routers import walks, walk_maps, walk_reviews, walk_guides, shelter_volunteer_reviews
 from app.routers import policies, regions
 from app.routers import onboarding_basic, onboarding_experience, onboarding_routine, age_review
+from app.volunteer_level_service import POLL_SECONDS, get_level_policy, run_pending_evaluations
 from app.walk_service import close_stale_walks
+
+logger = logging.getLogger(__name__)
 
 # Existing DB changes must go through explicit, backed-up migrations.
 # Opt-in only for a fresh/isolated development database.
@@ -43,17 +47,35 @@ async def periodic_stale_walks_check():
             pass
 
 
+async def periodic_level_evaluation_check(policy, stopped: asyncio.Event):
+    while not stopped.is_set():
+        try:
+            await asyncio.to_thread(run_pending_evaluations, SessionLocal, policy)
+        except Exception as exc:
+            logger.warning("Volunteer level evaluation poll failed (%s)", type(exc).__name__)
+        try:
+            await asyncio.wait_for(stopped.wait(), timeout=POLL_SECONDS)
+        except TimeoutError:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    policy = get_level_policy()
     task = asyncio.create_task(periodic_stale_walks_check())
+    stopped = asyncio.Event()
+    level_task = asyncio.create_task(periodic_level_evaluation_check(policy, stopped)) if policy is not None else None
     try:
         yield
     finally:
         task.cancel()
+        stopped.set()
         try:
             await task
         except asyncio.CancelledError:
             pass
+        if level_task is not None:
+            await level_task
 
 
 app = FastAPI(lifespan=lifespan)

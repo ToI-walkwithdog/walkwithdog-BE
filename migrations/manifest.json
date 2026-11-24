@@ -468,6 +468,20 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "034_volunteer_level_up.sql",
+      "sha256": "a18d5811587de51afc802525df0f3226f32b0ef05ce37f2ec53eb1b02e799017",
+      "requires": [
+        "033_walk_private_memos.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [

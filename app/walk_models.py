@@ -227,6 +227,8 @@ class Walk(Timestamps, Base):
     incidents = relationship("WalkIncident", back_populates="walk", passive_deletes="all")
     handover = relationship("WalkHandover", back_populates="walk", uselist=False, passive_deletes="all")
     private_memo = relationship("WalkPrivateMemo", back_populates="walk", uselist=False, passive_deletes="all")
+    level_evaluation = relationship("VolunteerLevelEvaluation", back_populates="walk", uselist=False,
+                                    passive_deletes="all")
 
 
 class WalkHandover(Timestamps, Base):
@@ -282,6 +284,53 @@ class WalkPrivateMemo(Timestamps, Base):
     version = Column(Integer, nullable=False)
 
     walk = relationship("Walk", back_populates="private_memo")
+
+
+class VolunteerLevelEvaluation(Base):
+    """A completed evaluation is one credited walk, independent of the existing volunteer totals."""
+
+    __tablename__ = "volunteer_level_evaluations"
+    __table_args__ = (
+        UniqueConstraint("walk_id", "user_id", name="uq_volunteer_level_evaluations_walk_user"),
+        CheckConstraint(
+            "(status = 'COMPLETED' AND next_retry_at IS NULL) OR (status = 'FAILED' AND next_retry_at IS NOT NULL)",
+            name="ck_volunteer_level_evaluation_state",
+        ),
+        Index("ix_volunteer_level_evaluations_user_status", "user_id", "status"),
+    )
+
+    walk_id = Column(Integer, reference("walks"), primary_key=True, autoincrement=False)
+    user_id = Column(Integer, reference("users"), nullable=False)
+    status = Column(String(9), nullable=False)
+    policy_version = Column(String(64), nullable=False)
+    evaluated_at = Column(DateTime(timezone=True), nullable=False)
+    next_retry_at = Column(DateTime(timezone=True), nullable=True)
+
+    walk = relationship("Walk", back_populates="level_evaluation")
+    event = relationship("VolunteerLevelEvent", back_populates="evaluation", uselist=False, passive_deletes="all")
+
+
+class VolunteerLevelEvent(Base):
+    __tablename__ = "volunteer_level_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("walk_id", "user_id"), ("volunteer_level_evaluations.walk_id", "volunteer_level_evaluations.user_id"),
+            name="fk_volunteer_level_events_evaluation", ondelete="NO ACTION",
+        ),
+        UniqueConstraint("user_id", "walk_id", name="uq_volunteer_level_events_user_walk"),
+        CheckConstraint("before_level >= 1 AND after_level > before_level AND after_level <= 5",
+                        name="ck_volunteer_level_event_increase"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    walk_id = Column(Integer, nullable=False)
+    before_level = Column(Integer, nullable=False)
+    after_level = Column(Integer, nullable=False)
+    policy_version = Column(String(64), nullable=False)
+    earned_at = Column(DateTime(timezone=True), nullable=False)
+
+    evaluation = relationship("VolunteerLevelEvaluation", back_populates="event")
 
 
 class WalkPoint(Base):
