@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import Base, engine, SessionLocal
 from app.models import Dog
 from app.routers import auth, users, shelter_incidents, shelter_live_walks, shelters, dogs, surveys, matching, public_api, breed_traits, simulation, personality, chat
-from app.routers import walk_requests
+from app.routers import shelter_codes, walk_requests
 from app.routers import walks, walk_maps, walk_reviews, walk_guides, shelter_volunteer_reviews
 from app.routers import policies, regions
 from app.routers import onboarding_basic, onboarding_experience, onboarding_routine, age_review
@@ -76,6 +76,7 @@ app.include_router(public_api.router)
 app.include_router(breed_traits.router)
 app.include_router(simulation.router)
 app.include_router(walk_requests.router)
+app.include_router(shelter_codes.router)
 app.include_router(walk_reviews.router)
 app.include_router(walks.router)
 app.include_router(walk_maps.router)

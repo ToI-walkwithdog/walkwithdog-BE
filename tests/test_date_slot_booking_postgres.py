@@ -175,7 +175,8 @@ class DateSlotConcurrencyTests(IsolatedPostgres, DateBookingFixture, unittest.Te
                 self.assertEqual(conflict.json()["detail"]["code"], "REQUEST_LOCK_CONFLICT")
                 retry = self.start(request_id)
                 self.assertEqual(retry.status_code, 409, retry.text)
-                self.assertIn("다른 작업과 충돌", retry.json()["detail"])
+                self.assertEqual(retry.json()["detail"]["code"], "WALK_START_RETRYABLE")  # Issue #87
+                self.assertIn("다른 작업과 충돌", retry.json()["detail"]["message"])
             finally:
                 release.set()
             self.assertEqual(writer.result(timeout=8).status_code, 201)

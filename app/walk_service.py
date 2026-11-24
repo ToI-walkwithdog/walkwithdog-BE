@@ -19,8 +19,9 @@ from app.volunteer_stats import refresh_volunteer_profile
 from app.gps_geometry import EARTH_RADIUS_M, distance_m
 from app.gps_motion_analysis import analyze_motion
 from app.gps_motion_config import MAX_SPEED_M_S
+from app.shelter_code_service import usable_verification
 from app.walk_request_service import (
-    as_utc, locked_profile, locked_request, lock_row, validate_linked_eligibility, validate_walk_start,
+    as_utc, locked_profile, locked_request, lock_row, start_conflict, validate_linked_eligibility, validate_walk_start,
 )
 
 MAX_ACCURACY_M = Decimal("50")
@@ -107,15 +108,24 @@ def start_walk(db, actor, payload):
     now = utc_now()
     close_stale_walks(db, now=now, user_id=actor.id)
     if not as_utc(request.requested_start_at) <= now < as_utc(request.requested_end_at):
-        raise HTTPException(409, "승인된 예약 시간 안에서만 산책을 시작할 수 있습니다.")
+        raise start_conflict("WALK_START_BOOKING_NOT_ELIGIBLE", "승인된 예약 시간 안에서만 산책을 시작할 수 있습니다.")
     locked_profile(db, request.user_id)
-    date_slot = validate_linked_eligibility(db, request, request.dog, request.user, require_future=False)
+    try:
+        date_slot = validate_linked_eligibility(db, request, request.dog, request.user, require_future=False)
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        raise start_conflict("WALK_START_BOOKING_NOT_ELIGIBLE", exc.detail) from None
     active = db.query(Walk.id).join(WalkRequest).filter(
         Walk.status == "IN_PROGRESS",
         or_(WalkRequest.dog_id == request.dog_id, WalkRequest.user_id == request.user_id),
     ).first()
     if active:
-        raise HTTPException(409, "강아지 또는 봉사자가 이미 산책 중입니다.")
+        raise start_conflict("WALK_START_ALREADY_STARTED", "강아지 또는 봉사자가 이미 산책 중입니다.")
+    # Issue #87: a current, verified, unused shelter code is required; it is used in this transaction.
+    verification = usable_verification(db, request, actor.id, now)
+    if verification is None:
+        raise start_conflict("WALK_START_CODE_REQUIRED", "보호소 코드를 다시 확인해 주세요.")
     planned_duration_minutes = resolve_planned_duration_minutes(db, request, date_slot)
     expected_end_at = now + timedelta(minutes=planned_duration_minutes)
     walk = Walk(
@@ -126,6 +136,8 @@ def start_walk(db, actor, payload):
         expected_end_at=expected_end_at,
     )
     db.add(walk)
+    db.flush()
+    verification.used_at = now  # Rolled back together with the Walk if the start fails to commit.
     db.flush()
     return walk
 

@@ -443,3 +443,6 @@ from app.walk_models import (  # noqa: E402,F401
     WalkReview, WalkReviewTag, ShelterVolunteerReview, ShelterVolunteerReviewTag,
     DogTraitSummary, VolunteerProfile, WalkIncident,
 )
+
+# Shelter start codes reference walk_requests and users (Issue #87).
+from app.shelter_code_models import ShelterCodeAttempt, ShelterCodeIssuance  # noqa: E402,F401

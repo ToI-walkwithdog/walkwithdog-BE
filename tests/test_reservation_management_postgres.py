@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 
 from test_date_slot_booking import DateBookingFixture
 from test_date_slot_booking_postgres import DateSlotMigrationFixture, IsolatedPostgres, TEST_URL
+from walk_record_test_support import seed_start_code
 from walk_request_test_support import NOW
 
 
@@ -41,6 +42,9 @@ class ReservationConcurrencyTests(IsolatedPostgres, DateBookingFixture, unittest
         slot_id = self.create_slot()
         request_id = self.submit(slot_id, uuid4()).json()["data"]["id"]
         self.assertEqual(self.act(request_id, "APPROVE").status_code, 200)
+        # Issue #87: seed the verified code before the race; inserting it while the cancel holds
+        # the reservation lock would wait on the foreign key instead of reaching the start.
+        seed_start_code(self.Session, request_id)
 
         def start_during_cancel():
             self.advance(0)

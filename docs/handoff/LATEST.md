@@ -57,3 +57,11 @@
 - `PATCH /walk-requests/{request_id}`의 `CANCEL`은 선택 사유 `SCHEDULE_CHANGED`, `CANNOT_VISIT`, 생략 또는 `null`을 받는다. 시작 전이며 Walk 기록이 없는 대기·승인 건만 취소할 수 있다. 재전송의 `409 REQUEST_ALREADY_CANCELLED` 또는 응답 유실 후 같은 ID의 상세로 상태를 복구한다. 취소와 함께 기록한 `cancelled_at`은 UTC이고 당시 역할은 `USER`, `SHELTER`, `ADMIN` 중 하나다.
 - 홈에서 `GET /walks/active`가 돌려준 `walk_request_id`로 진행 중 산책을 복구한다. 활성 산책이 없음을 뜻하는 404를 받으면 `GET /walk-requests/my?startable_only=true&limit=1`로 서버 시각이 시작 이상, 종료 미만인 승인 예약 중 Walk 기록이 없는 첫 후보를 조회한다. 카드와 시작 요청은 같은 예약 ID를 사용한다.
 - `029_reservation_cancellation.sql`은 028 이후 적용한다. 이전 취소의 빈 메타데이터와 승인·거절 이력, 날짜 슬롯 참조를 보존한다. 개발 DB 적용과 실제 FE 연동은 별도 승인으로 진행한다.
+
+## 보호소 코드 인증과 산책 시작 (#87)
+
+- `POST /walk-requests/{request_id}/shelter-code`: 해당 예약 보호소 담당자와 관리자만 발급한다. 승인 예약이고 서버 시각이 시작 이상 종료 미만이며 Walk 기록이 없을 때 201 `SHELTER_CODE_ISSUED`와 `data.request_id`, `shelter_code`(앞자리 0 포함 6자리 문자열), `expires_at`(UTC, 발급 10분 뒤와 예약 종료 중 빠른 시각)을 돌려준다. 재발급하면 이전 코드와 그 검증이 무효가 된다. 원문 코드는 이 응답에만 있고 DB에는 HMAC만 저장한다.
+- `POST /walk-requests/{request_id}/shelter-code/verify`: 예약 본인이 `{"shelter_code": "012345"}`를 보낸다. 성공은 200 `SHELTER_CODE_VERIFIED`, `data.verified_until`. 같은 유효 코드 재제출은 같은 결과다. 불일치, 미발급, 만료는 422 `SHELTER_CODE_INVALID`이고 실패 횟수를 커밋한 뒤 응답한다. 연속 5회째는 429 `SHELTER_CODE_RATE_LIMITED`와 `data.retry_after_seconds`, `Retry-After`이며 5분 동안 재발급과 무관하게 막힌다. 형식 오류(422 `INVALID_SHELTER_CODE_FORMAT`), 권한(403), 예약 자격(409 `WALK_REQUEST_NOT_ELIGIBLE`)은 횟수에 넣지 않는다. 일시적 잠금 충돌은 409 `WALK_REQUEST_RETRYABLE`이다.
+- `POST /walks`: 요청과 성공 응답은 그대로다. 현재 발급의 만료되지 않은 미사용 검증이 있어야 하고, Walk 생성과 검증 사용을 한 트랜잭션에 저장한다. 409는 `detail.code`로 나눈다: `WALK_START_CODE_REQUIRED`(코드 다시 확인), `WALK_START_BOOKING_NOT_ELIGIBLE`(예약 상세 갱신), `WALK_START_ALREADY_STARTED`, `WALK_START_RETRYABLE`(활성 산책 먼저 조회). 온보딩 게이트(#81)는 그대로다.
+- 시작 응답이 유실되면 `GET /walks/active`의 `walk_request_id`가 같은 예약일 때만 이어 간다(#84). 예약 상세에는 코드나 검증 데이터가 없다.
+- `030_shelter_code_verification.sql`은 029 다음에 적용하며 추가만 한다. 재실행해도 바뀌지 않는다. 배포 환경에 `SHELTER_CODE_HMAC_KEY`(32자 이상 비밀 값)가 필요하다. 개발 DB 적용과 FE 연동은 별도 승인으로 진행한다.

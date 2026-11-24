@@ -11,7 +11,7 @@ from app.database import get_db
 from app.dependencies import require_role
 from app.models import User, UserRole
 from app.onboarding_common import require_onboarding_for_new_walk
-from app.walk_request_service import owns_date_request
+from app.walk_request_service import owns_date_request, start_conflict
 from app.walk_map_schemas import UserWalksResponse
 from app.walk_map_service import user_walk_history
 from app.walk_record_schemas import (
@@ -39,6 +39,11 @@ def persist(db, operation, response_model, actor, *, start_request_id=None):
         original = getattr(exc, "orig", None)
         code = getattr(original, "pgcode", None)
         name = getattr(getattr(original, "diag", None), "constraint_name", None)
+        if start_request_id is not None:  # Issue #87: the start screen branches on detail.code.
+            if code in ("55P03", "40P01", "40001"):
+                raise start_conflict("WALK_START_RETRYABLE", "다른 작업과 충돌했습니다. 진행 중 산책을 확인한 뒤 다시 시도하세요.") from None
+            if code == "23505" and name == "uq_walks_request":
+                raise start_conflict("WALK_START_ALREADY_STARTED", "이미 산책이 시작된 예약입니다.") from None
         if code in ("55P03", "40P01", "40001"):
             raise HTTPException(409, "다른 작업과 충돌했습니다. 다시 조회한 뒤 재시도하세요.") from None
         if code == "23505" and name in ("uq_walks_request", "uq_walk_points_sequence"):
