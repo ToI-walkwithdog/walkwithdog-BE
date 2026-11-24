@@ -186,39 +186,38 @@ def prepare(args):
     print(f"Prepared {branch} at {base} in {target}")
 
 
-def check_protection(protection):
-    status = protection.get("required_status_checks") or {}
+def check_protection(protection, branch="dev"):
     reviews = protection.get("required_pull_request_reviews") or {}
-    if (not status.get("strict") or not any(check["context"] == CHECK and check.get("app_id") == 15368
-                                       for check in status.get("checks", []))
-            or not protection["enforce_admins"]["enabled"]
-            or protection["allow_force_pushes"]["enabled"]
-            or protection["allow_deletions"]["enabled"]
-            or reviews.get("required_approving_review_count", 0) < 1
-            or not reviews.get("dismiss_stale_reviews")
-            or not reviews.get("require_last_push_approval")
-            or reviews.get("bypass_pull_request_allowances", {}).get("users")
-            or reviews.get("bypass_pull_request_allowances", {}).get("teams")
-            or reviews.get("bypass_pull_request_allowances", {}).get("apps")):
-        raise GateError("dev must enforce strict GitHub Actions checks, first-party review and branch protection")
+    bypass = reviews.get("bypass_pull_request_allowances") or {}
+    if (protection.get("enforce_admins", {}).get("enabled") is not True
+            or protection.get("allow_force_pushes", {}).get("enabled") is not False
+            or protection.get("allow_deletions", {}).get("enabled") is not False
+            or reviews.get("required_approving_review_count") != 0
+            or reviews.get("require_code_owner_reviews")
+            or reviews.get("require_last_push_approval")
+            or any(bypass.get(kind) for kind in ("users", "teams", "apps"))):
+        raise GateError(f"{branch} must require PRs with zero GitHub approvals, no bypass, "
+                        "no force pushes and no branch deletion")
+    if branch == "dev":
+        status = protection.get("required_status_checks") or {}
+        if (not status.get("strict")
+                or not any(check["context"] == CHECK and check.get("app_id") == 15368
+                           for check in status.get("checks", []))
+                or protection.get("required_linear_history", {}).get("enabled")):
+            raise GateError("dev must require the up-to-date GitHub Actions check and allow merge commits")
 
 
-def check_reviews(reviews, trusted, independent, number, head):
-    latest = {}
-    for review in reviews:
-        if review["state"] in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
-            latest[review["user"]["login"].lower()] = review
-    if any(review["state"] == "CHANGES_REQUESTED" and name in trusted for name, review in latest.items()):
-        raise GateError("An independent reviewer still requests changes")
-    for name, review in latest.items():
-        if (name in independent and review["state"] == "APPROVED" and review["commit_id"] == head):
-            try:
-                evidence = marker(review["body"], REVIEW)
-            except (ValueError, TypeError):
-                continue
-            if evidence == {"issue": number, "head": head, "blockers": []}:
-                return
-    raise GateError("No independent approval of this exact head with an empty blockers list")
+def check_reviews(body, number, head):
+    evidence = marker(body, REVIEW)
+    if (set(evidence) != {"issue", "head", "context", "summary", "blockers"}
+            or type(evidence["issue"]) is not int or evidence["issue"] != number
+            or not OBJECT_ID.fullmatch(head) or evidence["head"] != head
+            or not all(isinstance(evidence[key], str) and evidence[key].strip()
+                       for key in ("context", "summary"))
+            or evidence["blockers"] != []):
+        raise GateError("PR needs a separate-context review record for this Issue and exact Head "
+                        "with a summary and no blockers")
+    # GitHub records the PR body editor, not the identity of the agent that produced this evidence.
 
 
 def check_pr(pr, state, actual):
@@ -360,13 +359,8 @@ def deliver(args):
     base = dev_sha()
     check_current_pr(pr, base, head)
     check_protection(api("branches/dev/protection"))
-    actor = gh("user")["login"].lower()
-    author = pr["user"]["login"].lower()
-    trusted = logins("TOI_ISSUE_REVIEWERS")
-    independent = {name for name in trusted - {actor, author}
-                   if api(f"collaborators/{name}/permission")["permission"] in {"write", "maintain", "admin"}}
-    check_reviews(rows(f"pulls/{args.pr}/reviews?per_page=100"), trusted, independent, state["issue"], head)
-
+    check_protection(api("branches/main/protection"), "main")
+    check_reviews(pr["body"], state["issue"], head)
     run = check_ci(args.pr, base, head)
     if not args.execute:
         print(f"Verified PR #{args.pr} at {head}. Preview only.")

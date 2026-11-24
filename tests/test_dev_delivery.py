@@ -1,5 +1,4 @@
 import argparse
-import copy
 import json
 import os
 from pathlib import Path
@@ -176,41 +175,90 @@ class TestRegressionGate(unittest.TestCase):
 class TestDeliveryGate(unittest.TestCase):
     def test_independent_review_for_the_exact_head(self):
         head = "b" * 40
-        approval = {"state": "APPROVED", "user": {"login": "reviewer"}, "commit_id": head,
-                    "body": '<!-- toi-review\n' + json.dumps({"issue": 44, "head": head, "blockers": []}) + '\n-->'}
-        issue_delivery.check_reviews([approval], {"reviewer"}, {"reviewer"}, 44, head)
-        with self.assertRaisesRegex(dev_gate.GateError, "No independent approval"):
-            issue_delivery.check_reviews([], {"reviewer"}, {"reviewer"}, 44, head)
-        for reviewers, reviewed_head in ((set(), head), ({"reviewer"}, "c" * 40)):
-            with self.subTest(reviewers=reviewers), self.assertRaises(dev_gate.GateError):
-                issue_delivery.check_reviews([approval], {"reviewer"}, reviewers, 44, reviewed_head)
-        rejection = {**approval, "state": "CHANGES_REQUESTED"}
-        with self.assertRaises(dev_gate.GateError):
-            issue_delivery.check_reviews([approval, rejection], {"reviewer"}, {"reviewer"}, 44, head)
+        evidence = {"issue": 44, "head": head, "context": "separate-review-task",
+                    "summary": "Checked API contract and regression tests", "blockers": []}
+
+        def body(review):
+            return '<!-- toi-review\n' + json.dumps(review) + '\n-->'
+
+        issue_delivery.check_reviews(body(evidence), 44, head)
+        for invalid in ("No review", body(evidence) + body(evidence),
+                        body({**evidence, "issue": 45}), body({**evidence, "head": "c" * 40}),
+                        body({**evidence, "context": " "}), body({**evidence, "summary": None}),
+                        body({**evidence, "blockers": ["Potential data loss"]}),
+                        body({**evidence, "blockers": None})):
+            with self.subTest(body=invalid), self.assertRaises(dev_gate.GateError):
+                issue_delivery.check_reviews(invalid, 44, head)
 
     def test_no_release_with_protection_bypass(self):
         rules = {
             "required_status_checks": {"strict": True, "checks": [{"context": issue_delivery.CHECK, "app_id": 15368}]},
             "enforce_admins": {"enabled": True}, "allow_force_pushes": {"enabled": False},
             "allow_deletions": {"enabled": False},
-            "required_pull_request_reviews": {"required_approving_review_count": 1,
-                                              "dismiss_stale_reviews": True, "require_last_push_approval": True},
+            "required_pull_request_reviews": {"required_approving_review_count": 0},
         }
         issue_delivery.check_protection(rules)
+        for change in ({"required_pull_request_reviews": None},
+                       {"required_pull_request_reviews": {"required_approving_review_count": 1}},
+                       {"required_pull_request_reviews": {"required_approving_review_count": 0,
+                                                          "require_code_owner_reviews": True}},
+                       {"required_pull_request_reviews": {"required_approving_review_count": 0,
+                                                          "require_last_push_approval": True}},
+                       {"required_pull_request_reviews": {"required_approving_review_count": 0,
+                                                          "bypass_pull_request_allowances": {"users": ["maintainer"]}}},
+                       {"enforce_admins": {"enabled": False}}, {"allow_force_pushes": {"enabled": True}},
+                       {"allow_deletions": {"enabled": True}}):
+            with self.subTest(change=change), self.assertRaises(dev_gate.GateError):
+                issue_delivery.check_protection({**rules, **change})
+        for change in ({"required_status_checks": {"strict": False, "checks": rules["required_status_checks"]["checks"]}},
+                       {"required_status_checks": {"strict": True,
+                                                   "checks": [{"context": issue_delivery.CHECK, "app_id": 1}]}},
+                       {"required_linear_history": {"enabled": True}}):
+            with self.subTest(change=change), self.assertRaises(dev_gate.GateError):
+                issue_delivery.check_protection({**rules, **change})
+        issue_delivery.check_protection({**rules, "required_status_checks": None}, "main")
         with self.assertRaises(dev_gate.GateError):
-            issue_delivery.check_protection({})
-        changed = copy.deepcopy(rules)
-        changed["required_pull_request_reviews"]["bypass_pull_request_allowances"] = {"users": ["maintainer"]}
-        with self.assertRaises(dev_gate.GateError):
-            issue_delivery.check_protection(changed)
-        for key in ("enforce_admins", "required_status_checks", "allow_force_pushes"):
-            with self.subTest(key=key):
-                changed = copy.deepcopy(rules)
-                for prop in ("enabled", "strict"):
-                    if prop in changed[key]:
-                        changed[key][prop] = not changed[key][prop]
-                with self.assertRaises(dev_gate.GateError):
-                    issue_delivery.check_protection(changed)
+            issue_delivery.check_protection({}, "main")
+
+    def test_preview_uses_review_record_without_github_approvals(self):
+        number, issue = 68, 44
+        base, head = "a" * 40, "b" * 40
+        branch = f"issue/{issue}"
+        repo = {"full_name": issue_delivery.REPO}
+        scope = {"issue": issue, "paths": ["app/x.py"]}
+        evidence = {"issue": issue, "head": head, "context": "separate-review-task",
+                    "summary": "Reviewed the change and its tests", "blockers": []}
+        body = '<!-- toi-scope\n' + json.dumps(scope) + '\n-->\n'
+        body += '<!-- toi-review\n' + json.dumps(evidence) + '\n-->'
+        pr = {"body": body, "base": {"ref": "dev", "sha": base, "repo": repo},
+              "head": {"ref": branch, "sha": head, "repo": repo}, "merged": False,
+              "state": "open", "draft": False, "mergeable": True, "mergeable_state": "clean"}
+        protection = {"enforce_admins": {"enabled": True}, "allow_force_pushes": {"enabled": False},
+                      "allow_deletions": {"enabled": False},
+                      "required_pull_request_reviews": {"required_approving_review_count": 0}}
+        responses = {
+            f"pulls/{number}": pr,
+            f"compare/{base}...{head}": {"merge_base_commit": {"sha": base}},
+            "branches/main/protection": protection,
+            "branches/dev/protection": {**protection, "required_status_checks": {
+                "strict": True, "checks": [{"context": issue_delivery.CHECK, "app_id": 15368}],
+            }},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.json"
+            issue_delivery.write_state(state, {**scope, "pr": number, "branch": branch})
+            saved = state.read_bytes()
+            args = argparse.Namespace(pr=number, state=state, execute=False)
+            with patch.object(issue_delivery, "api", side_effect=responses.__getitem__) as api, \
+                    patch.object(issue_delivery, "pull_paths", return_value={"app/x.py"}), \
+                    patch.object(issue_delivery, "check_live_approval") as approval, \
+                    patch.object(issue_delivery, "dev_sha", return_value=base), \
+                    patch.object(issue_delivery, "check_ci") as ci:
+                issue_delivery.deliver(args)
+                approval.assert_called_once()
+                ci.assert_called_once_with(number, base, head)
+                self.assertEqual(api.call_count, 4)
+            self.assertEqual(state.read_bytes(), saved)
 
     def test_intake_registration_cannot_write_when_disabled(self):
         with patch.object(issue_delivery, "variable", return_value="false"), \

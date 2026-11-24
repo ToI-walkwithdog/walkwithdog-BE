@@ -754,6 +754,7 @@
     "tests/test_dev_delivery.py::TestDeliveryGate::test_no_release_with_protection_bypass",
     "tests/test_dev_delivery.py::TestDeliveryGate::test_pr_missing_latest_dev_is_blocked",
     "tests/test_dev_delivery.py::TestDeliveryGate::test_pr_recovers_existing_results_and_blocks_ambiguous_repeat",
+    "tests/test_dev_delivery.py::TestDeliveryGate::test_preview_uses_review_record_without_github_approvals",
     "tests/test_dev_delivery.py::TestRegressionGate::test_bootstrap_cannot_hide_a_dev_id_in_the_candidate_registry",
     "tests/test_dev_delivery.py::TestRegressionGate::test_exact_declaration",
     "tests/test_dev_delivery.py::TestRegressionGate::test_missing_collected_or_executed_tests_and_new_tests",
