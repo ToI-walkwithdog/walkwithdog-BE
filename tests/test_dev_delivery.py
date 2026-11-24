@@ -1,4 +1,5 @@
 import argparse
+from contextlib import chdir
 import json
 import os
 from pathlib import Path
@@ -272,31 +273,32 @@ class TestCodexApproval(unittest.TestCase):
 
     def test_prepare_records_active_conversation_without_github_comment(self):
         self.write_events(self.proposal(), self.event("user_message", self.prompt))
-        target = self.log.parent / "worktree"
+        target = self.log.parent / "main"
         state_file = self.log.parent / "state.json"
-        args = argparse.Namespace(issue=44, state=state_file, worktree=target,
+        args = argparse.Namespace(issue=44, state=state_file,
                                   codex_approval=True, approval_comment=None)
         base = "a" * 40
 
         def git(*args):
-            if args[0] == "remote":
-                return f"https://github.com/{issue_delivery.REPO}.git\n".encode()
             if args[0] == "rev-parse":
                 return f"{base}\n".encode()
-            self.assertIn(args[0], {"fetch", "worktree", "branch", "ls-remote"})
+            self.assertIn(args[0], {"fetch", "switch", "branch", "ls-remote"})
             return b""
 
         with patch.dict(os.environ, {"CODEX_THREAD_ID": self.thread}), \
+                patch.object(issue_delivery, "repository_paths", return_value=(target, [target])), \
+                patch.object(issue_delivery, "require_clean"), \
                 patch.object(issue_delivery, "api", return_value=self.issue) as api, \
                 patch.object(issue_delivery, "dev_sha", return_value=base), \
                 patch.object(issue_delivery, "rows", return_value=[]), \
                 patch.object(issue_delivery, "git", side_effect=git) as git_mock:
             issue_delivery.prepare(args)
             api.assert_called_once_with("issues/44")
-            git_mock.assert_any_call("worktree", "add", "-b", "issue/44", str(target), base)
+            git_mock.assert_any_call("switch", "--no-overwrite-ignore", "-c", "issue/44", base)
         state = dev_gate.load_json(state_file)
         self.assertEqual(state["codex_approval"]["message"], self.prompt)
         self.assertEqual(state["paths"], self.scope["paths"])
+        self.assertEqual(state["mode"], "main")
         self.assertNotIn("approval_comment", state)
 
 
@@ -496,27 +498,27 @@ class TestClaudeApproval(unittest.TestCase):
 
     def test_prepare_records_active_session_and_keeps_its_source(self):
         self.write(self.proposal(), self.human(self.prompt))
-        target = self.log.parent / "worktree"
+        target = self.home / "main"
         state_file = self.home / "state.json"
-        args = argparse.Namespace(issue=44, state=state_file, worktree=target,
+        args = argparse.Namespace(issue=44, state=state_file,
                                   codex_approval=False, claude_approval=True, approval_comment=None)
         base = "a" * 40
 
         def git(*args):
-            if args[0] == "remote":
-                return f"https://github.com/{issue_delivery.REPO}.git\n".encode()
             if args[0] == "rev-parse":
                 return f"{base}\n".encode()
-            self.assertIn(args[0], {"fetch", "worktree", "branch", "ls-remote"})
+            self.assertIn(args[0], {"fetch", "switch", "branch", "ls-remote"})
             return b""
 
         with patch.object(issue_delivery, "api", return_value=self.issue) as api, \
+                patch.object(issue_delivery, "repository_paths", return_value=(target, [target])), \
+                patch.object(issue_delivery, "require_clean"), \
                 patch.object(issue_delivery, "dev_sha", return_value=base), \
                 patch.object(issue_delivery, "rows", return_value=[]), \
                 patch.object(issue_delivery, "git", side_effect=git) as git_mock:
             issue_delivery.prepare(args)
             api.assert_called_once_with("issues/44")
-            git_mock.assert_any_call("worktree", "add", "-b", "issue/44", str(target), base)
+            git_mock.assert_any_call("switch", "--no-overwrite-ignore", "-c", "issue/44", base)
             state = dev_gate.load_json(state_file)
             self.assertEqual(state["claude_approval"]["message"], self.prompt)
             self.assertEqual(state["paths"], self.scope["paths"])
@@ -530,8 +532,9 @@ class TestClaudeApproval(unittest.TestCase):
 
     def test_approved_feature_branch_is_created_and_bound_to_the_state(self):
         branch = "feature/onboarding-status"
-        self.write(self.proposal(branch=branch), self.human(self.prompt))
-        target = self.log.parent / "worktree"
+        self.write(self.proposal(branch=branch, mode="worktree"), self.human(self.prompt))
+        main = self.home / "walkwithdog-BE"
+        target = self.home / "walkwithdog-BE-worktrees" / "onboarding-status"
         state_file = self.home / "state.json"
         args = argparse.Namespace(issue=44, state=state_file, worktree=target,
                                   codex_approval=False, claude_approval=True, approval_comment=None)
@@ -540,13 +543,12 @@ class TestClaudeApproval(unittest.TestCase):
 
         def git(*args):
             calls.append(args)
-            if args[0] == "remote":
-                return f"https://github.com/{issue_delivery.REPO}.git\n".encode()
             if args[0] == "rev-parse":
                 return f"{base}\n".encode()
             return b""
 
         with patch.object(issue_delivery, "api", return_value=self.issue), \
+                patch.object(issue_delivery, "repository_paths", return_value=(main, [main])), \
                 patch.object(issue_delivery, "dev_sha", return_value=base), \
                 patch.object(issue_delivery, "rows", return_value=[]) as rows, \
                 patch.object(issue_delivery, "git", side_effect=git):
@@ -558,6 +560,7 @@ class TestClaudeApproval(unittest.TestCase):
             self.assertIn(("worktree", "add", "-b", branch, str(target), base), calls)
             state = dev_gate.load_json(state_file)
             self.assertEqual((state["branch"], state["claude_approval"]["branch"]), (branch, branch))
+            self.assertEqual((state["mode"], state["claude_approval"]["mode"]), ("worktree", "worktree"))
             issue_delivery.check_live_approval(state)
             with self.assertRaisesRegex(dev_gate.GateError, "not the approved branch"):
                 issue_delivery.check_live_approval({**state, "branch": "feature/other-work"})
@@ -573,9 +576,9 @@ class TestClaudeApproval(unittest.TestCase):
 
     def test_cli_offers_three_mutually_exclusive_approval_sources(self):
         root = Path(__file__).resolve().parents[1]
-        command = [sys.executable, "-m", "scripts.issue_delivery", "prepare", "44", "worktree", "--state", "s.json"]
+        command = [sys.executable, "-m", "scripts.issue_delivery", "prepare", "44", "--state", "s.json"]
         shown = subprocess.run([*command, "--help"], cwd=root, capture_output=True, text=True, check=True)
-        for option in ("--approval-comment", "--codex-approval", "--claude-approval"):
+        for option in ("--approval-comment", "--codex-approval", "--claude-approval", "--mode {main,worktree}"):
             self.assertIn(option, shown.stdout)
         both = subprocess.run([*command, "--codex-approval", "--claude-approval"], cwd=root,
                               capture_output=True, text=True)
@@ -657,7 +660,7 @@ class TestDeliveryGate(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "state.json"
-            issue_delivery.write_state(state, {**scope, "pr": number, "branch": branch})
+            issue_delivery.write_state(state, {**scope, "pr": number, "branch": branch, "worktree": "C:/work/x"})
             saved = state.read_bytes()
             args = argparse.Namespace(pr=number, state=state, execute=False)
             with patch.object(issue_delivery, "api", side_effect=responses.__getitem__) as api, \
@@ -813,7 +816,7 @@ class TestApprovedBranch(unittest.TestCase):
                 with self.subTest(branch=branch), self.assertRaisesRegex(dev_gate.GateError, "approved branch"):
                     issue_delivery.read_approval(42)
             api.return_value = with_body({**data, "base": "main"})
-            with self.assertRaisesRegex(dev_gate.GateError, "optional branch"):
+            with self.assertRaisesRegex(dev_gate.GateError, "branch and mode"):
                 issue_delivery.read_approval(42)
 
     def test_live_approval_blocks_a_branch_that_was_not_approved(self):
@@ -885,7 +888,7 @@ class TestApprovedBranch(unittest.TestCase):
                     patch.object(issue_delivery, "api", side_effect=api):
                 issue_delivery.open_pr(args)
                 rows.assert_called_once_with(
-                    f"pulls?state=all&base=dev&head=ToI-walkwithdog:{self.BRANCH}&per_page=100")
+                    f"pulls?state=all&head=ToI-walkwithdog:{self.BRANCH}&per_page=100")
             self.assertEqual(dev_gate.load_json(args.state)["pr"], 73)
 
     def test_conditional_merge_runs_only_for_the_approved_branch(self):
@@ -944,3 +947,190 @@ class TestApprovedBranch(unittest.TestCase):
             self.assertIn((f"pulls/{number}/merge", "--method", "PUT", "-f", "merge_method=merge", "-f", f"sha={head}"),
                           [call.args for call in self.calls])
             self.assertEqual(dev_gate.load_json(state)["merge_sha"], merge)
+
+
+class TestWorkMode(unittest.TestCase):
+    BRANCH = "feature/onboarding-status"
+
+    def setUp(self):
+        workspace = self.enterContext(tempfile.TemporaryDirectory())
+        self.main = Path(workspace).resolve() / "walkwithdog-BE"
+        self.main.mkdir()
+        self.enterContext(chdir(self.main))
+        self.git = dev_gate.git
+        self.git("init", "--initial-branch=dev")
+        self.git("config", "user.name", "Delivery test")
+        self.git("config", "user.email", "delivery@example.invalid")
+        self.git("remote", "add", "origin", f"https://github.com/{issue_delivery.REPO}.git")
+        Path(".gitignore").write_text("notes.local\n", encoding="utf-8")
+        self.git("add", ".gitignore")
+        self.git("commit", "--no-gpg-sign", "-m", "dev base")
+        self.base = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-ref", "refs/remotes/origin/dev", self.base)
+        self.worktree = self.main.parent / "walkwithdog-BE-worktrees" / "onboarding-status"
+        self.args = argparse.Namespace(issue=45, state=self.main.parent / "state.json",
+                                       codex_approval=False, approval_comment=42)
+        self.issue = {"number": 45, "state": "open", "title": "status", "body": "details"}
+        self.approval = {"issue": 45, "issue_digest": issue_delivery.issue_digest("status", "details"),
+                         "paths": ["app/x.py"], "branch": self.BRANCH, "mode": "main"}
+        self.enterContext(patch.object(issue_delivery, "read_approval", return_value=(self.approval, "today")))
+        self.enterContext(patch.object(issue_delivery, "rows", return_value=[]))
+        self.api = self.enterContext(patch.object(issue_delivery, "api", return_value=self.issue))
+        self.dev_sha = self.enterContext(patch.object(issue_delivery, "dev_sha", return_value=self.base))
+
+        def local_git(*args):
+            if args[0] in {"fetch", "ls-remote"}:
+                return b""
+            return self.git(*args)
+
+        self.enterContext(patch.object(issue_delivery, "git", side_effect=local_git))
+
+    def test_main_prepare_and_resume_reuse_the_main_checkout(self):
+        issue_delivery.prepare(self.args)
+        state = dev_gate.load_json(self.args.state)
+        self.assertEqual((state["mode"], state["checkout"], state["base"]), ("main", str(self.main), self.base))
+        self.assertEqual(self.git("branch", "--show-current").decode().strip(), self.BRANCH)
+        self.assertEqual(len(issue_delivery.repository_paths()[1]), 1)
+        self.assertEqual(issue_delivery.prepared_checkout(state), self.main)
+        saved = self.args.state.read_bytes()
+        Path("wip").write_text("uncommitted work", encoding="utf-8")
+        issue_delivery.prepare(self.args)
+        self.assertEqual(self.args.state.read_bytes(), saved)
+        self.assertEqual(Path("wip").read_text(encoding="utf-8"), "uncommitted work")
+
+    def test_worktree_uses_the_explicitly_approved_sibling_path(self):
+        self.approval["mode"] = "worktree"
+        issue_delivery.prepare(self.args)
+        state = dev_gate.load_json(self.args.state)
+        self.assertEqual((state["mode"], state["checkout"]), ("worktree", str(self.worktree)))
+        self.assertEqual(self.git("branch", "--show-current").strip(), b"dev")
+        with chdir(self.worktree):
+            self.assertEqual(issue_delivery.prepared_checkout(state), self.worktree)
+            issue_delivery.prepare(self.args)
+        with self.assertRaisesRegex(dev_gate.GateError, "approved checkout"):
+            issue_delivery.prepare(argparse.Namespace(**vars(self.args), worktree=self.main.parent / "other"))
+
+    def test_unapproved_or_edited_mode_is_blocked(self):
+        self.approval.pop("mode")
+        with self.assertRaisesRegex(dev_gate.GateError, "not approved"):
+            issue_delivery.prepare(argparse.Namespace(**vars(self.args), mode="worktree"))
+        self.assertFalse(self.args.state.exists())
+        self.approval["mode"] = "main"
+        issue_delivery.prepare(self.args)
+        state = {**dev_gate.load_json(self.args.state), "mode": "worktree"}
+        issue_delivery.write_state(self.args.state, state)
+        with self.assertRaisesRegex(dev_gate.GateError, "not approved"):
+            issue_delivery.prepare(self.args)
+        with self.assertRaisesRegex(dev_gate.GateError, "not the approved work mode"):
+            issue_delivery.check_live_approval(state)
+
+    def test_approval_sources_validate_explicit_modes(self):
+        scope = {**self.approval, "repository": issue_delivery.REPO, "title": self.issue["title"]}
+        for tool in ("Codex", "Claude Code"):
+            for mode in ("main", "worktree", "parallel", None):
+                proposal = "```toi-approval-request\n" + json.dumps({**scope, "mode": mode}) + "\n```"
+                with self.subTest(tool=tool, mode=mode):
+                    if mode in ("main", "worktree"):
+                        self.assertEqual(issue_delivery.conversation_scope(proposal, 45, tool)["mode"], mode)
+                    else:
+                        with self.assertRaisesRegex(dev_gate.GateError, "Work mode"):
+                            issue_delivery.conversation_scope(proposal, 45, tool)
+
+    def test_uncommitted_and_untracked_changes_block_switches(self):
+        for relative in (".gitignore", "untracked"):
+            with self.subTest(path=relative):
+                path = Path(relative)
+                original = path.read_bytes() if path.exists() else None
+                path.write_text("local edit", encoding="utf-8")
+                with self.assertRaisesRegex(dev_gate.GateError, "uncommitted or untracked"):
+                    issue_delivery.prepare(self.args)
+                self.assertEqual(path.read_text(encoding="utf-8"), "local edit")
+                self.assertEqual(self.git("branch", "--show-current").strip(), b"dev")
+                self.assertFalse(self.args.state.exists())
+                if original is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(original)
+
+    def test_wrong_checkout_path_and_origin_are_blocked(self):
+        self.git("remote", "set-url", "origin", "https://example.invalid/other.git")
+        with self.assertRaisesRegex(dev_gate.GateError, "approved repository"):
+            issue_delivery.prepare(self.args)
+        self.git("remote", "set-url", "origin", f"https://github.com/{issue_delivery.REPO}.git")
+        issue_delivery.prepare(self.args)
+        state = {**dev_gate.load_json(self.args.state), "checkout": str(self.main.parent / "other")}
+        with self.assertRaisesRegex(dev_gate.GateError, "recorded repository"):
+            issue_delivery.prepared_checkout(state)
+        Path("subdir").mkdir()
+        with chdir("subdir"), self.assertRaisesRegex(dev_gate.GateError, "root"):
+            issue_delivery.prepare(self.args)
+
+    def test_preparation_resumes_after_switch_before_state_write(self):
+        write_state = issue_delivery.write_state
+
+        def interrupt_after_switch(path, state):
+            if not state.get("preparing"):
+                raise OSError("interrupted")
+            write_state(path, state)
+
+        with patch.object(issue_delivery, "write_state", side_effect=interrupt_after_switch):
+            with self.assertRaisesRegex(OSError, "interrupted"):
+                issue_delivery.prepare(self.args)
+        self.assertTrue(dev_gate.load_json(self.args.state)["preparing"])
+        issue_delivery.prepare(self.args)
+        self.assertNotIn("preparing", dev_gate.load_json(self.args.state))
+        self.assertEqual(self.git("branch", "--show-current").decode().strip(), self.BRANCH)
+
+    def test_ignored_file_that_would_be_overwritten_is_preserved(self):
+        self.git("switch", "-c", "before-latest-dev")
+        Path("notes.local").write_text("tracked upstream", encoding="utf-8")
+        self.git("add", "-f", "notes.local")
+        self.git("commit", "--no-gpg-sign", "-m", "dev adds a formerly ignored file")
+        latest = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("switch", "dev")
+        self.git("update-ref", "refs/remotes/origin/dev", latest)
+        self.dev_sha.return_value = latest
+        Path("notes.local").write_text("private local notes", encoding="utf-8")
+        with self.assertRaises(subprocess.CalledProcessError):
+            issue_delivery.prepare(self.args)
+        self.assertEqual(Path("notes.local").read_text(encoding="utf-8"), "private local notes")
+        self.assertEqual(self.git("branch", "--show-current").strip(), b"dev")
+        self.assertFalse(self.git("branch", "--list", self.BRANCH).strip())
+
+    def test_verified_merge_syncs_dev_and_retries_safely_after_dirty_checkout(self):
+        issue_delivery.prepare(self.args)
+        state = dev_gate.load_json(self.args.state)
+        self.git("switch", "dev")
+        Path("from-dev").write_text("merged content", encoding="utf-8")
+        self.git("add", "from-dev")
+        self.git("commit", "--no-gpg-sign", "-m", "merged commit")
+        merged = self.git("rev-parse", "HEAD").decode().strip()
+        # Model a local dev that is behind the fetched, verified dev.
+        self.git("switch", self.BRANCH)
+        self.git("update-ref", "refs/heads/dev", self.base)
+        self.git("update-ref", "refs/remotes/origin/dev", merged)
+        self.dev_sha.return_value = merged
+        receipt = {"merge_sha": merged, "dev_sha": merged}
+        state = {**state, "pr": 73, "verified_head": self.base, **receipt}
+        issue_delivery.write_state(self.args.state, state)
+        Path("wip").write_text("in progress", encoding="utf-8")
+        with self.assertRaisesRegex(dev_gate.GateError, "uncommitted or untracked"):
+            issue_delivery.sync_main_dev(self.args.state, state, receipt, self.base)
+        self.assertNotIn("synced_dev", dev_gate.load_json(self.args.state))
+        Path("wip").unlink()
+        issue_delivery.sync_main_dev(self.args.state, state, receipt, self.base)
+        self.assertEqual(dev_gate.load_json(self.args.state)["synced_dev"], merged)
+        self.assertEqual(self.git("branch", "--show-current").strip(), b"dev")
+        self.assertEqual(self.git("rev-parse", "HEAD").decode().strip(), merged)
+
+    def test_merged_legacy_preview_preserves_state_bytes(self):
+        state = {"issue": 45, "branch": self.BRANCH, "worktree": str(self.worktree), "pr": 73}
+        issue_delivery.write_state(self.args.state, state)
+        original = self.args.state.read_bytes()
+        head = "b" * 40
+        self.api.return_value = {"merged": True, "head": {"sha": head},
+                                 "body": '<!-- toi-scope\n{"issue":45,"paths":["app/x.py"]}\n-->'}
+        with patch.object(issue_delivery, "pull_paths"), patch.object(issue_delivery, "check_pr"), \
+                patch.object(issue_delivery, "verify_merge", return_value={"merge_sha": "c" * 40}):
+            issue_delivery.deliver(argparse.Namespace(state=self.args.state, pr=73, execute=False))
+        self.assertEqual(self.args.state.read_bytes(), original)
