@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from app.walk_record_schemas import HandoverStatus, UTCResponse, WalkIncidentResponse, WalkMarkerResponse
 
@@ -37,6 +37,31 @@ class WalkReviewResponse(UTCResponse):
     updated_at: datetime
 
 
+class WalkPrivateMemoWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memo: Annotated[str, StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=1000)]
+    expected_version: Annotated[int, Field(strict=True, ge=0)]
+
+    @field_validator("memo")
+    @classmethod
+    def validate_storable_text(cls, memo: str) -> str:
+        if "\x00" in memo:
+            raise ValueError("메모에 저장할 수 없는 문자가 있습니다.")
+        return memo
+
+
+class WalkPrivateMemoResponse(UTCResponse):
+    memo: str
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class WalkPrivateMemoReceipt(WalkPrivateMemoResponse):
+    walk_id: int
+
+
 class SummaryWalkInfo(UTCResponse):
     id: int
     status: str
@@ -58,6 +83,7 @@ class SummaryPoint(BaseModel):
 class WalkSummaryResponse(BaseModel):
     walk: SummaryWalkInfo
     handover_status: HandoverStatus
+    private_memo: WalkPrivateMemoResponse | None = None
     summary: SummaryMetrics
     points: list[SummaryPoint]
     points_total: int
