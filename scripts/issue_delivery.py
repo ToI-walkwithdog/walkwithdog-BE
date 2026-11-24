@@ -19,6 +19,12 @@ CHECK = "Dev quality gate"
 APPROVAL = re.compile(r"<!-- toi-approval\n(.*?)\n-->", re.DOTALL)
 CODEX_REQUEST = re.compile(r"```toi-approval-request\n(.*?)\n```", re.DOTALL)
 CODEX_THREAD = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+CLAUDE_SESSION = "CLAUDE_CODE_SESSION_ID"
+# Editor context the VS Code extension attaches to a prompt as separate text blocks.
+CLAUDE_IDE_CONTEXT = re.compile(r"<(ide_opened_file|ide_selection)>.*</\1>", re.DOTALL)
+CLAUDE_PROMPT_SOURCES = {"sdk", "typed"}
+CLAUDE_TURN_MARKERS = {"turn_duration", "away_summary"}
+CONVERSATION_SOURCES = ("codex_approval", "claude_approval")
 REVIEW = re.compile(r"<!-- toi-review\n(.*?)\n-->", re.DOTALL)
 PROTECTED = (".github/", "docs/dev-automation/", "scripts/dev_", "scripts/issue_delivery.py",
              "scripts/check_migrations.py", "tests/test_dev_delivery.py", "CLAUDE.md", "AGENTS.md", ".gitignore")
@@ -87,9 +93,23 @@ def codex_session(thread):
     return matches[0]
 
 
-def codex_approval_message(issue):
+def approval_message(issue):
     return (f"Issue #{issue}의 확정된 요구사항과 변경 경로를 확인했어. "
             "해당 Issue의 구현, 독립 리뷰, 테스트, PR 생성, 조건부 dev 병합까지 승인해.")
+
+
+codex_approval_message = approval_message
+
+
+def conversation_scope(proposal, issue, tool):
+    scope = marker(proposal, CODEX_REQUEST)
+    if (set(scope) != {"repository", "issue", "title", "issue_digest", "paths"}
+            or scope["repository"] != REPO or type(scope["issue"]) is not int or scope["issue"] != issue
+            or not isinstance(scope["title"], str) or not scope["title"].strip()
+            or not isinstance(scope["issue_digest"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", scope["issue_digest"])):
+        raise GateError(f"The preceding {tool} proposal must identify this repository, Issue and exact scope")
+    return {**scope, "paths": sorted(paths(scope["paths"]))}
 
 
 def read_codex_approval(issue, thread, timestamp=None):
@@ -125,24 +145,134 @@ def read_codex_approval(issue, thread, timestamp=None):
         raise GateError("The Codex user message is not explicit approval for this Issue")
     if not isinstance(proposal, str):
         raise GateError("The Codex approval must immediately follow the approved scope proposal")
-    scope = marker(proposal, CODEX_REQUEST)
-    if (set(scope) != {"repository", "issue", "title", "issue_digest", "paths"}
-            or scope["repository"] != REPO or type(scope["issue"]) is not int or scope["issue"] != issue
-            or not isinstance(scope["title"], str) or not scope["title"].strip()
-            or not isinstance(scope["issue_digest"], str)
-            or not re.fullmatch(r"[a-f0-9]{64}", scope["issue_digest"])):
-        raise GateError("The preceding Codex proposal must identify this repository, Issue and exact scope")
-    return {**scope, "paths": sorted(paths(scope["paths"])), "thread": thread,
+    return {**conversation_scope(proposal, issue, "Codex"), "thread": thread,
             "timestamp": approved_at, "message": prompt}
 
 
 def saved_codex_approval(state):
     saved = state.get("codex_approval")
-    if not isinstance(saved, dict) or "approval_comment" in state or not saved.get("timestamp"):
+    if (not isinstance(saved, dict) or "approval_comment" in state or "claude_approval" in state
+            or not saved.get("timestamp")):
         raise GateError("An unambiguous local Codex approval record is required")
     current = read_codex_approval(state["issue"], saved["thread"], saved["timestamp"])
     if current != saved:
         raise GateError("The saved Codex approval no longer matches the original session log")
+    return current
+
+
+def claude_session(session):
+    if not isinstance(session, str) or not CODEX_THREAD.fullmatch(session):
+        raise GateError("A verified Claude Code session ID is required")
+    root = (Path.home() / ".claude" / "projects").resolve()
+    # Subagent transcripts live in deeper folders and never match this pattern.
+    matches = list(root.glob(f"*/{session}.jsonl"))
+    if len(matches) != 1 or matches[0].resolve() != matches[0] or not matches[0].is_file():
+        raise GateError("The original local Claude Code session log is missing or ambiguous")
+    return matches[0]
+
+
+def claude_human_prompt(record):
+    """Recognize a prompt the person submitted, not tool output, summaries, reminders or subagents."""
+    message = record.get("message")
+    return (record.get("type") == "user" and isinstance(record.get("uuid"), str)
+            and record.get("origin") == {"kind": "human"} and record.get("turnOrigin") == "human"
+            and record.get("userType") == "external" and record.get("promptSource") in CLAUDE_PROMPT_SOURCES
+            and record.get("isSidechain") is False and "toolUseResult" not in record
+            and not any(record.get(key) for key in ("isMeta", "isCompactSummary", "isVisibleInTranscriptOnly"))
+            and isinstance(message, dict) and message.get("role") == "user")
+
+
+def claude_prompt_text(record):
+    content = record["message"].get("content")
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list) and all(isinstance(block, dict) and block.get("type") == "text"
+                                           and isinstance(block.get("text"), str) for block in content):
+        texts = [block["text"] for block in content]
+    else:
+        return None  # Images, documents or unknown blocks are never approval evidence.
+    typed = [text for text in texts if not CLAUDE_IDE_CONTEXT.fullmatch(text.strip())]
+    return typed[0] if len(typed) == 1 else None
+
+
+def claude_final_answer(records, prompt, session):
+    """Return the text of the assistant message that ended the turn right before this prompt."""
+    parent = records.get(prompt.get("parentUuid"))
+    while parent is not None and parent.get("type") == "system" and parent.get("subtype") in CLAUDE_TURN_MARKERS:
+        parent = records.get(parent.get("parentUuid"))
+    texts, message_id = [], None
+    while parent is not None and parent.get("type") == "assistant":
+        message = parent.get("message")
+        if not isinstance(message, dict):
+            return None
+        message_id = message_id or message.get("id")
+        if not message_id or message.get("id") != message_id:
+            break  # An earlier API response belongs to the same turn but not to the final answer.
+        content = message.get("content")
+        if (parent.get("sessionId") != session or parent.get("isSidechain") is not False
+                or parent.get("isApiErrorMessage") or message.get("role") != "assistant"
+                or message.get("model") in (None, "<synthetic>") or message.get("stop_reason") != "end_turn"
+                or not isinstance(content, list)):
+            return None
+        for block in reversed(content):
+            if not isinstance(block, dict):
+                return None
+            if block.get("type") == "text" and isinstance(block.get("text"), str):
+                texts.insert(0, block["text"])
+            elif block.get("type") not in {"thinking", "redacted_thinking"}:
+                return None
+        parent = records.get(parent.get("parentUuid"))
+    return "\n".join(texts) if texts else None
+
+
+def read_claude_approval(issue, session, uuid=None):
+    """Bind the latest person-typed prompt, or a recorded one, to the final answer it replied to."""
+    log = claude_session(session)
+    records, prompts = {}, []
+    with log.open(encoding="utf-8") as transcript:
+        for line in transcript:
+            if not line.endswith("\n"):
+                break  # The runtime may still be appending the last record.
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise GateError("The Claude Code session log has an invalid record")
+            key = record.get("uuid")
+            if key is not None:
+                if key in records:
+                    raise GateError("The Claude Code session log has duplicate record IDs")
+                records[key] = record
+            if claude_human_prompt(record):
+                prompts.append(record)
+    if uuid is None:
+        selected = prompts[-1] if prompts else None
+    else:
+        selected = next((record for record in prompts if record["uuid"] == uuid), None)
+    if selected is None or not isinstance(selected.get("timestamp"), str) or not selected["timestamp"]:
+        raise GateError("The original Claude Code user approval prompt is missing")
+    if selected.get("sessionId") != session:
+        raise GateError("The Claude Code approval belongs to another session")
+    prompt = claude_prompt_text(selected)
+    if prompt is None or prompt.strip() != approval_message(issue):
+        raise GateError("The Claude Code user message is not explicit approval for this Issue")
+    proposal = claude_final_answer(records, selected, session)
+    if proposal is None:
+        raise GateError("The Claude Code approval must immediately follow the approved scope proposal")
+    return {**conversation_scope(proposal, issue, "Claude Code"), "session": session, "log": str(log),
+            "uuid": selected["uuid"], "timestamp": selected["timestamp"], "message": prompt}
+
+
+def saved_claude_approval(state):
+    saved = state.get("claude_approval")
+    if (not isinstance(saved, dict) or "approval_comment" in state or "codex_approval" in state
+            or not saved.get("uuid") or not saved.get("session")):
+        raise GateError("An unambiguous local Claude Code approval record is required")
+    if os.environ.get(CLAUDE_SESSION) != saved["session"]:
+        raise GateError("Continue this approval in its original Claude Code session")
+    current = read_claude_approval(state["issue"], saved["session"], saved["uuid"])
+    if current != saved:
+        raise GateError("The saved Claude Code approval no longer matches the original session log")
     return current
 
 
@@ -222,15 +352,21 @@ def dev_sha():
 
 def prepare(args):
     previous = load_json(args.state) if args.state.exists() else None
-    if args.codex_approval:
-        approval = (saved_codex_approval(previous) if previous is not None
-                    else read_codex_approval(args.issue, os.environ.get("CODEX_THREAD_ID")))
+    if args.codex_approval or getattr(args, "claude_approval", False):
+        if args.codex_approval:
+            source = "codex_approval"
+            approval = (saved_codex_approval(previous) if previous is not None
+                        else read_codex_approval(args.issue, os.environ.get("CODEX_THREAD_ID")))
+        else:
+            source = "claude_approval"
+            approval = (saved_claude_approval(previous) if previous is not None
+                        else read_claude_approval(args.issue, os.environ.get(CLAUDE_SESSION)))
         approved_at = approval["timestamp"]
         state = {"issue": args.issue, "issue_digest": approval["issue_digest"],
-                 "paths": approval["paths"], "codex_approval": approval}
+                 "paths": approval["paths"], source: approval}
     else:
-        if previous is not None and "codex_approval" in previous:
-            raise GateError("Resume the original Codex approval source")
+        if previous is not None and any(key in previous for key in CONVERSATION_SOURCES):
+            raise GateError("Resume the original conversation approval source")
         approval, approved_at = read_approval(args.approval_comment)
         state = initial_state(args, args.issue, approval)
     check_issue(api(f"issues/{args.issue}"), approval, approved_at)
@@ -324,10 +460,13 @@ def check_change_scope(state, actual, declared):
 
 
 def check_live_approval(state):
-    if ("approval_comment" in state) == ("codex_approval" in state):
+    if sum(key in state for key in ("approval_comment", *CONVERSATION_SOURCES)) != 1:
         raise GateError("Exactly one recorded approval source is required")
     if "codex_approval" in state:
         approval = saved_codex_approval(state)
+        approved_at = approval["timestamp"]
+    elif "claude_approval" in state:
+        approval = saved_claude_approval(state)
         approved_at = approval["timestamp"]
     else:
         approval, approved_at = read_approval(state["approval_comment"])
@@ -495,6 +634,7 @@ def main():
     source = setup.add_mutually_exclusive_group(required=True)
     source.add_argument("--approval-comment", type=positive)
     source.add_argument("--codex-approval", action="store_true")
+    source.add_argument("--claude-approval", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "digest":

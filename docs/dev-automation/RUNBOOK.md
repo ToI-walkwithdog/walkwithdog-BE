@@ -23,10 +23,17 @@
 
 [전체 개발 로드맵](FEATURE_PLAN.md)은 미리 관리한다. 한 번에 사용자가 승인한 기능 Issue 하나만 착수한다. 현재 PR이 dev에 병합되면 완료를 보고하고 다음 Issue의 초안을 제시한다. 병합 전에는 다음 Issue를 등록하거나 구현하지 않는다. 다음 Issue는 사용자가 착수를 승인한 뒤에만 등록하고 진행한다. 다른 세션에서 동시에 착수하지 않도록 사용자가 관리한다. 저장소 전체의 동시 실행을 기술적으로 차단하는 공통 잠금은 없으며, Issue별 상태 파일과 중복 생성 방지 기록은 유지한다.
 
+## 이름 규칙
+
+- 브랜치명, PR 제목, 커밋 메시지에는 Codex, Claude, ChatGPT 등 특정 AI 개발 도구 이름을 넣지 않는다. 작업 목적과 기능을 기준으로 쓴다.
+- 기능 Issue 브랜치는 CLI가 요구하는 `issue/ISSUE`를 쓴다. 수동 유지보수 브랜치는 `chore/<목적>` 형식을 쓴다. 예를 들어 브랜치 `chore/issue-approval`, PR 제목 `[CHORE] Issue 착수 승인 방식 개선`, 커밋 메시지 `chore: Issue 착수 승인 방식 개선`처럼 쓴다.
+- 도구별 세션 검증 로직, CLI 옵션(`--codex-approval`, `--claude-approval`), 환경 변수(`CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`), 기술 문서에서는 정확한 구분을 위해 필요한 도구명을 쓴다.
+- GitHub Actions 워크플로 이름과 실행 이름은 `CI`, 필수 Job 이름은 `Dev quality gate`로 유지한다. 이미 병합된 PR과 과거 브랜치 이름은 바꾸지 않는다.
+
 ## 승인과 작업 준비
 
 1. Notion, 최신 FE, dev, 기존 Issue와 PR을 검색해 겹치는 기능과 선행 조건을 확인한다. 기존 Issue의 제목과 본문을 확인하고 요구사항, 검증 범위와 실제로 바꿀 정확한 경로를 제시한다. 접근 권한 또는 정책 결정이 빠지면 착수를 보류한다.
-2. 현재 제목과 본문을 `{"title":"...","body":"..."}` JSON 파일에 넣고 `python -m scripts.issue_delivery digest ISSUE.json`으로 제목과 본문의 SHA-256을 계산한다. 사용자에게 제시하는 Codex 최종 답변에 검토할 범위 설명과 아래 코드 블록을 한 번 포함한다. 예시 값은 현재 Issue 데이터로 채운다.
+2. 현재 제목과 본문을 `{"title":"...","body":"..."}` JSON 파일에 넣고 `python -m scripts.issue_delivery digest ISSUE.json`으로 제목과 본문의 SHA-256을 계산한다. 사용자에게 제시하는 Codex 또는 Claude Code 최종 답변에 검토할 범위 설명과 아래 코드 블록을 한 번 포함한다. 같은 답변에 이 블록을 두 번 넣거나 도구 호출 중간의 설명에 넣지 않는다. 예시 값은 현재 Issue 데이터로 채운다.
 
 ````toi-approval-request
 {"repository":"ToI-walkwithdog/walkwithdog-BE","issue":44,"title":"<현재 GitHub Issue 제목>","issue_digest":"<제목과 본문의 전체 SHA-256>","paths":["app/routers/example.py","tests/test_example.py"]}
@@ -38,9 +45,16 @@
 Issue #44의 확정된 요구사항과 변경 경로를 확인했어. 해당 Issue의 구현, 독립 리뷰, 테스트, PR 생성, 조건부 dev 병합까지 승인해.
 ````
 
-4. 승인 직후 같은 Codex 세션에서 `python -m scripts.issue_delivery prepare ISSUE ../toi-issue-ISSUE --codex-approval --state STATE.json`을 실행한다. CLI는 현재 `CODEX_THREAD_ID`의 표준 로컬 세션 로그(`~/.codex/sessions`)에서 실제 사용자 이벤트와 직전 제안을 읽는다. 전용 worktree 밖의 개인 상태 파일에 원문, 세션과 시각, Issue 번호와 제목, 제목과 본문의 해시, 허용 경로를 보관한다. 재개, PR 생성 및 병합 때 같은 원본 기록과 현재 GitHub Issue를 다시 확인한다. 저장소, Issue 내용, 승인 범위가 달라지거나 로그를 찾을 수 없으면 멈춘다. 추가 경로가 필요하면 구현 전에 확장된 범위를 다시 승인받는다.
+4. 승인 직후 승인을 받은 세션에서 도구에 맞는 명령을 실행한다. 두 방식 모두 전용 worktree 밖의 개인 상태 파일에 원문, 세션과 시각, Issue 번호와 제목, 제목과 본문의 해시, 허용 경로를 보관한다. 재개, PR 생성 및 병합 때 같은 원본 기록과 현재 GitHub Issue를 다시 확인한다. 저장소, Issue 내용, 승인 범위가 달라지거나 로그를 찾을 수 없으면 멈춘다. 추가 경로가 필요하면 구현 전에 확장된 범위를 다시 승인받는다. 이후 변경 범위, 테스트, 독립 리뷰, CI와 병합 게이트는 승인 방식과 관계없이 같다.
+   - Codex: `python -m scripts.issue_delivery prepare ISSUE ../toi-issue-ISSUE --codex-approval --state STATE.json`. CLI는 현재 `CODEX_THREAD_ID`의 표준 로컬 세션 로그(`~/.codex/sessions`)에서 실제 사용자 이벤트와 직전 제안을 읽는다.
+   - Claude Code: `python -m scripts.issue_delivery prepare ISSUE ../toi-issue-ISSUE --claude-approval --state STATE.json`. CLI는 Claude Code가 설정한 `CLAUDE_CODE_SESSION_ID`로 `~/.claude/projects/<프로젝트 폴더>/<세션 ID>.jsonl` 세션 기록을 정확히 하나 찾는다. 아래 기준은 Claude Code 2.1.330의 VS Code 확장과 CLI 기록에서 확인했다.
+     - 승인 근거는 그 기록의 마지막 사람 입력 레코드다. `type`이 `user`, `origin`이 `{"kind":"human"}`, `turnOrigin`이 `human`, `userType`이 `external`, `promptSource`가 `sdk`(VS Code) 또는 `typed`(CLI)이고 `isSidechain`이 false인 레코드만 사람 입력으로 본다. 도구 결과(`toolUseResult`), 압축 요약, 메타 레코드, 작업 알림, 하위 에이전트 기록은 제외한다.
+     - 입력 내용은 승인 문장과 앞뒤 공백을 빼고 정확히 같아야 한다. VS Code 확장이 별도 블록으로 붙이는 `<ide_opened_file>`, `<ide_selection>` 블록만 제외한다. 붙여넣은 텍스트는 `<pasted_content>` 태그째 기록되므로 승인으로 인정되지 않는다. 승인 문장은 직접 입력해 단독 메시지로 보낸다. 이미지나 추가 문장이 섞여도 거부한다.
+     - 이 입력의 `parentUuid`는 같은 세션에서 `stop_reason`이 `end_turn`인 최종 답변을 가리켜야 한다. 그 답변에 `toi-approval-request` 블록이 한 번 있어야 한다. 그 사이에 허용하는 레코드는 `turn_duration`, `away_summary` 시스템 레코드뿐이다.
+     - 상태 파일의 `claude_approval`에는 원문, 세션 ID, 기록 파일 경로, 사람 입력 레코드의 UUID와 시각, Issue 번호와 제목, 해시, 허용 경로를 보관한다. 재개, PR 생성, 병합 때는 현재 `CLAUDE_CODE_SESSION_ID`가 기록된 세션과 같아야 하고 같은 레코드를 다시 읽어 저장값과 비교한다. 압축 뒤에도 세션 ID와 이전 기록은 유지된다. `/clear`나 새 대화로 세션이 바뀌면 새 세션에서 범위를 다시 제시하고 새 상태 파일로 승인받는다.
+     - 기록 파일이 없거나(예: `cleanupPeriodDays` 보존 기간이 지나 삭제), 같은 세션 ID의 기록이 둘 이상이거나, 레코드 UUID가 중복되거나, Claude Code 기록 형식이 바뀌어 위 조건으로 사람 입력을 구분할 수 없으면 승인 검증이 실패한다. 이때는 GitHub 댓글 승인을 사용한다.
 
-대화 승인은 로컬 Codex 기록과 실행 환경을 신뢰한다. GitHub는 메시지 작성자의 신원을 독립적으로 검증할 수 없다. 같은 로컬 사용자 권한으로 세션 기록이나 상태 파일을 변경할 수 있으므로 서명된 증빙으로 사용하지 않는다. 운영 세션은 승인 로그를 직접 작성, 수정하거나 임의 텍스트로 대체하지 않는다. 다른 대화, 복사본, 계획 문서, 추론으로 만든 승인을 사용하지 않는다. 상태 파일과 대화 원문은 Git이나 PR에 올리지 않는다.
+대화 승인은 로컬 Codex 또는 Claude Code 기록과 실행 환경을 신뢰한다. GitHub는 메시지 작성자의 신원을 독립적으로 검증할 수 없다. 같은 로컬 사용자 권한으로 세션 기록이나 상태 파일을 변경할 수 있으므로 서명된 증빙으로 사용하지 않는다. 운영 세션은 승인 로그를 직접 작성, 수정하거나 임의 텍스트로 대체하지 않는다. 다른 대화, 복사본, 계획 문서, 추론으로 만든 승인을 사용하지 않는다. 상태 파일과 대화 원문은 Git이나 PR에 올리지 않는다.
 
 기존 GitHub 방식도 지원한다. 승인자는 기존 Issue 또는 신규 Issue용 intake에 아래 메타데이터가 담긴 댓글을 남긴다. 신규 등록은 전체 초안을 승인받고 issue를 null로 둔 뒤 `python -m scripts.issue_delivery register draft.json --approval-comment COMMENT_ID --state STATE.json`으로 진행한다. 등록 전 중복을 확인한다. 댓글 방식의 착수와 재개에는 `prepare ISSUE ../toi-issue-ISSUE --approval-comment COMMENT_ID --state STATE.json`을 사용한다.
 
