@@ -72,6 +72,6 @@
 - `GET /walks/active`에 `last_point_received_at`(서버 수신 시각)과 `auto_end_at`을 추가했다. `auto_end_at`을 지나면(초과 시점부터) 자동 종료된다. 정확히 그 시각에는 아직 진행 중이다.
 - `PATCH /walks/{walk_id}/end`: 이미 무수신 만료된 산책은 사용자 종료나 직원 안전 중단 대신 200과 `COMPLETED/AUTO_TIMEOUT`(종료 시각은 마지막 활동 시각)을 돌려준다. 이미 종료된 산책은 기존 409다.
 - `POST /walks/{walk_id}/points`: 5m/s를 넘는 급이동 관측도 원본 순번으로 저장하고, 거리와 이동 통계에서만 뺀다. 순번, 시각, 중복 규칙은 그대로다.
-- `POST /walks/{walk_id}/markers`: 선택 필드 `client_marker_id`(UUID)와 `position_recorded_at`. 같은 키와 같은 본문은 200과 기존 마커(종료나 상한 뒤에도), 다른 본문은 409다. 좌표는 정확도 50m 이하이고 관측이 선택 시각 이전 30초 이내면 `CURRENT`, 아니면 같은 산책의 2분 이내 저장 좌표를 `LAST_KNOWN`으로 쓴다. 둘 다 없으면 409 `detail.code=MARKER_LOCATION_UNAVAILABLE`이다. 키 없는 기존 호출도 동작한다.
+- `POST /walks/{walk_id}/markers`: 선택 필드 `client_marker_id`(UUID)와 `position_recorded_at`. 같은 키와 같은 본문은 200과 기존 마커(종료나 상한 뒤에도), 다른 본문은 409다. 좌표는 정확도 50m 이하이고 관측이 선택 시각 이전 30초 이내면 `CURRENT`(`position_recorded_at`이 없는 기존 호출은 정확도가 없거나 50m 이하이면 `CURRENT`), 아니면 같은 산책의 2분 이내 저장 좌표를 `LAST_KNOWN`으로 쓴다. 둘 다 없으면 409 `detail.code=MARKER_LOCATION_UNAVAILABLE`이다. 키 없는 기존 호출도 동작한다.
 - `POST /walks/{walk_id}/incidents`: `OTHER`는 trim 후 1~1,000자가 필수이고 모든 설명은 1,000자 이하다(422). 좌표를 생략하면 사건 시각 이전 30초 이내의 저장 좌표만 쓰고, 없으면 `null`로 접수한다. GPS가 없어도 신고는 막지 않는다. 좌표를 생략한 같은 `client_report_id` 재시도는 이후 GPS가 바뀌어도 처음 접수 결과를 200으로 돌려준다.
 - `031_walk_marker_idempotency.sql`은 030 다음에 적용하며 추가만 한다. 재실행해도 바뀌지 않는다. 개발 DB 적용과 FE 연동은 별도 승인으로 진행한다.
