@@ -1,35 +1,7 @@
 {
   "version": 2,
   "source_commit": "f0b0069ef95599da613079829ede8c13183ad6e2",
-  "failures": [
-    {
-      "nodeid": "tests/test_walk_domain.py::WalkMetadataTests::test_all_ten_models_register_with_existing_base_and_relationships",
-      "phase": "call",
-      "subtest": null,
-      "outcome": "failed",
-      "message": "AssertionError: 12 != 10",
-      "issue": 66,
-      "reason": "007의 기존 10개 모델과 비교하는 테스트에 F-15의 020 평가 모델 2개가 함께 등록된다."
-    },
-    {
-      "nodeid": "tests/test_walk_domain.py::WalkMetadataTests::test_checked_in_sql_exactly_matches_orm_postgresql_ddl",
-      "phase": "call",
-      "subtest": null,
-      "outcome": "failed",
-      "message": "AssertionError: Lists differ: ['BEG[…]ISTS walk_incidents (', '\\tid SERIAL NOT NULL,[…]IT;'] != ['BEG[…]ISTS shelter_volunteer_reviews (', '\\tid SERIA[…]IT;']\n\nFirst differing element 135:\n'CREATE TABLE IF NOT EXISTS walk_incidents ('\n'CREATE TABLE IF NOT EXISTS shelter_volunteer_reviews ('\n\nSecond list contains 34 additional elements.\nFirst extra element 223:\n'\\tid SERIAL NOT NULL,'\n\nDiff is 15030 characters long. Set self.maxDiff to None to see it.",
-      "issue": 66,
-      "reason": "007의 기존 10개 모델과 비교하는 테스트에 F-15의 020 평가 모델 2개가 함께 등록된다."
-    },
-    {
-      "nodeid": "tests/test_walk_domain.py::WalkMetadataTests::test_types_nullability_defaults_and_all_constraint_contracts",
-      "phase": "call",
-      "subtest": null,
-      "outcome": "failed",
-      "message": "KeyError: 'shelter_volunteer_reviews'",
-      "issue": 66,
-      "reason": "007의 기존 10개 모델과 비교하는 테스트에 F-15의 020 평가 모델 2개가 함께 등록된다."
-    }
-  ],
+  "failures": [],
   "skips": [
     {
       "nodeid": "tests/test_gps_motion_postgres.py::MotionMigrationPostgresTests::test_008_backup_apply_reapply_preserves_every_legacy_value",
@@ -1341,10 +1313,12 @@
     "tests/test_walk_domain.py::WalkConstraintTests::test_point_ranges_order_and_retry_key",
     "tests/test_walk_domain.py::WalkConstraintTests::test_request_times_duplicate_and_review_metadata",
     "tests/test_walk_domain.py::WalkConstraintTests::test_review_observations_and_uniqueness",
+    "tests/test_walk_domain.py::WalkConstraintTests::test_shelter_volunteer_review_constraints",
     "tests/test_walk_domain.py::WalkConstraintTests::test_slot_order_weekday_and_duplicate",
     "tests/test_walk_domain.py::WalkConstraintTests::test_summary_evidence_counts_score_and_profile_totals",
     "tests/test_walk_domain.py::WalkConstraintTests::test_unknown_traits_and_initial_profile",
     "tests/test_walk_domain.py::WalkConstraintTests::test_walk_end_status_and_metrics",
+    "tests/test_walk_domain.py::WalkMetadataTests::test_020_shelter_volunteer_review_schema_contract",
     "tests/test_walk_domain.py::WalkMetadataTests::test_all_ten_models_register_with_existing_base_and_relationships",
     "tests/test_walk_domain.py::WalkMetadataTests::test_checked_in_sql_exactly_matches_orm_postgresql_ddl",
     "tests/test_walk_domain.py::WalkMetadataTests::test_types_nullability_defaults_and_all_constraint_contracts",
