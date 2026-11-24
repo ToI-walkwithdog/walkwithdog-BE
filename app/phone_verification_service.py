@@ -15,6 +15,10 @@ Transactions (each short; none is open while the SMS provider is called):
 An UNKNOWN outcome is never resent automatically. confirm() asks the provider once
 more (outside any transaction) and only proceeds if the request is then SENT.
 
+Purpose (Issue #103): each request records ONBOARDING or PROFILE_PHONE_CHANGE, set by the
+endpoint. A proof is only usable for its own purpose. The latest-request rule, the resend
+wait and the daily limits stay per account and per number across both purposes.
+
 Secrets: PHONE_VERIFICATION_HMAC_KEY (at least 32 characters) signs codes and number
 keys. Codes are never stored, returned or logged; numbers and codes are never logged.
 """
@@ -50,6 +54,7 @@ DAILY_SEND_LIMIT = 5
 HMAC_KEY_MIN_LENGTH = 32
 
 PENDING, SENDING, SENT, UNKNOWN, FAILED = "PENDING", "SENDING", "SENT", "UNKNOWN", "FAILED"
+PURPOSE_ONBOARDING, PURPOSE_PROFILE = "ONBOARDING", "PROFILE_PHONE_CHANGE"
 PHONE_INPUT = re.compile(r"010-?\d{4}-?\d{4}")
 
 
@@ -134,14 +139,22 @@ def _take_daily_slot(db: Session, scope: str, subject: str, day, limit: int) -> 
     return db.execute(statement).first() is not None
 
 
-def reserve_send(db: Session, user_id: int, phone_e164: str, now: datetime, key: bytes):
+def profile_basic_info_required() -> ContractError:
+    return _error(409, "PROFILE_BASIC_INFO_REQUIRED", "기본 정보 입력을 먼저 완료해 주세요.")
+
+
+def reserve_send(db: Session, user_id: int, phone_e164: str, now: datetime, key: bytes,
+                 purpose: str = PURPOSE_ONBOARDING):
     """T1. Returns (verification_id, code). The code exists only in memory until sent."""
     try:
         user = lock_user(db, user_id, for_update=True)  # serializes this account's sends
         if user is None:
             raise contract_unauthorized("USER_NOT_FOUND")
         ensure_active(user)
-        ensure_pledge_completed(db, user)
+        if purpose == PURPOSE_ONBOARDING:
+            ensure_pledge_completed(db, user)
+        elif db.get(VolunteerOnboardingBasic, user_id) is None:  # a phone change needs Step 1 first
+            raise profile_basic_info_required()
         if registered_to_other_user(db, phone_e164, user_id):
             raise phone_already_registered()
         window_start = now - timedelta(seconds=RESEND_WAIT_SECONDS)
@@ -160,7 +173,7 @@ def reserve_send(db: Session, user_id: int, phone_e164: str, now: datetime, key:
             id=verification_id, user_id=user_id, phone_e164=phone_e164,
             code_digest=code_digest(key, verification_id, code), send_status=PENDING,
             provider_request_key=verification_id, expires_at=now + timedelta(seconds=CODE_TTL_SECONDS),
-            attempt_count=0, created_at=now))
+            attempt_count=0, created_at=now, purpose=purpose))
         db.commit()
         return verification_id, code
     except Exception:
@@ -182,11 +195,12 @@ def _move_status(db: Session, verification_id, from_status: str, **values) -> bo
         raise
 
 
-def send_verification(db: Session, provider: SmsProvider | None, user_id: int, phone_e164: str, now: datetime) -> dict:
+def send_verification(db: Session, provider: SmsProvider | None, user_id: int, phone_e164: str, now: datetime,
+                      purpose: str = PURPOSE_ONBOARDING) -> dict:
     if provider is None:  # nothing reserved, nothing counted
         raise delivery_unavailable()
     key = hmac_key()  # fail closed before any write
-    verification_id, code = reserve_send(db, user_id, phone_e164, now, key)
+    verification_id, code = reserve_send(db, user_id, phone_e164, now, key, purpose)
     if not _move_status(db, verification_id, PENDING, send_status=SENDING):  # T2
         raise RuntimeError("verification request was claimed twice")
     text = f"[같이걷개] 인증번호는 {code}입니다. 5분 안에 입력해 주세요."
@@ -236,10 +250,11 @@ def parse_verification_id(value) -> uuid.UUID | None:
 
 
 def confirm_code(db: Session, provider: SmsProvider | None, user_id: int, verification_id: uuid.UUID,
-                 code: str, now: datetime) -> dict:
+                 code: str, now: datetime, purpose: str = PURPOSE_ONBOARDING) -> dict:
     not_found = _error(404, "VERIFICATION_NOT_FOUND", "인증 요청을 찾을 수 없습니다.")
     verification = db.get(PhoneVerification, verification_id)
-    if verification is None or verification.user_id != user_id:  # someone else's is "not found" too
+    # Someone else's request, or one made for the other purpose, is "not found" too (#103).
+    if verification is None or verification.user_id != user_id or verification.purpose != purpose:
         raise not_found
     if verification.send_status == UNKNOWN:
         reconcile_unknown(db, provider, verification, now)

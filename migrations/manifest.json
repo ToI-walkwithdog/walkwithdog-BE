@@ -482,6 +482,20 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "035_profile_phone_change.sql",
+      "sha256": "1ce26c1964e50dcca914b9a2c5bad9ff8ef082dbf9754010abc7f8c5d8fb964a",
+      "requires": [
+        "024_onboarding_basic_info.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [

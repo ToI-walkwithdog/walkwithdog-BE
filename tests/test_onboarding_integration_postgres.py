@@ -58,7 +58,8 @@ DEV_CHAIN_BEFORE_016 = ("005_user_roles.sql", "006_user_shelters.sql", "007_walk
 ONBOARDING_CHAIN = ("002_auth_sessions.sql", "016_onboarding_signup.sql", "017_remove_user_email.sql",
                     "018_user_consents.sql", "019_first_walk_guide.sql", "023_user_pledge_acknowledgements.sql",
                     "024_onboarding_basic_info.sql", "025_onboarding_dog_experience.sql", "022_regions.sql",
-                    "026_onboarding_walking_routine.sql", "027_onboarding_agreements.sql")
+                    "026_onboarding_walking_routine.sql", "027_onboarding_agreements.sql",
+                    "035_profile_phone_change.sql")  # Issue #103: requires 024 only
 REGIONS = (("11", "서울특별시", LEVEL_SIDO, None), ("11110", "종로구", LEVEL_SIGUNGU, "11"),
            ("11680", "강남구", LEVEL_SIGUNGU, "11"), ("26", "부산광역시", LEVEL_SIDO, None),
            ("26350", "해운대구", LEVEL_SIGUNGU, "26"), ("36", "세종특별자치시", LEVEL_SIDO, None),

@@ -13,6 +13,7 @@ from app.routers import shelter_codes, walk_requests
 from app.routers import walks, walk_maps, walk_reviews, walk_guides, shelter_volunteer_reviews
 from app.routers import policies, regions
 from app.routers import onboarding_basic, onboarding_experience, onboarding_routine, age_review
+from app.routers import profile
 from app.volunteer_level_service import POLL_SECONDS, get_level_policy, run_pending_evaluations
 from app.walk_service import close_stale_walks
 
@@ -83,6 +84,8 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(policies.router)
 app.include_router(onboarding_basic.router)
+# Issue #103: before walk_maps, whose GET /users/{user_id}/profile would otherwise take /users/me/profile.
+app.include_router(profile.router)
 app.include_router(onboarding_experience.router)
 app.include_router(onboarding_routine.router)
 app.include_router(age_review.router)
