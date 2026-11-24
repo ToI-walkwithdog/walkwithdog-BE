@@ -42,3 +42,10 @@
 - [x] `app/walk_models.py`, `app/models.py`, `app/shelter_volunteer_review_schemas.py`, `app/shelter_volunteer_review_service.py`, `app/routers/shelter_volunteer_reviews.py`, `app/walk_map_schemas.py`, `app/walk_map_service.py`, `app/walk_request_schemas.py`, `app/routers/walk_requests.py`, `app/main.py`, `migrations/020_shelter_volunteer_reviews.sql` 구현 및 `tests/test_f15_shelter_volunteer_reviews.py` 작성·통과 (`36 passed`)
 - [ ] `feature/f-15-shelter-volunteer-review` 브랜치 커밋·push 후 `dev` 대상 PR 생성
 - [ ] (앱) SC-16 보호소 산책 이력 평가 작성 모달 및 SC-09/SC-10 마이페이지 받은 평가 요약·목록 UI 연동
+# 날짜별 산책 일정 및 예약 인수인계 (#29)
+
+- `POST /dogs/`의 기존 JSON 계약은 유지한다. `POST /dogs/walk-registration`은 `image`와 JSON 배열 문자열 `slots`를 포함한 multipart 요청으로 강아지, 산책 설정, 날짜 일정을 저장한다. 기존 강아지는 `GET/POST /dogs/{dog_id}/date-slots` 및 개별 `PATCH/DELETE`를 사용한다. 슬롯의 일자와 시각은 KST 현지 값이며 `duration_minutes`는 30, 60, 90 중 하나다. 실패 시 생성된 사진만 정리하며, 정리 실패는 해당 파일명과 함께 로그로 남긴다.
+- 보호소 지역은 `POST /shelters/` 또는 `PATCH /shelters/{shelter_id}/region`으로 설정한다. 기존 산책 설정 PATCH에서 강아지 크기, 숫자 난이도, 명시적인 최대 시간을 추가한다. 값이 없는 기존 데이터는 null로 읽는다. `/dogs/walk-availability`는 활성 지역 1~3개, 선택 크기와 강아지 단위 페이지를 적용한다. `/dogs/{dog_id}/walk-availability`는 동일 가용성 규칙으로 전체 슬롯을 반환한다.
+- 날짜별 `POST /walk-requests`는 `date_slot_id`, 오프셋이 포함된 기존 시작·종료 필드, UUID `Idempotency-Key`를 받는다. 동일 계정과 키 및 정규화 본문에는 최초 201을 복구한다. 신규 신청은 현재 온보딩 완료가 필요하다. 슬롯 시각 변경, 실제 점유, 일시적 DB 경합은 각각 `WALK_SLOT_CHANGED`, `WALK_SLOT_UNAVAILABLE`, `WALK_REQUEST_RETRYABLE`로 안내한다. 반복 요일 요청은 기존 입력과 응답 형식을 사용한다.
+- 점유 범위는 슬롯 전체의 반개구간 `[시작, 종료)`다. PENDING/APPROVED는 점유하고 REJECTED/CANCELLED는 점유를 해제한다. 승인 대상 자체는 충돌에서 제외하며 새 승인에는 미래 시작 시각이 필요하다. 승인된 본인이 저장된 예약 시간 안에서만 시작한다. 활성 예약이 참조한 슬롯의 변경 및 삭제는 409다. 종료된 예약의 기존 참조는 유지하며 슬롯 교체는 새 행을 만든다.
+- SQL은 009, 011, 022 이후 028을 1회 적용한다. 010이 수동 적용됐으면 기존 `date_slot_id`는 유지하고 연쇄 삭제 참조를 이력 보존 참조로 교체한다. 사전에 잘못된 강아지·슬롯 연결과 중복 활성 참조를 확인한다. 위반 데이터가 있으면 028 트랜잭션 전체가 롤백된다. 실제 개발 DB 적용은 별도 승인 후 진행한다.

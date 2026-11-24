@@ -51,3 +51,8 @@
 - [x] `docs/handoff/LATEST.md` 테스트 결과 및 인수인계 내용 반영
 - [ ] `feature/f-15-shelter-volunteer-review` 커밋·push 후 PR 생성 (`feature/f-15-shelter-volunteer-review` → `dev`)
 - [ ] (앱) SC-16 보호소 산책 이력 평가 작성 모달 및 SC-09/SC-10 마이페이지 받은 평가 요약·목록 UI 연동
+# 날짜별 산책 일정 및 예약
+
+- [ ] 개발 DB의 실제 적용 이력을 확인하고 승인 후 `028_date_slot_booking.sql`을 적용한다. 확인된 보호소 지역 코드만 입력하고, 크기·숫자 난이도·최대 산책 시간은 보호소가 등록한다.
+- [ ] FE 연동에서 동일한 `Idempotency-Key`와 날짜 슬롯의 원래 시각을 보존해 응답 유실, 일정 변경과 점유 충돌을 검증한다.
+- [ ] 보호소 출발 코드, 방문 정보와 취소 사유 UI 계약, 장기적인 잠금 순서 정리와 조회 최적화는 별도로 진행한다.

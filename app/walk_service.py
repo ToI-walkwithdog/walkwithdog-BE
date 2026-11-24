@@ -20,7 +20,7 @@ from app.gps_geometry import EARTH_RADIUS_M, distance_m
 from app.gps_motion_analysis import analyze_motion
 from app.gps_motion_config import MAX_SPEED_M_S
 from app.walk_request_service import (
-    as_utc, locked_profile, locked_request, lock_row, validate_eligibility, validate_walk_start,
+    as_utc, locked_profile, locked_request, lock_row, validate_linked_eligibility, validate_walk_start,
 )
 
 MAX_ACCURACY_M = Decimal("50")
@@ -104,8 +104,7 @@ def start_walk(db, actor, payload):
     if not as_utc(request.requested_start_at) <= now < as_utc(request.requested_end_at):
         raise HTTPException(409, "승인된 예약 시간 안에서만 산책을 시작할 수 있습니다.")
     locked_profile(db, request.user_id)
-    validate_eligibility(db, request.dog, request.user, request.requested_start_at,
-                         request.requested_end_at, shelter_id=request.shelter_id, require_future=False)
+    validate_linked_eligibility(db, request, request.dog, request.user, require_future=False)
     active = db.query(Walk.id).join(WalkRequest).filter(
         Walk.status == "IN_PROGRESS",
         or_(WalkRequest.dog_id == request.dog_id, WalkRequest.user_id == request.user_id),

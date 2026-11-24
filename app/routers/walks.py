@@ -11,6 +11,7 @@ from app.database import get_db
 from app.dependencies import require_role
 from app.models import User, UserRole
 from app.onboarding_common import require_onboarding_for_new_walk
+from app.walk_request_service import owns_date_request
 from app.walk_map_schemas import UserWalksResponse
 from app.walk_map_service import user_walk_history
 from app.walk_record_schemas import (
@@ -23,9 +24,10 @@ router = APIRouter(prefix="/walks", tags=["walks"])
 require_volunteer = require_role(UserRole.USER)
 
 
-def persist(db, operation, response_model, actor):
+def persist(db, operation, response_model, actor, *, start_request_id=None):
     try:
-        require_active_writer(db, actor)  # Issue #41: status re-checked on the locked row
+        date_start = start_request_id is not None and owns_date_request(db, start_request_id, actor)
+        require_active_writer(db, actor, for_update=date_start, nowait=date_start)
         result = response_model.model_validate(operation())
         db.commit()
         return result
@@ -52,7 +54,7 @@ def begin(payload: WalkStart, actor: User = Depends(require_volunteer), db: Sess
         require_onboarding_for_new_walk(db, actor)
         return start_walk(db, actor, payload)
 
-    return persist(db, operation, WalkResponse, actor)
+    return persist(db, operation, WalkResponse, actor, start_request_id=payload.walk_request_id)
 
 
 @router.post("/{walk_id}/points", response_model=PointsReceipt)

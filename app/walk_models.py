@@ -3,8 +3,8 @@ from sqlalchemy import Numeric
 
 from sqlalchemy import (
     Numeric,
-    Boolean, CheckConstraint, Column, DateTime, ForeignKey, Index, Integer,
-    JSON, Numeric, String, Text, Time, UniqueConstraint, text,
+    Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer,
+    JSON, Numeric, String, Text, Time, UniqueConstraint, Uuid, text,
 )
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import relationship
@@ -41,6 +41,10 @@ class DogWalkSetting(Timestamps, Base):
         UniqueConstraint("dog_id", name="uq_dog_walk_settings_dog"),
         choices("difficulty", "BEGINNER INTERMEDIATE EXPERIENCED"),
         CheckConstraint("recommended_duration_minutes > 0", name="ck_recommended_duration"),
+        choices("size_code", "SMALL MEDIUM LARGE"),
+        CheckConstraint("difficulty_score BETWEEN 1 AND 5 AND difficulty_score * 2 = CAST(difficulty_score * 2 AS INTEGER)",
+                        name="ck_walk_difficulty_score"),
+        CheckConstraint("max_walk_minutes > 0", name="ck_walk_max_minutes"),
     )
 
     id = Column(Integer, primary_key=True)
@@ -49,6 +53,9 @@ class DogWalkSetting(Timestamps, Base):
     difficulty = Column(String(20), nullable=False, default="BEGINNER", server_default="BEGINNER")
     precautions = Column(Text, nullable=True)
     recommended_duration_minutes = Column(Integer, nullable=True)
+    size_code = Column(String(10), nullable=True)
+    difficulty_score = Column(Numeric(2, 1), nullable=True)
+    max_walk_minutes = Column(Integer, nullable=True)
 
     dog = relationship("Dog", back_populates="walk_setting")
     slots = relationship("DogWalkSlot", back_populates="walk_setting", passive_deletes="all")
@@ -81,6 +88,16 @@ class WalkRequest(Timestamps, Base):
         CheckConstraint("status <> 'PENDING' OR reviewed_by IS NULL", name="ck_pending_unreviewed"),
         CheckConstraint("status <> 'REJECTED' OR rejection_reason IS NOT NULL", name="ck_rejection_reason"),
         CheckConstraint("status IN ('REJECTED', 'CANCELLED') OR rejection_reason IS NULL", name="ck_rejection_status"),
+        ForeignKeyConstraint(["date_slot_id", "dog_id"], ["dog_walk_date_slots.id", "dog_walk_date_slots.dog_id"],
+                             name="fk_walk_requests_date_slot", ondelete="NO ACTION"),
+        CheckConstraint("(idempotency_key IS NULL AND request_fingerprint IS NULL AND creation_receipt IS NULL) OR "
+                        "(idempotency_key IS NOT NULL AND request_fingerprint IS NOT NULL AND "
+                        "creation_receipt IS NOT NULL AND date_slot_id IS NOT NULL)", name="ck_walk_request_receipt"),
+        Index("ix_walk_requests_date_slot", "date_slot_id"),
+        Index("uq_walk_requests_user_idempotency", "user_id", "idempotency_key", unique=True),
+        Index("uq_walk_requests_occupied_date_slot", "date_slot_id", unique=True,
+              postgresql_where=text("date_slot_id IS NOT NULL AND status IN ('PENDING', 'APPROVED')"),
+              sqlite_where=text("date_slot_id IS NOT NULL AND status IN ('PENDING', 'APPROVED')")),
         Index("ix_walk_requests_user_start", "user_id", "requested_start_at"),
         Index("ix_walk_requests_dog_start", "dog_id", "requested_start_at"),
         Index("ix_walk_requests_shelter_status", "shelter_id", "status", "requested_start_at"),
@@ -113,6 +130,10 @@ class WalkRequest(Timestamps, Base):
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
     rejection_reason = Column(Text, nullable=True)
     rejection_reason_code = Column(String(30), nullable=True)
+    date_slot_id = Column(Integer, nullable=True)
+    idempotency_key = Column(Uuid, nullable=True)
+    request_fingerprint = Column(String(64), nullable=True)
+    creation_receipt = Column(JSON(none_as_null=True), nullable=True)
 
     user = relationship("User", foreign_keys=[user_id], back_populates="walk_requests")
     reviewer = relationship("User", foreign_keys=[reviewed_by], back_populates="reviewed_walk_requests")

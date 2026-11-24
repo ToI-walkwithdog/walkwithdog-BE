@@ -4,7 +4,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
+from pydantic import (AwareDatetime, BaseModel, ConfigDict, Field, computed_field, field_validator,
+                      model_serializer, model_validator)
 
 from app.schemas import DogCardResponse
 from app.shelter_volunteer_review_schemas import VolunteerReviewSummaryResponse
@@ -32,6 +33,7 @@ class WalkRequestCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dog_id: Annotated[int, Field(strict=True, gt=0, le=2147483647)]
+    date_slot_id: Annotated[int, Field(strict=True, gt=0, le=2147483647)] | None = None
     requested_start_at: AwareDatetime
     requested_end_at: AwareDatetime
 
@@ -98,7 +100,8 @@ class WalkRequestResponse(BaseModel):
     requested_end_at: datetime
     status: RequestStatus
     walk_id: int | None = None
-    walk_status: Literal["IN_PROGRESS", "COMPLETED", "INTERRUPTED"] | None = None
+    walk_status: Literal["IN_PROGRESS", "COMPLETED", "INTERRUPTED", "CANCELLED"] | None = None
+    date_slot_id: int | None = None
     reviewed_by: int | None
     reviewed_at: datetime | None
     rejection_reason: str | None
@@ -124,6 +127,7 @@ class WalkRequestResponse(BaseModel):
                 "status": data.status,
                 "walk_id": walk.id if walk is not None else None,
                 "walk_status": walk.status if walk is not None else None,
+                "date_slot_id": getattr(data, "date_slot_id", None),
                 "reviewed_by": data.reviewed_by,
                 "reviewed_at": data.reviewed_at,
                 "rejection_reason": data.rejection_reason,
@@ -131,6 +135,13 @@ class WalkRequestResponse(BaseModel):
                 "created_at": data.created_at,
                 "updated_at": data.updated_at,
             }
+        return data
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_shape(self, serialize):
+        data = serialize(self)
+        if self.date_slot_id is None:
+            data.pop("date_slot_id", None)
         return data
 
     @computed_field
@@ -176,6 +187,23 @@ class ApplicantDetailResponse(BaseModel):
 class WalkRequestDetailResponse(WalkRequestResponse):
     applicant: ApplicantDetailResponse
     dog_difficulty: Literal["BEGINNER", "INTERMEDIATE", "EXPERIENCED"] = "BEGINNER"
+
+
+class DateWalkRequestReceipt(BaseModel):
+    id: int
+    dog_id: int
+    date_slot_id: int
+    shelter_id: int
+    requested_start_at: datetime
+    requested_end_at: datetime
+    status: Literal["PENDING"]
+    created_at: datetime
+
+
+class DateWalkRequestResponse(BaseModel):
+    code: Literal["WALK_REQUEST_CREATED"]
+    data: DateWalkRequestReceipt
+    message: str
 
 
 class VolunteerProfileResponse(BaseModel):

@@ -382,6 +382,22 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "028_date_slot_booking.sql",
+      "sha256": "6eb1bcfaaf96419f3e3cccb0a9da4eb64dce6181d8db0c68de80e5f52430a0e4",
+      "requires": [
+        "009_add_f03_walk_register.sql",
+        "011_f05_walk_approval.sql",
+        "022_regions.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [

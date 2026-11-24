@@ -197,6 +197,7 @@ class ShelterCreate(BaseModel):
     phone: str | None = None
     address: str | None = None
     website_url: str | None = None
+    region_code: str | None = None
 
 
 class ShelterResponse(ShelterCreate):
@@ -204,6 +205,12 @@ class ShelterResponse(ShelterCreate):
 
     class Config:
         from_attributes = True
+
+
+class ShelterRegionPatch(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    region_code: str
 
 
 class DogCreate(BaseModel):

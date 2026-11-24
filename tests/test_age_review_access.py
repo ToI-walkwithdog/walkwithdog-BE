@@ -44,18 +44,20 @@ ALLOWED = {("POST", "/auth/login"), ("POST", "/auth/logout"), ("GET", "/users/me
 CONTRACT_BLOCKED = {("PUT", "/users/me/pledge"), ("GET", "/users/me/onboarding/basic-info"),
                     ("PUT", "/users/me/onboarding/basic-info"), ("POST", "/users/me/phone-verifications"),
                     ("POST", "/users/me/phone-verifications/confirm"),
-                    ("GET", "/users/me/onboarding/dog-experience"), ("PUT", "/users/me/onboarding/dog-experience")}
+                    ("GET", "/users/me/onboarding/dog-experience"), ("PUT", "/users/me/onboarding/dog-experience"),
+                    ("GET", "/dogs/walk-availability"), ("GET", "/dogs/{dog_id}/walk-availability")}
 # Step 3 and location lookup use ONBOARDING_NOT_ALLOWED for AGE_REVIEW_REQUIRED accounts.
 ONBOARDING_BLOCKED = {("GET", "/users/me/onboarding/walking-routine"), ("PUT", "/users/me/onboarding/walking-routine"),
                       ("POST", "/regions/resolve-location")}
 # Contract routes of the general-user onboarding: shelter and admin get this role 403.
-ONBOARDING_ROLE_CODES = {"ONBOARDING_NOT_ALLOWED", "PLEDGE_NOT_ALLOWED"}
+ONBOARDING_ROLE_CODES = {"ONBOARDING_NOT_ALLOWED", "PLEDGE_NOT_ALLOWED", "WALK_LIST_NOT_ALLOWED"}
 # No user identity: shared, read-only or sign-up data that anyone may request.
 PUBLIC = {("GET", "/"), ("GET", "/db-test"), ("GET", "/dogs/"), ("GET", "/dogs/{dog_id}"),
           ("GET", "/dogs/{dog_id}/personality"), ("GET", "/shelters/{shelter_id}"),
           ("GET", "/shelters/{shelter_id}/dogs"), ("GET", "/surveys/options"), ("GET", "/breed-traits/"),
           ("POST", "/users/"), ("GET", "/users/id-availability"), ("GET", "/users/nickname-availability"),
-          ("GET", "/regions/sido"), ("GET", "/regions/sigungu"), ("GET", "/policies/{kind}")}
+          ("GET", "/regions/sido"), ("GET", "/regions/sigungu"), ("GET", "/policies/{kind}"),
+          ("GET", "/media/dogs/{filename}")}
 # Import-key routes: without a Bearer token they use X-Import-Key, not an account.
 IMPORT_KEY = {("GET", "/public-api/test"), ("POST", "/public-api/fetch-dogs")}
 

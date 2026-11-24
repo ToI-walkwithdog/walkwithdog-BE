@@ -36,17 +36,17 @@ def ensure_active(user: User) -> None:
         raise age_review_required()
 
 
-def lock_user(db: Session, user_id: int, *, for_update: bool = False) -> User | None:
+def lock_user(db: Session, user_id: int, *, for_update: bool = False, nowait: bool = False) -> User | None:
     """Re-read the account row under a row lock held until commit or rollback.
 
     populate_existing() refreshes an object the session already loaded, so the status
     read here is the one the lock protects, not the copy loaded at authentication.
     """
     query = db.query(User).filter(User.id == user_id).populate_existing()
-    return query.with_for_update(read=not for_update).one_or_none()
+    return query.with_for_update(read=not for_update, nowait=nowait).one_or_none()
 
 
-def require_active_writer(db: Session, user: User) -> None:
+def require_active_writer(db: Session, user: User, *, for_update: bool = False, nowait: bool = False) -> None:
     """For writes of the `detail`-format APIs (walks, walk requests, reviews, chat, surveys,
     matching): lock the actor's users row FOR SHARE in the current transaction and re-read
     the status before anything is written.
@@ -59,7 +59,7 @@ def require_active_writer(db: Session, user: User) -> None:
     """
     if user.role != UserRole.USER:
         return
-    locked = lock_user(db, user.id)
+    locked = lock_user(db, user.id, for_update=for_update, nowait=nowait)
     if locked is None:  # deleted by a concurrent sign-up exit
         raise HTTPException(401, "로그인이 필요하거나 세션이 만료되었습니다.", headers={"WWW-Authenticate": "Bearer"})
     if not is_active(locked):
