@@ -105,6 +105,7 @@ class UserWalksResponse(BaseModel):
 
 class WalkHistoryItem(UserWalkItem):
     handover_status: HandoverStatus
+    shelter_name: str | None
 
 
 class WalkHistoryResponse(UserWalksResponse):

@@ -264,3 +264,11 @@ class VolunteerProfileResponse(BaseModel):
     total_duration_seconds: int = Field(default=0, description="COMPLETED 산책의 전체 경과 시간(duration_seconds) 합계. 이동 시간 합계가 아닙니다.")
     unique_dog_count: int = 0
     review_summary: VolunteerReviewSummaryResponse = Field(default_factory=VolunteerReviewSummaryResponse)
+
+
+class MyVolunteerProfileResponse(VolunteerProfileResponse):
+    history_walk_count: int
+    history_distance_m: Decimal = Field(description="종료 산책 중 확인된 거리의 합계(m).")
+    history_unique_dog_count: int
+    history_distance_missing_count: int
+    history_distance_is_complete: bool

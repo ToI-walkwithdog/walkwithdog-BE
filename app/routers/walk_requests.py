@@ -18,9 +18,10 @@ from app.database import get_db
 from app.dependencies import require_role, require_shelter, require_shelter_access
 from app.models import Shelter, User, UserRole, VolunteerProfile, WalkRequest
 from app.onboarding_common import require_onboarding_for_new_walk
+from app.volunteer_stats import history_totals
 from app.walk_request_schemas import (
-    DateWalkRequestResponse, ManagedWalkRequestResponse, RequestStatus, ReservationStatusGroup,
-    ReservationTab, VolunteerProfileResponse,
+    DateWalkRequestResponse, ManagedWalkRequestResponse, MyVolunteerProfileResponse, RequestStatus,
+    ReservationStatusGroup, ReservationTab,
     WalkRequestAction, WalkRequestCreate, WalkRequestDetailResponse, WalkRequestResponse,
 )
 from app.shelter_volunteer_review_service import get_volunteer_review_summary
@@ -251,13 +252,14 @@ def shelter_requests(shelter_id: int, status: RequestStatus | None = None,
             for row in query.limit(limit).offset(offset).all()]
 
 
-@router.get("/volunteers/me", response_model=VolunteerProfileResponse, tags=["volunteers"])
+@router.get("/volunteers/me", response_model=MyVolunteerProfileResponse, tags=["volunteers"])
 def my_volunteer_profile(actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
     profile = db.get(VolunteerProfile, actor.id)
     summary = get_volunteer_review_summary(db, actor.id)
+    history = history_totals(db, actor.id)
     if profile is None:
-        return VolunteerProfileResponse(user_id=actor.id, review_summary=summary)
-    return VolunteerProfileResponse(
+        return MyVolunteerProfileResponse(user_id=actor.id, review_summary=summary, **history)
+    return MyVolunteerProfileResponse(
         user_id=profile.user_id,
         level=profile.level,
         total_walk_count=profile.total_walk_count,
@@ -265,4 +267,5 @@ def my_volunteer_profile(actor: User = Depends(require_volunteer), db: Session =
         total_duration_seconds=profile.total_duration_seconds,
         unique_dog_count=profile.unique_dog_count,
         review_summary=summary,
+        **history,
     )

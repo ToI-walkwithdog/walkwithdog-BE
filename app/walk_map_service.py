@@ -18,6 +18,7 @@ from app.models import (
 )
 from app.shelter_volunteer_review_service import serialize_shelter_volunteer_review
 from app.gps_geometry import distance_m
+from app.volunteer_stats import FINISHED_WALK_STATUSES
 from app.walk_record_schemas import WalkIncidentResponse, WalkMarkerResponse
 from app.walk_review_schemas import WalkReviewResponse
 
@@ -26,7 +27,6 @@ PUBLIC_MAX_ROUTE_POINTS = 100
 # PROVISIONAL public-exposure policy (needs privacy review):
 PUBLIC_TRIM_M = 150            # drop this much of the route at the start and at the end
 PUBLIC_COORD_DECIMALS = 3      # ~110 m grid
-FINISHED_WALK_STATUSES = ("COMPLETED", "INTERRUPTED")
 WALK_REVIEW_LOADERS = (
     joinedload(Walk.review),
     joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.tags),
@@ -220,8 +220,12 @@ def pending_handover_page(db, conditions, limit, offset):
         .select_from(total)
         .outerjoin(page, true())
         .outerjoin(Walk, Walk.id == page.c.id)
-        .options(joinedload(Walk.walk_request).joinedload(WalkRequest.dog), joinedload(Walk.handover),
-                 *WALK_REVIEW_LOADERS)
+        .options(
+            joinedload(Walk.walk_request).joinedload(WalkRequest.dog),
+            joinedload(Walk.walk_request).joinedload(WalkRequest.shelter),
+            joinedload(Walk.handover),
+            *WALK_REVIEW_LOADERS,
+        )
         .order_by(page.c.started_at.desc(), page.c.id.desc())
         .all()
     )
@@ -240,10 +244,21 @@ def user_walk_history(db, user_id, status, end_reason, limit, offset, *, handove
     if handover_status == "NOT_CONFIRMED":
         total, walks = pending_handover_page(db, conditions, limit, offset)
     else:
-        total, walks = walk_page(db, conditions, limit, offset, extra_options=(joinedload(Walk.handover),))
+        total, walks = walk_page(db, conditions, limit, offset, extra_options=(
+            contains_eager(Walk.walk_request).joinedload(WalkRequest.shelter),
+            joinedload(Walk.handover),
+        ))
+    items = []
+    for walk in walks:
+        shelter = walk.walk_request.shelter
+        items.append(dict(
+            _serialize_user_walk_item(walk),
+            handover_status=walk.handover_status,
+            shelter_name=shelter.name if shelter is not None else None,
+        ))
     return {
         "user_id": user_id, "total": total, "limit": limit, "offset": offset,
-        "walks": [dict(_serialize_user_walk_item(walk), handover_status=walk.handover_status) for walk in walks],
+        "walks": items,
     }
 
 

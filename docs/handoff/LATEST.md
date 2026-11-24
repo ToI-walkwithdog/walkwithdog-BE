@@ -1,3 +1,16 @@
+# 작업 인수인계
+
+## 본인 산책 이력 및 누적 통계 (#99)
+
+- `GET /walks/history`는 예약에 연결된 보호소의 현재 이름을 각 항목의 `shelter_name`으로 제공합니다. 관계가 없으면 `null`을 반환합니다. 기존 정렬, 페이지네이션과 인계 미확인 필터를 유지합니다.
+- `GET /volunteers/me`는 본인의 `COMPLETED`와 `INTERRUPTED` 산책을 대상으로 `history_walk_count`, `history_distance_m`, `history_unique_dog_count`, `history_distance_missing_count`, `history_distance_is_complete`를 제공합니다. 무필터 이력 `total`과 같은 범위를 사용합니다. 기존 봉사 통계와 레벨, 승급 실적의 원본은 유지합니다.
+- `history_distance_m`은 미터 단위 Decimal 문자열입니다. 이력이 없으면 `"0.00"`, 누락 0건, 완전성 `true`입니다. 실제 0m는 누락에 포함되지 않으며, 누락이 있으면 알려진 거리의 부분합과 함께 완전성 `false`를 반환합니다.
+- 신규 마이그레이션은 없습니다. 기존 상세와 요약을 사용하며 개인 메모는 본인 전용 요약에서 조회합니다.
+- 신규 API 계약 테스트를 SQLite와 격리 PostgreSQL에서 각각 실행했습니다. 기존 이력 회귀를 포함해 테스트 12건과 서브테스트 38건이 통과했습니다.
+- FE 이력 카드에 보호소명을 표시하고, 이력과 마이페이지에서 누적 통계와 거리 누락 여부를 연동합니다. 조회 최적화는 `docs/TODO.md`에 기록했습니다.
+
+---
+
 # 작업 인수인계 — F-15 보호소의 산책자 평가 (SC-16, SC-09, SC-10)
 
 ## 1. 작업 목표

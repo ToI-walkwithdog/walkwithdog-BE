@@ -11,6 +11,10 @@ from app.volunteer_stats import refresh_volunteer_profile
 from app.walk_map_service import OWNER_MAX_ROUTE_POINTS
 from datetime import timedelta
 
+# Issue #99: owner-only statistics on /volunteers/me; /users/{id}/profile must not expose them.
+HISTORY_STATISTICS = {"history_walk_count", "history_distance_m", "history_unique_dog_count",
+                      "history_distance_missing_count", "history_distance_is_complete"}
+
 
 class OwnerMapTests(WalkMapFixture, unittest.TestCase):
     def setUp(self):
@@ -162,7 +166,15 @@ class HistoryAndProfileTests(WalkMapFixture, unittest.TestCase):
         profile = self.get("/users/2/profile", 2).json()
         me = self.get("/volunteers/me", 2).json()
         self.assertEqual(profile.pop("nickname"), "사용자2")
-        self.assertEqual(profile, me)
+        self.assertFalse(HISTORY_STATISTICS & set(profile), "profile must not expose owner statistics")
+        self.assertEqual(me, {
+            **profile,
+            "history_walk_count": 0,
+            "history_distance_m": "0.00",
+            "history_unique_dog_count": 0,
+            "history_distance_missing_count": 0,
+            "history_distance_is_complete": True,
+        })
         self.assertEqual((profile["level"], profile["total_walk_count"]), (1, 0))
 
     def test_profile_statistics_stay_consistent_with_volunteer_me_after_walks(self):
@@ -170,7 +182,15 @@ class HistoryAndProfileTests(WalkMapFixture, unittest.TestCase):
         profile = self.get("/users/1/profile").json()
         me = self.get("/volunteers/me").json()
         self.assertEqual(profile.pop("nickname"), "사용자1")
-        self.assertEqual(profile, me)
+        self.assertFalse(HISTORY_STATISTICS & set(profile), "profile must not expose owner statistics")
+        self.assertEqual(me, {
+            **profile,
+            "history_walk_count": 1,
+            "history_distance_m": "22.24",
+            "history_unique_dog_count": 1,
+            "history_distance_missing_count": 0,
+            "history_distance_is_complete": True,
+        })
         self.assertEqual((me["total_walk_count"], me["total_distance_m"], me["total_duration_seconds"],
                           me["unique_dog_count"]), (1, "22.24", 120, 1))
 
