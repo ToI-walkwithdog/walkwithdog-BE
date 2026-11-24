@@ -46,7 +46,11 @@ CONTRACT_BLOCKED = {("PUT", "/users/me/pledge"), ("GET", "/users/me/onboarding/b
                     ("POST", "/users/me/phone-verifications/confirm"),
                     ("GET", "/users/me/onboarding/dog-experience"), ("PUT", "/users/me/onboarding/dog-experience"),
                     ("GET", "/dogs/walk-availability"), ("GET", "/dogs/{dog_id}/walk-availability"),
-                    ("POST", "/walk-requests/{request_id}/shelter-code/verify")}
+                    ("POST", "/walk-requests/{request_id}/shelter-code/verify"),
+                    # Issue #103: own profile and its phone change.
+                    ("GET", "/users/me/profile"), ("PATCH", "/users/me/profile"),
+                    ("POST", "/users/me/profile/phone-verifications"),
+                    ("POST", "/users/me/profile/phone-verifications/confirm")}
 # Issue #87: shelter staff issue start codes; every general user gets the contract role 403.
 STAFF_CONTRACT = {("POST", "/walk-requests/{request_id}/shelter-code")}
 # Step 3 and location lookup use ONBOARDING_NOT_ALLOWED for AGE_REVIEW_REQUIRED accounts.
@@ -54,7 +58,7 @@ ONBOARDING_BLOCKED = {("GET", "/users/me/onboarding/walking-routine"), ("PUT", "
                       ("POST", "/regions/resolve-location")}
 # Contract routes of the general-user onboarding: shelter and admin get this role 403.
 ONBOARDING_ROLE_CODES = {"ONBOARDING_NOT_ALLOWED", "PLEDGE_NOT_ALLOWED", "WALK_LIST_NOT_ALLOWED",
-                         "WALK_REQUEST_NOT_ALLOWED"}
+                         "WALK_REQUEST_NOT_ALLOWED", "PROFILE_UPDATE_NOT_ALLOWED"}
 # No user identity: shared, read-only or sign-up data that anyone may request.
 PUBLIC = {("GET", "/"), ("GET", "/db-test"), ("GET", "/dogs/"), ("GET", "/dogs/{dog_id}"),
           ("GET", "/dogs/{dog_id}/personality"), ("GET", "/shelters/{shelter_id}"),

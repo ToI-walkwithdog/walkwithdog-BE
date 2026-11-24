@@ -39,6 +39,9 @@ class User(Base):
     # under 14; only the age review flow (Issue #41) sets it back to ACTIVE.
     account_status = Column(String(24), nullable=False, default="ACTIVE", server_default="ACTIVE")
     age_review_required_at = Column(DateTime(timezone=True), nullable=True)
+    # Issue #103 (migration 035): shared version of nickname, full name and verified phone.
+    # +1 on every real change (profile PATCH, Step 1 first save); a no-op keeps it.
+    profile_version = Column(Integer, nullable=False, default=0, server_default="0")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -212,6 +215,7 @@ class PhoneVerification(Base):
         CheckConstraint("send_status IN ('PENDING', 'SENDING', 'SENT', 'UNKNOWN', 'FAILED')",
                         name="ck_phone_verifications_send_status"),
         CheckConstraint("attempt_count >= 0", name="ck_phone_verifications_attempt_count"),
+        CheckConstraint("purpose IN ('ONBOARDING', 'PROFILE_PHONE_CHANGE')", name="ck_phone_verifications_purpose"),
         Index("ix_phone_verifications_user_created", "user_id", "created_at"),
         Index("ix_phone_verifications_phone_created", "phone_e164", "created_at"),
         Index("ix_phone_verifications_expires_at", "expires_at"),
@@ -232,6 +236,8 @@ class PhoneVerification(Base):
     verified_valid_until = Column(DateTime(timezone=True), nullable=True)
     consumed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
+    # Issue #103 (migration 035): set by the endpoint, never by the client. Existing rows are ONBOARDING.
+    purpose = Column(String(30), nullable=False, default="ONBOARDING", server_default="ONBOARDING")
 
 
 class PhoneVerificationDailyCount(Base):

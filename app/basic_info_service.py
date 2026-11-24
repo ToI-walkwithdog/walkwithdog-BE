@@ -4,10 +4,13 @@ Save order: field rules (422) -> an existing Step 1 is replayed (same input 200,
 different input 409) -> future date and age range (under 14 switches the account to
 AGE_REVIEW_REQUIRED in its own committed transaction, then 422; over 120 is 422 only)
 -> verification request -> one transaction:
-   lock users row FOR SHARE and re-check status and pledge
-   -> lock the verification row FOR UPDATE
-   -> insert volunteer_onboarding_basics and set phone_verifications.consumed_at
-   -> commit. Any failure rolls both back.
+   lock users row FOR UPDATE and re-check status and pledge
+   -> lock the verification row FOR UPDATE (ONBOARDING purpose only, #103)
+   -> insert volunteer_onboarding_basics, set phone_verifications.consumed_at and add 1 to
+      users.profile_version (#103; a replay never adds again)
+   -> commit. Any failure rolls all of it back.
+The users row is locked FOR UPDATE (not FOR SHARE) because the save now writes that row;
+the order users -> volunteer_onboarding_basics -> phone_verifications matches the profile PATCH.
 An existing Step 1 is checked before the age rule so a retried or mismatched request
 from a completed account can never change its status.
 
@@ -26,8 +29,9 @@ from app.auth import contract_unauthorized
 from app.models import PhoneVerification, User, VolunteerOnboardingBasic
 from app.onboarding_common import (age_years, as_utc, ensure_pledge_completed,
                                    first_incomplete_step, kst_date)
-from app.phone_verification_service import (is_latest_for_user, mask_phone, parse_verification_id,
-                                            phone_already_registered, registered_to_other_user)
+from app.phone_verification_service import (PURPOSE_ONBOARDING, is_latest_for_user, mask_phone,
+                                            parse_verification_id, phone_already_registered,
+                                            registered_to_other_user)
 
 FULL_NAME_MIN_LENGTH, FULL_NAME_MAX_LENGTH = 2, 10
 MINIMUM_AGE, MAXIMUM_AGE = 14, 120
@@ -134,7 +138,7 @@ def save_basic_info(db: Session, user_id: int, full_name: str, birth: date, raw_
     if verification_id is None:
         raise not_found
     try:
-        user = lock_user(db, user_id)  # FOR SHARE: waits for, or blocks, a status change
+        user = lock_user(db, user_id, for_update=True)  # also orders against profile PATCH (#103)
         if user is None:
             raise contract_unauthorized("USER_NOT_FOUND")
         ensure_active(user)
@@ -151,7 +155,8 @@ def save_basic_info(db: Session, user_id: int, full_name: str, birth: date, raw_
             db.rollback()
             return _replay(db, user_id, db.get(VolunteerOnboardingBasic, user_id), full_name, birth,
                            verification_id, now)
-        if (verification.verified_at is None or verification.consumed_at is not None
+        if (verification.purpose != PURPOSE_ONBOARDING or verification.verified_at is None
+                or verification.consumed_at is not None
                 or as_utc(now) >= as_utc(verification.verified_valid_until)
                 or not is_latest_for_user(db, verification)):
             raise ContractError(409, "PHONE_VERIFICATION_REQUIRED", "전화번호 인증을 완료해 주세요.",
@@ -164,6 +169,7 @@ def save_basic_info(db: Session, user_id: int, full_name: str, birth: date, raw_
                                          completed_at=now, updated_at=now)
         db.add(basic)
         verification.consumed_at = now
+        user.profile_version += 1  # name and verified phone are part of the profile (#103)
         db.commit()
         return saved_response(user_id, basic, now, next_step(db, user_id))
     except IntegrityError:

@@ -1,5 +1,16 @@
 # 작업 인수인계
 
+## 내 정보 수정과 휴대폰 재인증 (#103)
+
+- 대상은 ACTIVE 일반 사용자입니다. 서약과 온보딩 완료는 요구하지 않습니다. 보호소와 관리자는 403 `PROFILE_UPDATE_NOT_ALLOWED`, 나이 확인 대기 계정은 403 `AGE_REVIEW_REQUIRED`입니다. 모든 응답은 `Cache-Control: private, no-store`입니다.
+- `GET /users/me/profile`은 `nickname`, `full_name`, `phone_number`(본인 번호, `010-XXXX-XXXX`), `phone_verified_at`, `profile_version`을 반환합니다. Step 1 전이면 이름과 번호는 `null`입니다. `/users/{user_id}/profile`보다 먼저 등록되어 경로가 겹치지 않습니다.
+- `PATCH /users/me/profile`은 `expected_profile_version`이 필수입니다. 보내지 않은 필드는 그대로 두고 빈값과 `null`은 422입니다. 닉네임, 이름, 번호를 한 트랜잭션에 저장하고 `profile_version`을 1 올리며 `changed_fields`를 반환합니다. 값이 같으면 저장 없이 `changed_fields: []`입니다. 버전이 다르면 409 `PROFILE_VERSION_MISMATCH`입니다.
+- 이름과 번호 변경은 기존 Step 1 기록이 있어야 합니다(없으면 409 `PROFILE_BASIC_INFO_REQUIRED`). Step 1 첫 저장도 버전을 1 올리며 같은 요청 재시도는 올리지 않습니다.
+- 번호 변경은 `POST /users/me/profile/phone-verifications`와 `/confirm`으로 인증한 뒤 PATCH에 `phone_number`와 `phone_verification_id`를 함께 보냅니다. 확인만으로는 번호가 바뀌지 않습니다. 증명은 본인, 같은 번호, 프로필 목적, 미사용, 확인 후 15분 이내, 최신 요청이어야 하고 저장에 성공할 때만 사용 처리됩니다. `phone_verified_at`은 인증 시각입니다.
+- 인증 요청은 `phone_verifications.purpose`(`ONBOARDING`, `PROFILE_PHONE_CHANGE`)로 구분하며 다른 목적의 확인과 저장에 쓸 수 없습니다. 재발송 간격과 일일 한도는 두 목적을 합산합니다. 기존 SMS 발송 서비스와 개발용 Mock을 그대로 사용합니다.
+- 감사 기록은 별도 테이블 없이 `user_id`, 변경 필드명, 시각만 로그에 남깁니다. 번호, 이름, 인증번호는 남기지 않습니다.
+- 마이그레이션 `035_profile_phone_change.sql`(추가 전용, 재실행 가능)이 필요합니다. 개발 DB 적용은 별도 승인 후 진행합니다. FE 인증번호 입력 UI는 17단계 연동 TODO입니다.
+
 ## 본인 산책 이력 및 누적 통계 (#99)
 
 - `GET /walks/history`는 예약에 연결된 보호소의 현재 이름을 각 항목의 `shelter_name`으로 제공합니다. 관계가 없으면 `null`을 반환합니다. 기존 정렬, 페이지네이션과 인계 미확인 필터를 유지합니다.
