@@ -171,6 +171,16 @@ class ShelterCodeTests(ShelterCodeFixture, unittest.TestCase):
         self.assertIn(self.failures(self.request_id), (None, (0, False)))
         self.assertIsNone(self.failures(self.request_id, user=2))
 
+    def test_a_code_of_another_reservation_is_rejected_and_starts_nothing(self):
+        other = self.seed_request(user=2, dog=2, status="APPROVED")
+        with patch("app.shelter_code_service.secrets.randbelow", side_effect=[111111, 222222]):
+            mine, theirs = self.issued_code(self.request_id), self.issued_code(other)
+        self.contract(self.verify(self.request_id, theirs), 422, "SHELTER_CODE_INVALID")
+        self.contract(self.verify(other, theirs, user=1), 403, "WALK_REQUEST_NOT_ALLOWED")
+        self.start_code(self.start(other, user=2, code=False), "WALK_START_CODE_REQUIRED")
+        self.assertEqual(self.failures(self.request_id), (1, False))
+        self.contract(self.verify(self.request_id, mine), 200, "SHELTER_CODE_VERIFIED")
+
     def test_leading_zero_and_repeated_valid_submission(self):
         with patch("app.shelter_code_service.secrets.randbelow", return_value=42):
             code = self.issued_code(self.request_id)

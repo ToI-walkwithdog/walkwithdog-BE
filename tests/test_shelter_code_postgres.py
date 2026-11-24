@@ -97,6 +97,15 @@ class ShelterCodeConcurrencyTests(IsolatedPostgres, ShelterCodeFixture, unittest
         self.contract(self.verify(self.request_id, self.wrong(code)), 429, "SHELTER_CODE_RATE_LIMITED")
         self.assertEqual(self.failures(self.request_id), (5, True))
 
+    def test_concurrent_verifications_count_one_failure_and_retry_the_other(self):
+        code = self.issued_code(self.request_id)
+        first, second = self.recording_race(lambda: self.verify(self.request_id, self.wrong(code)),
+                                            lambda: self.verify(self.request_id, self.wrong(code)),
+                                            hook="app.routers.shelter_codes.verify_code")
+        self.contract(first, 422, "SHELTER_CODE_INVALID")
+        self.contract(second, 409, "WALK_REQUEST_RETRYABLE")
+        self.assertEqual(self.failures(self.request_id), (1, False))
+
     def test_start_first_blocks_a_concurrent_reissue(self):
         self.verify(self.request_id, self.issued_code(self.request_id))
         started, reissued = self.recording_race(lambda: self.start(self.request_id, code=False),
