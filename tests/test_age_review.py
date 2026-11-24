@@ -15,8 +15,10 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.models import (AuthSession, ChatSession, Dog, MatchingResult, PhoneVerification,
                             PhoneVerificationDailyCount, SessionToken, Shelter, Survey, User, UserConsent,
                             UserPledgeAcknowledgement, UserRole, VolunteerExperienceChallenge, VolunteerOnboardingBasic,
-                            VolunteerOnboardingExperience)
+                            VolunteerOnboardingExperience, VolunteerOnboardingRoutine, VolunteerRoutineRegion,
+                            VolunteerRoutineTimeSlot)
     from app.onboarding_common import get_clock
+    from app.region_models import LEVEL_SIDO, LEVEL_SIGUNGU, Region
     from app.rate_limit import FailureLimiter
     from app.routers import age_review, auth, onboarding_basic, users
     from app.sms_provider import MockSmsProvider, get_sms_provider
@@ -298,6 +300,31 @@ class ExitTests(AgeReviewTestCase):
             self.assertEqual(self.exit().status_code, 200)
         self.assertEqual((self.count(VolunteerOnboardingExperience), self.count(VolunteerExperienceChallenge)), (0, 0))
         self.assertIsNone(self.user(1))
+
+    def step3_rows(self):
+        return tuple(self.count(model) for model in (VolunteerOnboardingRoutine, VolunteerRoutineRegion,
+                                                     VolunteerRoutineTimeSlot))
+
+    def test_step3_rows_are_removed_in_fk_order_and_kept_when_the_exit_is_refused(self):
+        with self.Session.begin() as db:
+            db.add(Region(region_code="11", region_name="서울특별시", region_level=LEVEL_SIDO, is_active=True))
+            db.flush()
+            db.add(Region(region_code="11110", region_name="종로구", region_level=LEVEL_SIGUNGU,
+                          parent_region_code="11", is_active=True))
+            db.add(VolunteerOnboardingRoutine(user_id=1, walking_duration_code="UP_TO_30_MIN",
+                                              comfortable_dog_size_code="SMALL", completed_at=START, updated_at=START))
+            db.flush()
+            db.add(VolunteerRoutineRegion(user_id=1, region_code="11110"))
+            db.add_all([VolunteerRoutineTimeSlot(user_id=1, time_slot_code="WEEKDAY_MORNING"),
+                        VolunteerRoutineTimeSlot(user_id=1, time_slot_code="WEEKEND_AFTERNOON")])
+        with patch.dict(os.environ, {"ACCOUNT_EXIT_RECORD_POLICY": "delete", "APP_ENV": "production"}):
+            self.assert_error(self.exit(), 409, "ACCOUNT_HAS_RETAINED_ACTIVITY")  # production keeps everything
+        self.assertEqual(self.step3_rows(), (1, 1, 2))
+        with patch.dict(os.environ, DELETE_RECORDS):
+            self.assertEqual(self.exit().status_code, 200)
+        self.assertEqual(self.step3_rows(), (0, 0, 0))
+        self.assertIsNone(self.user(1))
+        self.assertEqual(self.count(Region), 2)  # the shared region master stays
 
     def test_consent_and_pledge_records_are_kept_until_the_retention_policy_is_decided(self):
         settings = [{}, {"ACCOUNT_EXIT_RECORD_POLICY": "delete"},

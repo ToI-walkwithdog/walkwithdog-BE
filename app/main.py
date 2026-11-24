@@ -11,7 +11,7 @@ from app.routers import auth, users, shelter_incidents, shelter_live_walks, shel
 from app.routers import walk_requests
 from app.routers import walks, walk_maps, walk_reviews, walk_guides, shelter_volunteer_reviews
 from app.routers import regions
-from app.routers import onboarding_basic, onboarding_experience, age_review
+from app.routers import onboarding_basic, onboarding_experience, onboarding_routine, age_review
 from app.walk_service import close_stale_walks
 
 # Existing DB changes must go through explicit, backed-up migrations.
@@ -61,6 +61,7 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(onboarding_basic.router)
 app.include_router(onboarding_experience.router)
+app.include_router(onboarding_routine.router)
 app.include_router(age_review.router)
 app.include_router(shelter_incidents.router)
 app.include_router(shelter_live_walks.router)
