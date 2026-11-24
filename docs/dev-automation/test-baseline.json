@@ -1313,10 +1313,12 @@
     "tests/test_walk_domain.py::WalkConstraintTests::test_point_ranges_order_and_retry_key",
     "tests/test_walk_domain.py::WalkConstraintTests::test_request_times_duplicate_and_review_metadata",
     "tests/test_walk_domain.py::WalkConstraintTests::test_review_observations_and_uniqueness",
+    "tests/test_walk_domain.py::WalkConstraintTests::test_shelter_volunteer_review_constraints",
     "tests/test_walk_domain.py::WalkConstraintTests::test_slot_order_weekday_and_duplicate",
     "tests/test_walk_domain.py::WalkConstraintTests::test_summary_evidence_counts_score_and_profile_totals",
     "tests/test_walk_domain.py::WalkConstraintTests::test_unknown_traits_and_initial_profile",
     "tests/test_walk_domain.py::WalkConstraintTests::test_walk_end_status_and_metrics",
+    "tests/test_walk_domain.py::WalkMetadataTests::test_020_shelter_volunteer_review_schema_contract",
     "tests/test_walk_domain.py::WalkMetadataTests::test_all_ten_models_register_with_existing_base_and_relationships",
     "tests/test_walk_domain.py::WalkMetadataTests::test_checked_in_sql_exactly_matches_orm_postgresql_ddl",
     "tests/test_walk_domain.py::WalkMetadataTests::test_types_nullability_defaults_and_all_constraint_contracts",
@@ -1573,10 +1575,5 @@
     "tests/test_walking_routine.py::WalkingRoutineTests::test_status_change_after_the_route_check_refuses_the_save",
     "tests/test_walking_routine.py::WalkingRoutineTests::test_the_old_duration_code_is_absent_from_the_implementation",
     "tests/test_walking_routine.py::WalkingRoutineTests::test_unknown_fields_are_ignored_and_never_stored"
-  ],
-  "passes": [
-    "tests/test_walk_domain.py::WalkMetadataTests::test_all_ten_models_register_with_existing_base_and_relationships",
-    "tests/test_walk_domain.py::WalkMetadataTests::test_checked_in_sql_exactly_matches_orm_postgresql_ddl",
-    "tests/test_walk_domain.py::WalkMetadataTests::test_types_nullability_defaults_and_all_constraint_contracts"
   ]
 }
