@@ -45,12 +45,16 @@ CONTRACT_BLOCKED = {("PUT", "/users/me/pledge"), ("GET", "/users/me/onboarding/b
                     ("PUT", "/users/me/onboarding/basic-info"), ("POST", "/users/me/phone-verifications"),
                     ("POST", "/users/me/phone-verifications/confirm"),
                     ("GET", "/users/me/onboarding/dog-experience"), ("PUT", "/users/me/onboarding/dog-experience"),
-                    ("GET", "/dogs/walk-availability"), ("GET", "/dogs/{dog_id}/walk-availability")}
+                    ("GET", "/dogs/walk-availability"), ("GET", "/dogs/{dog_id}/walk-availability"),
+                    ("POST", "/walk-requests/{request_id}/shelter-code/verify")}
+# Issue #87: shelter staff issue start codes; every general user gets the contract role 403.
+STAFF_CONTRACT = {("POST", "/walk-requests/{request_id}/shelter-code")}
 # Step 3 and location lookup use ONBOARDING_NOT_ALLOWED for AGE_REVIEW_REQUIRED accounts.
 ONBOARDING_BLOCKED = {("GET", "/users/me/onboarding/walking-routine"), ("PUT", "/users/me/onboarding/walking-routine"),
                       ("POST", "/regions/resolve-location")}
 # Contract routes of the general-user onboarding: shelter and admin get this role 403.
-ONBOARDING_ROLE_CODES = {"ONBOARDING_NOT_ALLOWED", "PLEDGE_NOT_ALLOWED", "WALK_LIST_NOT_ALLOWED"}
+ONBOARDING_ROLE_CODES = {"ONBOARDING_NOT_ALLOWED", "PLEDGE_NOT_ALLOWED", "WALK_LIST_NOT_ALLOWED",
+                         "WALK_REQUEST_NOT_ALLOWED"}
 # No user identity: shared, read-only or sign-up data that anyone may request.
 PUBLIC = {("GET", "/"), ("GET", "/db-test"), ("GET", "/dogs/"), ("GET", "/dogs/{dog_id}"),
           ("GET", "/dogs/{dog_id}/personality"), ("GET", "/shelters/{shelter_id}"),
@@ -127,14 +131,15 @@ class AccessControlTests(unittest.TestCase):
         return self.client.request(method, concrete(path), headers=headers, **kwargs)
 
     def detail_routes(self):
-        return sorted(all_routes() - ALLOWED - CONTRACT_BLOCKED - ONBOARDING_BLOCKED - PUBLIC)
+        return sorted(all_routes() - ALLOWED - CONTRACT_BLOCKED - ONBOARDING_BLOCKED - STAFF_CONTRACT - PUBLIC)
 
     def contract_routes(self):
         return sorted(CONTRACT_BLOCKED | ONBOARDING_BLOCKED)
 
     def test_every_route_is_classified_and_the_restricted_account_is_blocked(self):
         routes = all_routes()
-        self.assertLessEqual(ALLOWED | CONTRACT_BLOCKED | ONBOARDING_BLOCKED | PUBLIC, routes)  # lists match real routes
+        self.assertLessEqual(ALLOWED | CONTRACT_BLOCKED | ONBOARDING_BLOCKED | STAFF_CONTRACT | PUBLIC,
+                             routes)  # lists match real routes
         blocked = self.detail_routes()
         self.assertGreaterEqual(len(blocked), 45)  # unique (method, path) pairs at the time of #41
         for method, path in blocked:
@@ -149,6 +154,16 @@ class AccessControlTests(unittest.TestCase):
             with self.subTest(route=f"{method} {path}"):
                 response = self.call(method, path, "token-1")
                 self.assertEqual((response.status_code, response.json()["code"]), (403, "ONBOARDING_NOT_ALLOWED"))
+        for method, path in sorted(STAFF_CONTRACT):
+            for token in (None, "token-1", "token-2", "token-3", "token-4"):
+                with self.subTest(route=f"{method} {path}", token=token):
+                    response = self.call(method, path, token)
+                    if token is None:
+                        self.assertEqual((response.status_code, response.json()["code"]), (401, "AUTHENTICATION_REQUIRED"))
+                    elif token in ("token-1", "token-2"):  # restricted and active general users
+                        self.assertEqual((response.status_code, response.json()["code"]), (403, "WALK_REQUEST_NOT_ALLOWED"))
+                    else:
+                        self.assertNotEqual(response.json().get("code"), "AGE_REVIEW_REQUIRED")
 
     def test_region_lookup_is_public_and_leaves_account_status_unchanged(self):
         with self.Session.begin() as db:

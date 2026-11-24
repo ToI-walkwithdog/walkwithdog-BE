@@ -412,6 +412,20 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "030_shelter_code_verification.sql",
+      "sha256": "fdc7d2818ac1320238e4badd09ff4cd397a64a502ac5daced8db7b5abcab4f48",
+      "requires": [
+        "029_reservation_cancellation.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [

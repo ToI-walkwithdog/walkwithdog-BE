@@ -6,7 +6,24 @@ from threading import Event
 from unittest.mock import patch
 
 from walk_request_test_support import RequestFixture, START
+from app.models import WalkRequest
 from app.routers import walks
+from app.shelter_code_models import ShelterCodeIssuance
+
+
+def seed_start_code(session_factory, request_id):
+    """Issue #87: POST /walks needs a verified, unused shelter code. Recording tests are not about
+    codes, so seed one valid for the whole reservation unless a current issuance already exists."""
+    with session_factory.begin() as db:
+        request = db.get(WalkRequest, request_id)
+        if request is None or db.query(ShelterCodeIssuance).filter(
+                ShelterCodeIssuance.walk_request_id == request_id, ShelterCodeIssuance.revoked_at.is_(None)).first():
+            return
+        db.add(ShelterCodeIssuance(
+            walk_request_id=request_id, volunteer_user_id=request.user_id, issued_by=request.user_id,
+            code_digest="0" * 64, issued_at=request.requested_start_at, expires_at=request.requested_end_at,
+            verified_at=request.requested_start_at,
+        ))
 
 
 class WalkFixture(RequestFixture):
@@ -20,7 +37,9 @@ class WalkFixture(RequestFixture):
         self.record_clock.return_value = START + timedelta(seconds=seconds)
         self.request_clock.return_value = START + timedelta(seconds=seconds)
 
-    def start(self, request_id, user=1, **extra):
+    def start(self, request_id, user=1, *, code=True, **extra):
+        if code:
+            seed_start_code(self.Session, request_id)
         return self.client.post("/walks", headers=self.auth(user), json={"walk_request_id": request_id, **extra})
 
     def begin(self, user=1, dog=1):

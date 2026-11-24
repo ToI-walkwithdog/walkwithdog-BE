@@ -1,11 +1,12 @@
 """Opt-in concurrent recording HTTP requests and real PostgreSQL failure rollback."""
 import os
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
 from walk_motion_test_support import MotionRecordingAssertions
-from walk_record_test_support import WalkFixture, START
+from walk_record_test_support import WalkFixture, START, seed_start_code
 from walk_request_test_support import END
 from app.models import DogWalkSetting, Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest
 from app.walk_request_service import locked_request
@@ -118,6 +119,7 @@ class WalkRecordingPostgresTests(MotionRecordingAssertions, WalkFixture, unittes
 
     def test_cancellation_before_start_boundary_wins_and_no_walk_is_created(self):
         identifier = self.seed_request(status="APPROVED")
+        seed_start_code(self.Session, identifier)  # Issue #87: not while the cancel holds the reservation lock.
         # Cancellation is checked just before the boundary; start arrives at it.
         from datetime import timedelta
         self.request_clock.return_value = START - timedelta(seconds=1)
@@ -153,10 +155,12 @@ class WalkRecordingPostgresTests(MotionRecordingAssertions, WalkFixture, unittes
             request, _, _ = locked_request(db, identifier, actor, "START")
             return request
 
-        with patch("app.walk_service.validate_walk_start", side_effect=guard_without_duplicate_check):
+        # The first start used the only code; bypass that check too so the INSERT reaches the constraint.
+        with patch("app.walk_service.validate_walk_start", side_effect=guard_without_duplicate_check), \
+                patch("app.walk_service.usable_verification", return_value=SimpleNamespace(used_at=None)):
             failed = self.start(walk["walk_request_id"])
         self.assertEqual(failed.status_code, 409, failed.text)
-        self.assertIn("중복", failed.json()["detail"])
+        self.assertEqual(failed.json()["detail"]["code"], "WALK_START_ALREADY_STARTED")  # Issue #87
         self.assertEqual(len(self.rows(Walk)), 1)
 
     def test_actual_point_unique_error_rolls_back_batch_and_preserves_original(self):

@@ -350,9 +350,15 @@ def validate_walk_start(db, request_id, actor):
     """
     request, _, _ = locked_request(db, request_id, actor, "START")
     if request.status != "APPROVED":
-        raise HTTPException(409, "승인된 신청만 산책을 시작할 수 있습니다.")
-    ensure_not_started(db, request)
+        raise start_conflict("WALK_START_BOOKING_NOT_ELIGIBLE", "승인된 신청만 산책을 시작할 수 있습니다.")
+    if has_walk_record(db, request):
+        raise start_conflict("WALK_START_ALREADY_STARTED", "이미 산책이 시작된 예약입니다.")
     return request
+
+
+def start_conflict(code, message):
+    """POST /walks 409 with a machine-readable detail.code (Issue #87)."""
+    return HTTPException(409, {"code": code, "message": message})
 
 
 FINISHED_WALK_STATUSES = ("COMPLETED", "INTERRUPTED")
