@@ -1893,7 +1893,8 @@ class SignupPostgresTests(unittest.TestCase):
         snapshot = self.schema_snapshot()
         self.run_migration(AGREEMENTS_MIGRATION)
         self.assertEqual(self.schema_snapshot(), snapshot)
-        with self.Session.begin() as db:
+        session_factory = sessionmaker(bind=self.engine)
+        with session_factory.begin() as db:
             legacy = db.get(VolunteerOnboardingRoutine, 1)
             self.assertEqual((legacy.completed_at, legacy.terms_document_version, legacy.privacy_document_version),
                              (STEP1_START, None, None))
@@ -1903,8 +1904,9 @@ class SignupPostgresTests(unittest.TestCase):
                              ("PRIVACY_COLLECTION_USE", TEST_DOCUMENT_VERSION, "AGREE", STEP1_START))
             db.add(UserConsent(user_id=1, consent_type="TERMS_OF_SERVICE",
                                document_version=TEST_TERMS_VERSION, action="AGREE", recorded_at=STEP1_START))
-        self.assertEqual(self.table_count(UserConsent), 2)
-        with self.assertRaises(IntegrityError), self.Session.begin() as db:
+        with session_factory() as db:
+            self.assertEqual(db.query(UserConsent).count(), 2)
+        with self.assertRaises(IntegrityError), session_factory.begin() as db:
             db.add(UserConsent(user_id=1, consent_type="UNSUPPORTED_TYPE",
                                document_version=TEST_TERMS_VERSION, action="AGREE", recorded_at=STEP1_START))
 
