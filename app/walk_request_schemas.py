@@ -4,7 +4,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import (AwareDatetime, BaseModel, ConfigDict, Field, computed_field, field_validator,
+from pydantic import (AwareDatetime, BaseModel, ConfigDict, Field, ValidationInfo, computed_field, field_validator,
                       model_serializer, model_validator)
 
 from app.schemas import DogCardResponse
@@ -12,7 +12,10 @@ from app.shelter_volunteer_review_schemas import VolunteerReviewSummaryResponse
 
 RequestStatus = Literal["PENDING", "APPROVED", "REJECTED", "CANCELLED"]
 ReservationTab = Literal["ALL", "PENDING", "APPROVED", "REJECTED", "COMPLETED"]
+ReservationStatusGroup = Literal["PAST"]
 ReservationDisplayStatus = Literal["PENDING", "APPROVED", "REJECTED", "CANCELLED", "COMPLETED"]
+CancelReasonCode = Literal["SCHEDULE_CHANGED", "CANNOT_VISIT"]
+CancelledActorRole = Literal["USER", "SHELTER", "ADMIN"]
 
 
 class RejectionReasonCode(str, Enum):
@@ -63,9 +66,12 @@ class WalkRequestAction(BaseModel):
     action: Literal["APPROVE", "REJECT", "CANCEL"]
     rejection_reason_code: RejectionReasonCode | None = None
     rejection_reason: str | None = None
+    cancel_reason_code: CancelReasonCode | None = None
 
     @model_validator(mode="after")
     def validate_action_fields(self):
+        if self.action != "CANCEL" and "cancel_reason_code" in self.model_fields_set:
+            raise ValueError("취소 사유는 CANCEL 요청에만 입력할 수 있습니다.")
         if self.action == "REJECT":
             if self.rejection_reason_code is None:
                 if not self.rejection_reason or not self.rejection_reason.strip():
@@ -108,10 +114,11 @@ class WalkRequestResponse(BaseModel):
     rejection_reason_code: str | None = None
     created_at: datetime
     updated_at: datetime
+    can_cancel: bool = False
 
     @model_validator(mode="before")
     @classmethod
-    def extract_related_fields(cls, data):
+    def extract_related_fields(cls, data, info: ValidationInfo):
         if not isinstance(data, dict):
             walk = getattr(data, "walk", None)
             shelter = getattr(data, "shelter", None)
@@ -134,6 +141,7 @@ class WalkRequestResponse(BaseModel):
                 "rejection_reason_code": getattr(data, "rejection_reason_code", None),
                 "created_at": data.created_at,
                 "updated_at": data.updated_at,
+                "can_cancel": (info.context or {}).get("can_cancel", False),
             }
         return data
 
@@ -153,11 +161,6 @@ class WalkRequestResponse(BaseModel):
 
     @computed_field
     @property
-    def can_cancel(self) -> bool:
-        return self.status in ("PENDING", "APPROVED") and self.walk_id is None
-
-    @computed_field
-    @property
     def cancelled_after_approval(self) -> bool:
         return self.status == "CANCELLED" and self.reviewed_by is not None
 
@@ -172,6 +175,28 @@ class WalkRequestResponse(BaseModel):
         return value.astimezone(timezone.utc)
 
 
+class ManagedWalkRequestResponse(WalkRequestResponse):
+    cancel_reason_code: CancelReasonCode | None = None
+    cancelled_at: datetime | None = None
+    cancelled_by: int | None = None
+    cancelled_actor_role: CancelledActorRole | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_cancellation(cls, data, info: ValidationInfo):
+        if isinstance(data, dict):
+            return data
+        fields = super().extract_related_fields(data, info)
+        fields.update(cancel_reason_code=data.cancel_reason_code, cancelled_at=data.cancelled_at,
+                      cancelled_by=data.cancelled_by, cancelled_actor_role=data.cancelled_actor_role)
+        return fields
+
+    @field_validator("cancelled_at")
+    @classmethod
+    def utc_cancelled_at(cls, value):
+        return WalkRequestResponse.utc_datetime(value)
+
+
 class ApplicantDetailResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -184,9 +209,32 @@ class ApplicantDetailResponse(BaseModel):
     walk_frequency: str | None = None
 
 
-class WalkRequestDetailResponse(WalkRequestResponse):
+class ReservationShelter(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+
+
+class ConfirmedVisit(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    address: str | None
+    phone: str | None
+
+
+class ReservationActions(BaseModel):
+    can_cancel: bool
+    can_enter_shelter_code: bool
+
+
+class WalkRequestDetailResponse(ManagedWalkRequestResponse):
     applicant: ApplicantDetailResponse
     dog_difficulty: Literal["BEGINNER", "INTERMEDIATE", "EXPERIENCED"] = "BEGINNER"
+    shelter: ReservationShelter | None
+    max_walk_minutes: int | None
+    confirmed_visit: ConfirmedVisit | None
+    actions: ReservationActions
 
 
 class DateWalkRequestReceipt(BaseModel):

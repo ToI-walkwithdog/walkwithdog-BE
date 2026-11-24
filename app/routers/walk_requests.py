@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app import walk_request_service
 from app.account_status import age_review_required, ensure_active, require_active_writer
 from app.api_contract import ContractError, INTERNAL_SERVER_ERROR_MESSAGE, contract_response
 from app.auth import (bearer, contract_unauthorized, get_contract_session, get_contract_user,
@@ -18,25 +19,28 @@ from app.dependencies import require_role, require_shelter, require_shelter_acce
 from app.models import Shelter, User, UserRole, VolunteerProfile, WalkRequest
 from app.onboarding_common import require_onboarding_for_new_walk
 from app.walk_request_schemas import (
-    DateWalkRequestResponse, RequestStatus, ReservationTab, VolunteerProfileResponse,
+    DateWalkRequestResponse, ManagedWalkRequestResponse, RequestStatus, ReservationStatusGroup,
+    ReservationTab, VolunteerProfileResponse,
     WalkRequestAction, WalkRequestCreate, WalkRequestDetailResponse, WalkRequestResponse,
 )
 from app.shelter_volunteer_review_service import get_volunteer_review_summary
 from app.walk_date_slots import slot_unavailable
-from app.walk_request_service import (create_date_request, create_request, date_request_fingerprint, date_request_replay,
-                                     get_request_detail, owns_date_request, request_list_query, transition_request)
+from app.walk_request_service import (can_cancel_request, create_date_request, create_request, date_request_fingerprint,
+                                     date_request_replay, get_request_detail, owns_date_request, request_list_query,
+                                     transition_request)
 
 router = APIRouter(tags=["walk-requests"])
 require_volunteer = require_role(UserRole.USER)
 logger = logging.getLogger(__name__)
 
 
-def database_error(exc):
+def database_error(exc, *, cancelling=False):
     original = getattr(exc, "orig", None)
     code = getattr(original, "pgcode", None)
     constraint = getattr(getattr(original, "diag", None), "constraint_name", None)
     if code in ("55P03", "40P01", "40001"):
-        return HTTPException(409, "다른 작업과 충돌했습니다. 다시 조회한 뒤 재시도하세요.")
+        message = "다른 작업과 충돌했습니다. 다시 조회한 뒤 재시도하세요."
+        return HTTPException(409, {"code": "REQUEST_LOCK_CONFLICT", "message": message} if cancelling else message)
     if code == "23505" and constraint == "uq_walk_requests_active":
         return HTTPException(409, "활성 신청이 중복됩니다.")
     if code == "23505" and constraint == "volunteer_profiles_pkey":
@@ -47,12 +51,13 @@ def database_error(exc):
     return HTTPException(500, "산책 신청을 저장하지 못했습니다.")
 
 
-def persist_request(db, operation, actor, *, cancel_request_id=None):
+def persist_request(db, operation, actor, *, cancel_request_id=None, response_model=WalkRequestResponse):
     try:
         date_cancel = cancel_request_id is not None and owns_date_request(db, cancel_request_id, actor)
         require_active_writer(db, actor, for_update=date_cancel, nowait=date_cancel)
         request = operation()
-        response = WalkRequestResponse.model_validate(request)
+        can_cancel = can_cancel_request(request, actor, walk_request_service.utc_now())
+        response = response_model.model_validate(request, context={"can_cancel": can_cancel})
         db.commit()
         return response
     except HTTPException:
@@ -60,7 +65,7 @@ def persist_request(db, operation, actor, *, cancel_request_id=None):
         raise
     except SQLAlchemyError as exc:
         db.rollback()
-        raise database_error(exc) from None
+        raise database_error(exc, cancelling=cancel_request_id is not None) from None
 
 
 def invalid_date_request():
@@ -188,30 +193,40 @@ def apply_for_walk(payload: WalkRequestCreate, request: Request, actor: User = D
 router.include_router(booking_router)
 
 
-@router.patch("/walk-requests/{request_id}", response_model=WalkRequestResponse)
+@router.patch("/walk-requests/{request_id}", response_model=ManagedWalkRequestResponse)
 def review_or_cancel(request_id: int, payload: WalkRequestAction,
                      actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return persist_request(db, lambda: transition_request(db, request_id, actor, payload), actor,
-                           cancel_request_id=request_id if payload.action == "CANCEL" else None)
+                           cancel_request_id=request_id if payload.action == "CANCEL" else None,
+                           response_model=ManagedWalkRequestResponse)
 
 
-@router.get("/walk-requests/my", response_model=list[WalkRequestResponse])
+@router.get("/walk-requests/my", response_model=list[ManagedWalkRequestResponse])
 def my_requests(
     status: RequestStatus | None = None,
     tab: ReservationTab | None = Query(None, description="마이페이지 탭 (ALL/PENDING/APPROVED/REJECTED/COMPLETED)"),
+    status_group: ReservationStatusGroup | None = None,
+    startable_only: bool = False,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """F-13 SC-10: 마이페이지 내 예약 내역 및 보호소 승인 상태 조회."""
-    return (
-        request_list_query(db, status=status, tab=tab)
+    if sum(value is not None for value in (status, tab, status_group)) > 1:
+        raise HTTPException(422, {"code": "RESERVATION_FILTER_CONFLICT",
+                                  "message": "status, tab, status_group 중 하나만 지정할 수 있습니다."})
+    now = walk_request_service.utc_now()
+    requests = (
+        request_list_query(db, status=status, tab=tab, status_group=status_group,
+                           startable_at=now if startable_only else None)
         .filter(WalkRequest.user_id == actor.id)
         .limit(limit)
         .offset(offset)
         .all()
     )
+    return [ManagedWalkRequestResponse.model_validate(row, context={"can_cancel": can_cancel_request(row, actor, now)})
+            for row in requests]
 
 
 @router.get("/walk-requests/{request_id}", response_model=WalkRequestDetailResponse)
@@ -228,10 +243,12 @@ def shelter_requests(shelter_id: int, status: RequestStatus | None = None,
     require_shelter_access(actor, shelter_id)
     if db.get(Shelter, shelter_id) is None:
         raise HTTPException(404, "Shelter not found")
-    query = request_list_query(db, status).filter(WalkRequest.shelter_id == shelter_id)
+    query = request_list_query(db, tab=status).filter(WalkRequest.shelter_id == shelter_id)
     if dog_id is not None:
         query = query.filter(WalkRequest.dog_id == dog_id)
-    return query.limit(limit).offset(offset).all()
+    now = walk_request_service.utc_now()
+    return [WalkRequestResponse.model_validate(row, context={"can_cancel": can_cancel_request(row, actor, now)})
+            for row in query.limit(limit).offset(offset).all()]
 
 
 @router.get("/volunteers/me", response_model=VolunteerProfileResponse, tags=["volunteers"])

@@ -51,6 +51,7 @@ class WalkMetadataTests(unittest.TestCase):
             "planned_duration_minutes", "expected_end_at",
             "size_code", "difficulty_score", "max_walk_minutes", "date_slot_id", "idempotency_key",
             "request_fingerprint", "creation_receipt",
+            "cancel_reason_code", "cancelled_at", "cancelled_by", "cancelled_actor_role",
         }
         post_007_constraints = {n for n in motion["constraints"]} | {
             "ck_walk_last_coordinate_pair", "ck_walk_last_latitude", "ck_walk_last_longitude",
@@ -59,6 +60,8 @@ class WalkMetadataTests(unittest.TestCase):
             "ck_walk_planned_duration", "ck_walk_expected_end_order",
             "ck_size_code", "ck_walk_difficulty_score", "ck_walk_max_minutes",
             "fk_walk_requests_date_slot", "ck_walk_request_receipt",
+            "fk_walk_requests_cancelled_by", "ck_cancel_reason_code", "ck_cancel_actor_role",
+            "ck_walk_request_cancellation",
         }
         post_007_indexes = {
             "uq_walk_incidents_reported_client_report_id", "ix_walk_incidents_unacknowledged",
@@ -124,8 +127,16 @@ class WalkMetadataTests(unittest.TestCase):
                     {"name": "idempotency_key", "type": "uuid", "not_null": False, "default": None},
                     {"name": "request_fingerprint", "type": "character varying(64)", "not_null": False, "default": None},
                     {"name": "creation_receipt", "type": "json", "not_null": False, "default": None},
+                    {"name": "cancel_reason_code", "type": "character varying(20)", "not_null": False, "default": None},
+                    {"name": "cancelled_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                    {"name": "cancelled_by", "type": "integer", "not_null": False, "default": None},
+                    {"name": "cancelled_actor_role", "type": "character varying(10)", "not_null": False, "default": None},
                 ])
                 snapshot["constraints"].update({"fk_walk_requests_date_slot": None, "ck_walk_request_receipt": None})
+                snapshot["constraints"].update({
+                    "fk_walk_requests_cancelled_by": None, "ck_cancel_reason_code": None,
+                    "ck_cancel_actor_role": None, "ck_walk_request_cancellation": None,
+                })
                 snapshot["indexes"].update({"ix_walk_requests_date_slot": None, "uq_walk_requests_user_idempotency": None,
                                             "uq_walk_requests_occupied_date_slot": None})
             if table.name == "walk_reviews":

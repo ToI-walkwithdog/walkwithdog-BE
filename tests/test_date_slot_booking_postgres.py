@@ -172,7 +172,7 @@ class DateSlotConcurrencyTests(IsolatedPostgres, DateBookingFixture, unittest.Te
                 self.assertTrue(started.wait(8))
                 conflict = self.act(request_id, "CANCEL", user=1)
                 self.assertEqual(conflict.status_code, 409, conflict.text)
-                self.assertIn("다른 작업과 충돌", conflict.json()["detail"])
+                self.assertEqual(conflict.json()["detail"]["code"], "REQUEST_LOCK_CONFLICT")
                 retry = self.start(request_id)
                 self.assertEqual(retry.status_code, 409, retry.text)
                 self.assertIn("다른 작업과 충돌", retry.json()["detail"])
@@ -181,8 +181,7 @@ class DateSlotConcurrencyTests(IsolatedPostgres, DateBookingFixture, unittest.Te
             self.assertEqual(writer.result(timeout=8).status_code, 201)
 
 
-@unittest.skipUnless(TEST_URL, "격리 PostgreSQL이 필요합니다")
-class DateSlotMigrationTests(IsolatedPostgres, unittest.TestCase):
+class DateSlotMigrationFixture(IsolatedPostgres):
     def setup_predecessor(self):
         engine = self.isolated_engine()
         with engine.begin() as connection:
@@ -209,6 +208,9 @@ class DateSlotMigrationTests(IsolatedPostgres, unittest.TestCase):
                                    "requested_end_at, status, reviewed_by, reviewed_at) VALUES"
                                    " (1, 1, 1, 1, '2030-01-07 00:00Z', '2030-01-07 01:00Z', 'APPROVED', 3, NOW())")
 
+
+@unittest.skipUnless(TEST_URL, "격리 PostgreSQL이 필요합니다")
+class DateSlotMigrationTests(DateSlotMigrationFixture, unittest.TestCase):
     def test_028_applies_to_empty_predecessor_and_sets_fk_and_partial_index(self):
         engine = self.setup_predecessor()
         self.apply(engine, "028_date_slot_booking.sql")

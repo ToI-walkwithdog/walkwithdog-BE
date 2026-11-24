@@ -471,6 +471,7 @@ def get_active_walk(db, actor):
     is_overdue, overdue_minutes = compute_walk_overdue(walk, now=now)
     return {
         "walk_id": walk.id,
+        "walk_request_id": walk.walk_request_id,
         "started_at": walk.started_at,
         "planned_duration_minutes": walk.planned_duration_minutes,
         "expected_end_at": walk.expected_end_at,

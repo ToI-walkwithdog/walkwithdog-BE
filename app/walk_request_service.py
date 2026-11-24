@@ -17,6 +17,7 @@ from app.dependencies import require_shelter_access
 from app.models import Dog, DogWalkSetting, Survey, User, UserRole, VolunteerProfile, Walk, WalkRequest
 from app.onboarding_common import require_walk_onboarding
 from app.walk_date_slots import (ACTIVE, check_booking_slot, dog_not_available, occupied, utc_string)
+from app.walk_request_schemas import ManagedWalkRequestResponse
 
 SEOUL = ZoneInfo("Asia/Seoul")
 
@@ -219,25 +220,47 @@ def locked_request(db, request_id, actor, action):
     return request, dog, volunteer
 
 
+def has_walk_record(db, request):
+    return db.query(Walk.id).filter(Walk.walk_request_id == request.id).first() is not None
+
+
 def ensure_not_started(db, request):
-    started_walk = (
-        db.query(Walk.id)
-        .filter(Walk.walk_request_id == request.id)
-        .first()
-    )
-    if started_walk:
+    if has_walk_record(db, request):
         raise HTTPException(409, "이미 산책이 시작되어 취소할 수 없습니다.")
+
+
+def cancellation_conflict(request, now, *, has_walk):
+    if request.status == "CANCELLED":
+        return {"code": "REQUEST_ALREADY_CANCELLED", "message": "이미 취소된 예약입니다."}
+    if request.status not in ACTIVE:
+        return {"code": "REQUEST_STATE_CONFLICT", "message": "현재 상태에서는 예약을 취소할 수 없습니다."}
+    if as_utc(request.requested_start_at) <= now:
+        return {"code": "CANCEL_TIME_EXPIRED", "message": "예약 시작 시각에 도달해 취소할 수 없습니다."}
+    if has_walk:
+        return {"code": "WALK_RECORD_EXISTS", "message": "이 예약에 산책 기록이 있어 취소할 수 없습니다."}
+    return None
+
+
+def can_cancel_request(request, actor, now):
+    try:
+        authorize_action(actor, request.user_id, request.shelter_id, "CANCEL")
+    except HTTPException:
+        return False
+    return cancellation_conflict(request, now, has_walk=request.walk is not None) is None
 
 
 def transition_request(db, request_id, actor, payload):
     request, dog, volunteer = locked_request(db, request_id, actor, payload.action)
     if payload.action == "CANCEL":
-        if request.status not in ACTIVE:
-            raise HTTPException(409, "거절되거나 취소된 신청은 취소할 수 없습니다.")
-        if as_utc(request.requested_start_at) <= utc_now():
-            raise HTTPException(409, "예정 시작 시각이 지난 신청은 취소할 수 없습니다.")
-        ensure_not_started(db, request)
+        now = utc_now()
+        conflict = cancellation_conflict(request, now, has_walk=has_walk_record(db, request))
+        if conflict is not None:
+            raise HTTPException(409, conflict)
         request.status = "CANCELLED"  # Preserve any previous review metadata.
+        request.cancel_reason_code = payload.cancel_reason_code
+        request.cancelled_at = now
+        request.cancelled_by = actor.id
+        request.cancelled_actor_role = actor.role.name
     else:
         if request.status != "PENDING":
             raise HTTPException(409, "승인 대기 중인 신청만 승인하거나 거절할 수 있습니다.")
@@ -292,26 +315,20 @@ def get_request_detail(db, request_id, actor):
     )
     setting = db.query(DogWalkSetting).filter_by(dog_id=request.dog_id).first()
     dog_difficulty = setting.difficulty if setting and setting.difficulty else "BEGINNER"
+    now = utc_now()
+    can_cancel = can_cancel_request(request, actor, now)
+    owner = actor.role == UserRole.USER and actor.id == request.user_id
+    show_visit = owner and request.status == "APPROVED" and now < as_utc(request.requested_end_at)
 
     return {
-        "id": request.id,
-        "user_id": request.user_id,
-        "dog_id": request.dog_id,
-        "shelter_id": request.shelter_id,
-        "shelter_name": request.shelter.name if request.shelter is not None else None,
-        "dog": request.dog,
-        "requested_start_at": request.requested_start_at,
-        "requested_end_at": request.requested_end_at,
-        "status": request.status,
-        "walk_id": request.walk.id if request.walk is not None else None,
-        "walk_status": request.walk.status if request.walk is not None else None,
-        "date_slot_id": request.date_slot_id,
-        "reviewed_by": request.reviewed_by,
-        "reviewed_at": request.reviewed_at,
-        "rejection_reason": request.rejection_reason,
-        "rejection_reason_code": request.rejection_reason_code,
-        "created_at": request.created_at,
-        "updated_at": request.updated_at,
+        **ManagedWalkRequestResponse.model_validate(request, context={"can_cancel": can_cancel}).model_dump(),
+        "shelter": request.shelter,
+        "max_walk_minutes": setting.max_walk_minutes if setting is not None else None,
+        "confirmed_visit": request.shelter if show_visit else None,
+        "actions": {
+            "can_cancel": owner and can_cancel,
+            "can_enter_shelter_code": show_visit and request.walk is None,
+        },
         "applicant": {
             "id": applicant_user.id if applicant_user else request.user_id,
             "nickname": applicant_user.nickname if applicant_user else "",
@@ -341,24 +358,26 @@ def validate_walk_start(db, request_id, actor):
 FINISHED_WALK_STATUSES = ("COMPLETED", "INTERRUPTED")
 
 
-def request_list_query(db, status=None, tab=None):
+def request_list_query(db, *, status=None, tab=None, status_group=None, startable_at=None):
     query = db.query(WalkRequest).options(
         joinedload(WalkRequest.dog),
         joinedload(WalkRequest.shelter),
         joinedload(WalkRequest.walk),
     )
-    effective = tab if tab is not None else status
-    if effective not in (None, "ALL"):
-        if effective == "COMPLETED":
-            query = query.filter(
-                WalkRequest.status == "APPROVED",
-                WalkRequest.walk.has(Walk.status.in_(FINISHED_WALK_STATUSES)),
-            )
-        elif effective == "APPROVED":
-            query = query.filter(
-                WalkRequest.status == "APPROVED",
-                ~WalkRequest.walk.has(Walk.status.in_(FINISHED_WALK_STATUSES)),
-            )
-        else:
-            query = query.filter(WalkRequest.status == effective)
+    if tab == "COMPLETED":
+        query = query.filter(WalkRequest.status == "APPROVED",
+                             WalkRequest.walk.has(Walk.status.in_(FINISHED_WALK_STATUSES)))
+    elif tab == "APPROVED":
+        query = query.filter(WalkRequest.status == "APPROVED",
+                             ~WalkRequest.walk.has(Walk.status.in_(FINISHED_WALK_STATUSES)))
+    elif tab not in (None, "ALL"):
+        query = query.filter(WalkRequest.status == tab)
+    elif status is not None:
+        query = query.filter(WalkRequest.status == status)
+    elif status_group == "PAST":
+        query = query.filter(WalkRequest.status.in_(("REJECTED", "CANCELLED")))
+    if startable_at is not None:
+        query = query.filter(WalkRequest.status == "APPROVED", ~WalkRequest.walk.has(),
+                             WalkRequest.requested_start_at <= startable_at,
+                             WalkRequest.requested_end_at > startable_at)
     return query.order_by(WalkRequest.created_at.desc(), WalkRequest.id.desc())

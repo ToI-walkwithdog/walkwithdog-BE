@@ -49,3 +49,11 @@
 - 날짜별 `POST /walk-requests`는 `date_slot_id`, 오프셋이 포함된 기존 시작·종료 필드, UUID `Idempotency-Key`를 받는다. 동일 계정과 키 및 정규화 본문에는 최초 201을 복구한다. 신규 신청은 현재 온보딩 완료가 필요하다. 슬롯 시각 변경, 실제 점유, 일시적 DB 경합은 각각 `WALK_SLOT_CHANGED`, `WALK_SLOT_UNAVAILABLE`, `WALK_REQUEST_RETRYABLE`로 안내한다. 반복 요일 요청은 기존 입력과 응답 형식을 사용한다.
 - 점유 범위는 슬롯 전체의 반개구간 `[시작, 종료)`다. PENDING/APPROVED는 점유하고 REJECTED/CANCELLED는 점유를 해제한다. 승인 대상 자체는 충돌에서 제외하며 새 승인에는 미래 시작 시각이 필요하다. 승인된 본인이 저장된 예약 시간 안에서만 시작한다. 날짜 예약 산책의 예정 종료는 슬롯에 저장된 소요시간을 사용하며 최대 산책 시간이 설정되면 그 범위로 제한한다. 활성 예약이 참조한 슬롯의 변경 및 삭제는 409다. 종료된 예약의 기존 참조는 유지하며 슬롯 교체는 새 행을 만든다.
 - SQL은 009, 011, 022 이후 028을 1회 적용한다. 010이 수동 적용됐으면 기존 `date_slot_id`는 유지하고 연쇄 삭제 참조를 이력 보존 참조로 교체한다. 사전에 잘못된 강아지·슬롯 연결과 중복 활성 참조를 확인한다. 위반 데이터가 있으면 028 트랜잭션 전체가 롤백된다. 실제 개발 DB 적용은 별도 승인 후 진행한다.
+
+## 예약 목록, 상세 및 취소 (#84)
+
+- `GET /walk-requests/my`에서 `status=APPROVED`는 완료·중단된 산책과 연결된 예약까지 포함한다. 기존 `tab=APPROVED`는 이전 동작을 유지한다. `status_group=PAST`는 거절과 취소를 포함한다. 세 필터 중 둘 이상을 보내면 `422 RESERVATION_FILTER_CONFLICT`다. 최신 예약순으로 정렬하며 조건을 먼저 적용한 뒤 페이지를 조회한다.
+- `GET /walk-requests/{request_id}`에서 모든 상태의 예약, 슬롯과 예약 시간, 거절·취소 이력, 보호소 기본 정보, 기존 최대 산책 시간 설정을 조회한다. 보호소 주소와 연락처는 종료 전 승인 예약의 본인에게만 제공한다. `actions`는 봉사자 화면용이다. 코드 입력 화면으로 이동할 수 있어도 실제 시작은 기존 서버 검증을 거친다.
+- `PATCH /walk-requests/{request_id}`의 `CANCEL`은 선택 사유 `SCHEDULE_CHANGED`, `CANNOT_VISIT`, 생략 또는 `null`을 받는다. 시작 전이며 Walk 기록이 없는 대기·승인 건만 취소할 수 있다. 재전송의 `409 REQUEST_ALREADY_CANCELLED` 또는 응답 유실 후 같은 ID의 상세로 상태를 복구한다. 취소와 함께 기록한 `cancelled_at`은 UTC이고 당시 역할은 `USER`, `SHELTER`, `ADMIN` 중 하나다.
+- 홈에서 `GET /walks/active`가 돌려준 `walk_request_id`로 진행 중 산책을 복구한다. 활성 산책이 없음을 뜻하는 404를 받으면 `GET /walk-requests/my?startable_only=true&limit=1`로 서버 시각이 시작 이상, 종료 미만인 승인 예약 중 Walk 기록이 없는 첫 후보를 조회한다. 카드와 시작 요청은 같은 예약 ID를 사용한다.
+- `029_reservation_cancellation.sql`은 028 이후 적용한다. 이전 취소의 빈 메타데이터와 승인·거절 이력, 날짜 슬롯 참조를 보존한다. 개발 DB 적용과 실제 FE 연동은 별도 승인으로 진행한다.
