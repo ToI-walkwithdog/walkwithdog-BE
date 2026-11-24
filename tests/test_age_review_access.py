@@ -3,7 +3,9 @@
 Every route must be one of:
   - allowed for AGE_REVIEW_REQUIRED accounts (login, logout, GET /users/me, correction, exit),
   - public (no user identity, so there is nothing to check),
-  - contract onboarding routes that answer 403 AGE_REVIEW_REQUIRED, or
+  - contract onboarding routes that answer 403 AGE_REVIEW_REQUIRED,
+  - contract onboarding routes whose spec answers 403 ONBOARDING_NOT_ALLOWED for that
+    account (Step 3, Issue #44; unifying the code is an open item), or
   - `detail` routes that answer 403 {"detail": ...} for that account.
 A route added later that fits none of these makes the inventory test fail.
 Isolated SQLite with synthetic accounts; no external service is called.
@@ -43,6 +45,8 @@ CONTRACT_BLOCKED = {("PUT", "/users/me/pledge"), ("GET", "/users/me/onboarding/b
                     ("PUT", "/users/me/onboarding/basic-info"), ("POST", "/users/me/phone-verifications"),
                     ("POST", "/users/me/phone-verifications/confirm"),
                     ("GET", "/users/me/onboarding/dog-experience"), ("PUT", "/users/me/onboarding/dog-experience")}
+# Step 3 (Issue #44, Notion): AGE_REVIEW_REQUIRED accounts get the role code, not AGE_REVIEW_REQUIRED.
+ONBOARDING_BLOCKED = {("GET", "/users/me/onboarding/walking-routine"), ("PUT", "/users/me/onboarding/walking-routine")}
 # Contract routes of the general-user onboarding: shelter and admin get this role 403.
 ONBOARDING_ROLE_CODES = {"ONBOARDING_NOT_ALLOWED", "PLEDGE_NOT_ALLOWED"}
 # No user identity: shared, read-only or sign-up data that anyone may request.
@@ -120,11 +124,14 @@ class AccessControlTests(unittest.TestCase):
         return self.client.request(method, concrete(path), headers=headers, **kwargs)
 
     def detail_routes(self):
-        return sorted(all_routes() - ALLOWED - CONTRACT_BLOCKED - PUBLIC)
+        return sorted(all_routes() - ALLOWED - CONTRACT_BLOCKED - ONBOARDING_BLOCKED - PUBLIC)
+
+    def contract_routes(self):
+        return sorted(CONTRACT_BLOCKED | ONBOARDING_BLOCKED)
 
     def test_every_route_is_classified_and_the_restricted_account_is_blocked(self):
         routes = all_routes()
-        self.assertLessEqual(ALLOWED | CONTRACT_BLOCKED | PUBLIC, routes)  # the lists match real routes
+        self.assertLessEqual(ALLOWED | CONTRACT_BLOCKED | ONBOARDING_BLOCKED | PUBLIC, routes)  # lists match real routes
         blocked = self.detail_routes()
         self.assertGreaterEqual(len(blocked), 45)  # unique (method, path) pairs at the time of #41
         for method, path in blocked:
@@ -135,6 +142,10 @@ class AccessControlTests(unittest.TestCase):
             with self.subTest(route=f"{method} {path}"):
                 response = self.call(method, path, "token-1")
                 self.assertEqual((response.status_code, response.json()["code"]), (403, "AGE_REVIEW_REQUIRED"))
+        for method, path in sorted(ONBOARDING_BLOCKED):
+            with self.subTest(route=f"{method} {path}"):
+                response = self.call(method, path, "token-1")
+                self.assertEqual((response.status_code, response.json()["code"]), (403, "ONBOARDING_NOT_ALLOWED"))
 
     def test_region_lookup_is_public_and_leaves_account_status_unchanged(self):
         with self.Session.begin() as db:
@@ -182,7 +193,7 @@ class AccessControlTests(unittest.TestCase):
 
     def test_active_shelter_and_admin_accounts_are_never_blocked_by_status(self):
         for token in ("token-2", "token-3", "token-4"):
-            for method, path in self.detail_routes() + sorted(CONTRACT_BLOCKED):
+            for method, path in self.detail_routes() + self.contract_routes():
                 with self.subTest(token=token, route=f"{method} {path}"):
                     response = self.call(method, path, token)
                     body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
@@ -238,7 +249,7 @@ class AccessControlTests(unittest.TestCase):
         self.assertEqual(shelter.status_code, 200, shelter.text)
 
     def test_contract_routes_keep_their_401_and_role_403(self):
-        for method, path in sorted(CONTRACT_BLOCKED):
+        for method, path in self.contract_routes():
             with self.subTest(route=f"{method} {path}"):
                 response = self.call(method, path)
                 self.assertEqual((response.status_code, response.json()["code"]), (401, "AUTHENTICATION_REQUIRED"))

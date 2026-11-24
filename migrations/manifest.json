@@ -352,6 +352,21 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "026_onboarding_walking_routine.sql",
+      "sha256": "e1ec41874701a099b6e2d63fd6854fe8fa8a88ffcd55f29b586d8dd78db4e029",
+      "requires": [
+        "022_regions.sql",
+        "025_onboarding_dog_experience.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [

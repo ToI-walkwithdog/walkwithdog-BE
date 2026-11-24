@@ -33,9 +33,12 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
                             UserPledgeAcknowledgement, UserRole, VolunteerOnboardingBasic)
     from app.onboarding_common import get_clock
     from app.phone_verification_service import phone_subject
-    from app.routers import (age_review, auth, chat, matching, onboarding_basic, onboarding_experience, surveys, users,
-                             walk_requests, walks)
+    from app.routers import (age_review, auth, chat, matching, onboarding_basic, onboarding_experience,
+                             onboarding_routine, surveys, users, walk_requests, walks)
     from app.models import VolunteerExperienceChallenge, VolunteerOnboardingExperience
+    from app.models import (DOG_SIZE_CODES, TIME_SLOT_CODES, WALKING_DURATION_CODES, VolunteerOnboardingRoutine,
+                            VolunteerRoutineRegion, VolunteerRoutineTimeSlot)
+    from app.region_models import LEVEL_SIDO, LEVEL_SIGUNGU, LEVEL_SPECIAL_SELECTABLE, Region
     from app.models import ChatMessage, ChatSession, Dog, DogWalkSetting, DogWalkSlot, MatchingResult, Shelter
     from app.walk_models import VolunteerProfile, Walk, WalkRequest
     from app.sms_provider import MockSmsProvider, get_sms_provider
@@ -60,12 +63,25 @@ GUIDE_MIGRATION = "019_first_walk_guide.sql"
 PLEDGE_MIGRATION = "023_user_pledge_acknowledgements.sql"
 STEP1_MIGRATION = "024_onboarding_basic_info.sql"
 STEP2_MIGRATION = "025_onboarding_dog_experience.sql"
+REGION_MIGRATION = "022_regions.sql"
+STEP3_MIGRATION = "026_onboarding_walking_routine.sql"
 USER_COLUMNS_AFTER_018 = {
     "first_walk_guide_completed_at": GUIDE_MIGRATION,
     "account_status": STEP1_MIGRATION,
     "age_review_required_at": STEP1_MIGRATION,
 }
-API_MIGRATIONS_AFTER_018 = (GUIDE_MIGRATION, PLEDGE_MIGRATION, STEP1_MIGRATION, STEP2_MIGRATION)
+# The current API reads the Step 3 table (next onboarding step), and 026 references regions
+# from 022. 022 depends on nothing, so it runs right before 026: every stage that stops at
+# 019 to 025 still gets it.
+API_MIGRATIONS_AFTER_018 = (GUIDE_MIGRATION, PLEDGE_MIGRATION, STEP1_MIGRATION, STEP2_MIGRATION, REGION_MIGRATION,
+                            STEP3_MIGRATION)
+STEP3_FULL = {"region_codes": ["11680", "26350"], "available_time_slot_codes": ["WEEKDAY_MORNING", "WEEKEND_MORNING"],
+              "walking_duration_code": "UP_TO_30_MIN", "comfortable_dog_size_code": "SMALL"}
+# Synthetic region master rows for Step 3 tests.
+STEP3_REGIONS = (("11", "서울특별시", LEVEL_SIDO, None), ("11680", "강남구", LEVEL_SIGUNGU, "11"),
+                 ("26", "부산광역시", LEVEL_SIDO, None), ("26350", "해운대구", LEVEL_SIGUNGU, "26"),
+                 ("36", "세종특별자치시", LEVEL_SIDO, None),
+                 ("36_SPECIAL_ALL", "세종특별자치시 전체", LEVEL_SPECIAL_SELECTABLE, "36"))
 GUIDE_COLUMN = ("first_walk_guide_completed_at", "TIMESTAMP", True)
 PLEDGE_VERSION = "pledge-test-v1"  # test-only value; the real version is an undecided server setting
 STEP2_FULL = {"has_experience": True, "experienced_breeds_text": "믹스견", "dog_size_code": "MEDIUM",
@@ -1544,6 +1560,292 @@ class SignupPostgresTests(unittest.TestCase):
         response = self.exit_account(headers)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(self.step2_rows(), (0, 0))
+        self.assertEqual(self.remaining(), {"users": 0, "auth_sessions": 0, "user_consents": 0,
+                                            "user_pledge_acknowledgements": 0})
+
+
+    # Onboarding Step 3 walking routine (Issue #44)
+
+    def add_step3_regions(self):
+        with self.Session.begin() as db:
+            for code, name, level, parent in STEP3_REGIONS:
+                db.add(Region(region_code=code, region_name=name, region_level=level, parent_region_code=parent,
+                              is_active=True))
+                db.flush()
+
+    def add_step3_ready_account(self, user_id, login_id=None):
+        """An ACTIVE user with the current pledge, Step 1 and Step 2 done (Step 2: no experience)."""
+        from datetime import date
+        with self.Session.begin() as db:
+            if login_id is not None:
+                db.add(User(id=user_id, login_id=login_id, nickname=f"봉사자{user_id}", password=UNUSABLE_PASSWORD))
+                db.flush()
+            db.add(UserPledgeAcknowledgement(user_id=user_id, pledge_version=PLEDGE_VERSION, acknowledged_at=STEP1_START))
+            db.add(VolunteerOnboardingBasic(user_id=user_id, full_name="김민지", birth_date=date(2002, 12, 10),
+                                            phone_e164=f"+8210555{user_id:05d}", phone_verified_at=STEP1_START,
+                                            completed_at=STEP1_START, updated_at=STEP1_START))
+            db.flush()
+            db.add(VolunteerOnboardingExperience(user_id=user_id, has_experience=False, completed_at=STEP1_START,
+                                                 updated_at=STEP1_START))
+
+    def start_step3_api(self):
+        """User 1 ready for Step 3 on the real routers, with a synthetic region master."""
+        self.start_api()
+        self.client.app.include_router(onboarding_routine.router)
+        self.add_step3_regions()
+        self.add_step3_ready_account(1, "walker01")
+        return self.add_session(1, "step3-token")
+
+    def put_step3(self, headers, body=None):
+        return self.client.put("/users/me/onboarding/walking-routine", json=body or STEP3_FULL, headers=headers)
+
+    def step3_rows(self):
+        return (self.table_count(VolunteerOnboardingRoutine), self.table_count(VolunteerRoutineRegion),
+                self.table_count(VolunteerRoutineTimeSlot))
+
+    def synchronized_region_check(self, workers):
+        """Every request passes the locked-row checks and sees no routine before any insert."""
+        barrier = Barrier(workers)
+        original = sys.modules["app.walking_routine_service"]._require_regions
+
+        def synchronized(*args, **kwargs):
+            barrier.wait(10)
+            return original(*args, **kwargs)
+
+        return patch("app.walking_routine_service._require_regions", side_effect=synchronized)
+
+    def test_step3_save_that_locked_first_commits_before_the_status_change(self):
+        headers = self.start_step3_api()
+        entered, release = self.hold("app.walking_routine_service._require_regions")  # under the users share lock
+        results = {}
+        save = self.run_in_thread(results, "save", lambda: self.put_step3(headers))
+        self.assertTrue(entered.wait(10))
+
+        def change():
+            with self.Session() as db:
+                change_to_age_review(db, 1, self.now)
+            return "done"
+
+        status_change = self.run_in_thread(results, "change", change)
+        self.wait_for_lock_waiter()
+        self.assertEqual(self.account_status(1), "ACTIVE")
+        release.set()
+        save.join(10)
+        status_change.join(10)
+        self.assertEqual(results["save"].status_code, 200, results["save"].text)
+        self.assertEqual(self.account_status(1), "AGE_REVIEW_REQUIRED")
+        self.assertEqual(self.step3_rows(), (1, 2, 2))
+
+    def test_step3_save_after_the_status_change_is_refused_without_rows(self):
+        headers = self.start_step3_api()
+        response = self.change_status_while(lambda: self.put_step3(headers))
+        self.assertEqual((response.status_code, response.json()["code"]), (403, "ONBOARDING_NOT_ALLOWED"))
+        self.assertEqual(self.step3_rows(), (0, 0, 0))
+
+    def test_parallel_identical_step3_saves_keep_one_routine_and_one_time(self):
+        headers = self.start_step3_api()
+        workers = 4
+        with self.synchronized_region_check(workers), ThreadPoolExecutor(max_workers=workers) as pool:
+            responses = list(pool.map(lambda _: self.put_step3(headers), range(workers)))
+        self.assertEqual([r.status_code for r in responses], [200] * workers, [r.text for r in responses])
+        self.assertEqual(len({r.json()["data"]["completed_at"] for r in responses}), 1)
+        self.assertEqual({r.json()["data"]["next_onboarding_step"] for r in responses}, {None})
+        self.assertEqual(self.step3_rows(), (1, 2, 2))  # no duplicate link rows
+
+    def test_parallel_different_step3_saves_one_wins_the_other_gets_409(self):
+        headers = self.start_step3_api()
+        bodies = [STEP3_FULL, {**STEP3_FULL, "region_codes": ["36_SPECIAL_ALL"],
+                               "available_time_slot_codes": list(TIME_SLOT_CODES)}]
+        with self.synchronized_region_check(2), ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(lambda body: self.put_step3(headers, body), bodies))
+        outcomes = sorted((r.status_code, r.json()["code"]) for r in responses)
+        self.assertEqual(outcomes, [(200, "OK"), (409, "WALKING_ROUTINE_ALREADY_COMPLETED")])
+        winner = bodies[[r.status_code for r in responses].index(200)]
+        with self.Session() as db:
+            self.assertEqual(sorted(r.region_code for r in db.query(VolunteerRoutineRegion)),
+                             sorted(winner["region_codes"]))
+            self.assertEqual(db.query(VolunteerRoutineTimeSlot).count(), len(winner["available_time_slot_codes"]))
+
+    def test_step3_link_failure_rolls_back_on_postgres(self):
+        headers = self.start_step3_api()
+
+        def broken_slot(user_id, time_slot_code):
+            return VolunteerRoutineTimeSlot(user_id=user_id, time_slot_code="BROKEN")
+
+        with patch("app.walking_routine_service.VolunteerRoutineTimeSlot", side_effect=broken_slot), \
+                self.assertLogs("app.api_contract", "ERROR"):
+            response = self.put_step3(headers)
+        self.assertEqual((response.status_code, response.json()["code"]), (500, "INTERNAL_SERVER_ERROR"))
+        self.assertEqual(self.step3_rows(), (0, 0, 0))  # the routine and region rows were rolled back too
+        self.assertEqual(self.put_step3(headers).status_code, 200)
+
+    def test_region_deactivation_waits_for_a_step3_save_that_locked_the_region(self):
+        headers = self.start_step3_api()
+        locked, release = Event(), Event()
+        original = sys.modules["app.walking_routine_service"].require_selectable_regions
+
+        def lock_then_wait(*args, **kwargs):
+            result = original(*args, **kwargs)  # the chosen regions are now FOR SHARE
+            locked.set()
+            release.wait(10)
+            return result
+
+        results = {}
+        with patch("app.walking_routine_service.require_selectable_regions", side_effect=lock_then_wait):
+            save = self.run_in_thread(results, "save", lambda: self.put_step3(headers))
+            self.assertTrue(locked.wait(10))
+
+            def deactivate():
+                with self.engine.begin() as connection:  # a region sync marks a chosen code abolished
+                    connection.execute(text("UPDATE regions SET is_active = false WHERE region_code = '26350'"))
+                return "done"
+
+            sync = self.run_in_thread(results, "sync", deactivate)
+            self.wait_for_lock_waiter()
+            release.set()
+            save.join(10)
+            sync.join(10)
+        self.assertEqual(results["save"].status_code, 200, results["save"].text)
+        self.assertEqual(results["sync"], "done")
+        self.assertEqual(self.step3_rows(), (1, 2, 2))
+        # After the deactivation committed, a new save with that code is refused.
+        self.add_step3_ready_account(2, "walker02")
+        other = self.add_session(2, "step3-token-2")
+        response = self.put_step3(other)
+        self.assertEqual((response.status_code, response.json()["code"]), (422, "INVALID_REGION_CODE"))
+        with self.Session() as db:
+            self.assertIsNone(db.get(VolunteerOnboardingRoutine, 2))
+
+    def test_step3_database_checks_on_postgres(self):
+        self.start_step3_api()
+        for values in ({"walking_duration_code": "UNDER_30_MIN"}, {"comfortable_dog_size_code": "HUGE"}):
+            row = {"walking_duration_code": "UP_TO_30_MIN", "comfortable_dog_size_code": "SMALL", **values}
+            with self.subTest(values=values), self.assertRaises(IntegrityError), self.Session.begin() as db:
+                db.add(VolunteerOnboardingRoutine(user_id=1, completed_at=STEP1_START, updated_at=STEP1_START, **row))
+        with self.assertRaises(IntegrityError), self.Session.begin() as db:  # link rows need the routine
+            db.add(VolunteerRoutineTimeSlot(user_id=1, time_slot_code="WEEKDAY_MORNING"))
+        with self.Session.begin() as db:
+            db.add(VolunteerOnboardingRoutine(user_id=1, walking_duration_code="OVER_60_MIN",
+                                              comfortable_dog_size_code="LARGE", completed_at=STEP1_START,
+                                              updated_at=STEP1_START))
+        for model, values in ((VolunteerRoutineTimeSlot, {"time_slot_code": "WEEKDAY_EVENING"}),
+                              (VolunteerRoutineRegion, {"region_code": "99999"})):  # unknown region: FK
+            with self.subTest(values=values), self.assertRaises(IntegrityError), self.Session.begin() as db:
+                db.add(model(user_id=1, **values))
+        with self.Session.begin() as db:
+            db.add(VolunteerRoutineRegion(user_id=1, region_code="11680"))
+        with self.assertRaises(IntegrityError), self.Session.begin() as db:  # composite primary key
+            db.add(VolunteerRoutineRegion(user_id=1, region_code="11680"))
+
+    def test_migration_026_adds_only_step3_tables_and_step3_works_without_create_all(self):
+        self.migrate_dev_chain_through_016_with_accounts()
+        self.run_sql_file(EMAIL_REMOVAL)
+        self.run_sql_file(CONSENT_MIGRATION)
+        for migration in (GUIDE_MIGRATION, PLEDGE_MIGRATION, STEP1_MIGRATION, STEP2_MIGRATION, REGION_MIGRATION):
+            self.run_migration(migration)
+        accounts = self.user_rows()
+        before_tables, before_indexes, before_constraints = self.schema_snapshot()
+        self.run_migration(STEP3_MIGRATION)
+        tables, indexes, constraints = self.schema_snapshot()
+        new_tables = {"volunteer_onboarding_routines", "volunteer_routine_regions", "volunteer_routine_time_slots"}
+        self.assertEqual(set(tables) - set(before_tables), new_tables)
+        self.assertEqual({k: v for k, v in tables.items() if k not in new_tables}, before_tables)
+        self.assertEqual([i for i in indexes if i[0] not in new_tables], before_indexes)
+        self.assertEqual([c for c in constraints if c[0] not in new_tables], before_constraints)
+        for expected in (
+            ("volunteer_onboarding_routines", "fk_onboarding_routines_user_id", "FOREIGN KEY (user_id) REFERENCES users(id)"),
+            ("volunteer_routine_regions", "fk_routine_regions_routine",
+             "FOREIGN KEY (user_id) REFERENCES volunteer_onboarding_routines(user_id)"),
+            ("volunteer_routine_regions", "fk_routine_regions_region_code",
+             "FOREIGN KEY (region_code) REFERENCES regions(region_code)"),
+            ("volunteer_routine_time_slots", "fk_routine_time_slots_routine",
+             "FOREIGN KEY (user_id) REFERENCES volunteer_onboarding_routines(user_id)"),
+            ("volunteer_routine_regions", "pk_volunteer_routine_regions", "PRIMARY KEY (user_id, region_code)"),
+            ("volunteer_routine_time_slots", "pk_volunteer_routine_time_slots", "PRIMARY KEY (user_id, time_slot_code)"),
+        ):
+            self.assertIn(expected, constraints)
+        # The model declares exactly the columns the file creates.
+        for model in (VolunteerOnboardingRoutine, VolunteerRoutineRegion, VolunteerRoutineTimeSlot):
+            self.assertEqual({column for column, _, _ in tables[model.__tablename__]},
+                             set(model.__table__.columns.keys()))
+        self.assertEqual(self.user_rows(), accounts)
+        self.run_migration(STEP3_MIGRATION)  # re-running is a no-op
+        self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
+        # The CHECKs of the SQL file accept exactly the codes the API accepts.
+        with self.engine.connect() as connection:
+            def accepted(table, column, value):
+                transaction = connection.begin()
+                try:
+                    if table == "volunteer_onboarding_routines":
+                        row = {"walking_duration_code": "UP_TO_30_MIN", "comfortable_dog_size_code": "SMALL",
+                               column: value}
+                        connection.execute(text(
+                            "INSERT INTO volunteer_onboarding_routines VALUES"
+                            " (1, :walking_duration_code, :comfortable_dog_size_code, now(), now())"), row)
+                    else:
+                        connection.execute(text(
+                            "INSERT INTO volunteer_onboarding_routines VALUES (1, 'UP_TO_30_MIN', 'SMALL', now(), now())"))
+                        connection.execute(text(f"INSERT INTO {table} VALUES (1, :value)"), {"value": value})
+                    return True
+                except IntegrityError:
+                    return False
+                finally:
+                    transaction.rollback()
+
+            for column, codes in (("walking_duration_code", WALKING_DURATION_CODES),
+                                  ("comfortable_dog_size_code", DOG_SIZE_CODES)):
+                for code in codes:
+                    self.assertTrue(accepted("volunteer_onboarding_routines", column, code), code)
+            for code in TIME_SLOT_CODES:
+                self.assertTrue(accepted("volunteer_routine_time_slots", "time_slot_code", code), code)
+            for table, column, code in (("volunteer_onboarding_routines", "walking_duration_code", "UNDER_30_MIN"),
+                                        ("volunteer_onboarding_routines", "comfortable_dog_size_code", "XLARGE"),
+                                        ("volunteer_routine_time_slots", "time_slot_code", "WEEKDAY_EVENING")):
+                self.assertFalse(accepted(table, column, code), code)
+        self.assertEqual(self.step3_rows_raw(), (0, 0, 0))
+        # The Step 3 API runs on the migrated tables with no create_all().
+        self.migrate_users_for_current_models(after=STEP3_MIGRATION)
+        self.start_api(create_schema=False)
+        self.client.app.include_router(onboarding_routine.router)
+        self.add_step3_regions()
+        self.add_step3_ready_account(1)
+        login = self.client.post("/auth/login", json={"identifier": "walker_one", "password": PASSWORD})
+        headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+        self.assertEqual(self.put_step3(headers).status_code, 200)
+        read = self.client.get("/users/me/onboarding/walking-routine", headers=headers).json()["data"]
+        self.assertEqual((read["step3_completed"], read["routine"]["walking_duration_code"],
+                          read["next_onboarding_step"]), (True, "UP_TO_30_MIN", None))
+        changed = self.put_step3(headers, {**STEP3_FULL, "walking_duration_code": "OVER_60_MIN"})
+        self.assertEqual(changed.json()["code"], "WALKING_ROUTINE_ALREADY_COMPLETED")
+        self.assertEqual(self.step3_rows(), (1, 2, 2))
+
+    def step3_rows_raw(self):
+        with self.engine.connect() as connection:
+            return tuple(connection.execute(text(f"SELECT count(*) FROM {table}")).scalar_one()
+                         for table in ("volunteer_onboarding_routines", "volunteer_routine_regions",
+                                       "volunteer_routine_time_slots"))
+
+    def test_exit_removes_step3_rows_in_fk_order_and_rolls_back_on_failure(self):
+        headers = self.setup_age_review()  # account 1 in AGE_REVIEW_REQUIRED, full schema
+        self.add_step3_regions()
+        with self.Session.begin() as db:
+            db.add(VolunteerOnboardingRoutine(user_id=1, walking_duration_code="UP_TO_30_MIN",
+                                              comfortable_dog_size_code="SMALL", completed_at=STEP1_START,
+                                              updated_at=STEP1_START))
+            db.flush()
+            db.add(VolunteerRoutineRegion(user_id=1, region_code="36_SPECIAL_ALL"))
+            db.add(VolunteerRoutineTimeSlot(user_id=1, time_slot_code="WEEKEND_AFTERNOON"))
+        with patch("app.age_review_service.has_retained_activity", return_value=False), \
+                patch.object(sys.modules["sqlalchemy.orm"].Session, "commit",
+                             side_effect=RuntimeError("commit failed")), \
+                self.assertLogs("app.api_contract", "ERROR"):
+            failed = self.exit_account(headers)
+        self.assertEqual(failed.status_code, 500)
+        self.assertEqual(self.step3_rows(), (1, 1, 1))
+        response = self.exit_account(headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.step3_rows(), (0, 0, 0))
+        self.assertEqual(self.table_count(Region), len(STEP3_REGIONS))  # the shared master stays
         self.assertEqual(self.remaining(), {"users": 0, "auth_sessions": 0, "user_consents": 0,
                                             "user_pledge_acknowledgements": 0})
 

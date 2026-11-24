@@ -37,7 +37,8 @@ from app.api_contract import ContractError
 from app.auth import contract_unauthorized, verify_password
 from app.models import (AuthSession, ChatSession, MatchingResult, PhoneVerification, PhoneVerificationDailyCount,
                         SessionToken, Survey, User, UserConsent, UserPledgeAcknowledgement, VolunteerExperienceChallenge,
-                        VolunteerOnboardingBasic, VolunteerOnboardingExperience)
+                        VolunteerOnboardingBasic, VolunteerOnboardingExperience, VolunteerOnboardingRoutine,
+                        VolunteerRoutineRegion, VolunteerRoutineTimeSlot)
 from app.onboarding_common import age_years, first_incomplete_step, kst_date, step1_completed
 from app.walk_models import VolunteerProfile, WalkIncident, WalkRequest
 
@@ -148,6 +149,10 @@ def delete_account(db: Session, user_id: int) -> None:
             (PhoneVerification, PhoneVerification.user_id == user_id),
             (PhoneVerificationDailyCount, (PhoneVerificationDailyCount.scope == "USER")
              & (PhoneVerificationDailyCount.subject == str(user_id))),
+            # Step 3 children before the main row (FK to volunteer_onboarding_routines).
+            (VolunteerRoutineRegion, VolunteerRoutineRegion.user_id == user_id),
+            (VolunteerRoutineTimeSlot, VolunteerRoutineTimeSlot.user_id == user_id),
+            (VolunteerOnboardingRoutine, VolunteerOnboardingRoutine.user_id == user_id),
             # Step 2 children before the main row (FK to volunteer_onboarding_experiences).
             (VolunteerExperienceChallenge, VolunteerExperienceChallenge.user_id == user_id),
             (VolunteerOnboardingExperience, VolunteerOnboardingExperience.user_id == user_id),

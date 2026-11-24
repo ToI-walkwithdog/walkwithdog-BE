@@ -62,7 +62,7 @@
 
 - `017_f10_behavior_marker.sql`은 산책 마커를 바꾸고 `017_remove_user_email.sql`은 사용자 이메일을 제거한다. 두 파일 간 직접 스키마 의존성이 없다. 이메일 제거는 `016_onboarding_signup.sql` 또는 검증한 계정 전환에 의존한다. [PR #47](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/47)
 - `018_f11_walk_overtime.sql`은 `walks`에 시간 컬럼과 CHECK를 더하고 `018_user_consents.sql`은 사용자 자기확인 시각과 동의 테이블을 추가한다. 동의용 SQL은 출시 순서상 이메일 제거 뒤에 둔다. F-11은 동의 적용의 선행 SQL이 아니다. [PR #48](https://github.com/ToI-walkwithdog/walkwithdog-BE/pull/48)
-- 기존 번호 예외는 위 두 쌍의 전체 파일명에만 적용한다. 이미 병합된 019, 020과 022는 보존하고, 온보딩용으로 023~025를 배정했다.
+- 기존 번호 예외는 위 두 쌍의 전체 파일명에만 적용한다. 이미 병합된 019, 020과 022는 보존하고, 온보딩용으로 023~026을 배정했다.
 
 | 번호와 파일 | 대상 | SQL 범위 |
 | --- | --- | --- |
@@ -72,6 +72,7 @@
 | 024, `024_onboarding_basic_info.sql` | #52 | 023 다음에 적용한다. 계정 상태와 연령 확인 시각, 기본 정보와 휴대전화 인증 테이블을 추가한다. 새 로그인 코드는 이 컬럼을 조회한다. |
 | 추가 SQL 없음 | #53 | 서약과 기본 정보 SQL을 상속한다. #57 통합 후보에서는 가입 종료 시 반려견 경험 행도 정리되는지 검증한다. |
 | 025, `025_onboarding_dog_experience.sql` | #57 | 024 다음에 적용한다. 반려견 경험과 어려웠던 상황 선택을 저장하는 두 테이블을 추가한다. |
+| 026, `026_onboarding_walking_routine.sql` | #44 | 022와 025 다음에 적용한다. 산책 루틴과 지역, 시간대 연결 테이블 세 개를 추가한다. 지역 연결은 `regions` FK를 쓴다. |
 
 #50 → #52 → #53 → #57 순서로 병합한다. 부모를 병합한 뒤 자식의 Base와 변경 범위를 다시 확인한다. 각 PR은 자신의 SQL을 정식 목록에 등록하고, 후속 PR의 SQL은 해당 PR까지 예약으로 둔다. #44는 #42와 #43을 합친 DB에서 지역 선택과 온보딩 흐름을 검증한다. [Issue #44](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/44)
 
@@ -199,7 +200,7 @@ ROLLBACK;
 
 전체 기능 개발 중에는 아래 명령을 격리 PostgreSQL에서 검증할 때 사용한다. 개발 DB의 통합 적용 도구는 최종 단계에서 이 파일별 트랜잭션, 중단 및 사후 검사 기준을 따른다.
 
-1. 적용 전 `python scripts/check_migrations.py`로 대상 커밋의 파일과 체크섬을 확인한다. 미병합 번호 충돌이 해당 배포 후보에 포함됐으면 멈춘다. 쓰기 작업 승인과 검증된 백업을 확보한 뒤 승인된 쓰기 프로필에서 DB와 역할, 스키마를 다시 확인한다. `016`의 빈 사용자 조건, `017`의 이메일 삭제, 코드가 새 컬럼을 읽는 `018_user_consents.sql`과 온보딩 변경은 앱 중지와 기동 순서를 함께 확정한다. 현재 `User` 모델은 `019_first_walk_guide.sql`이 만드는 `users.first_walk_guide_completed_at`도 매핑하므로, 016~019를 적용한 뒤 새 코드를 기동한다. 019가 없으면 사용자 조회가 있는 가입과 로그인이 `UndefinedColumn`(SQLSTATE 42703)으로 실패해 500이 된다([#65](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/65)). 기존 `002~008`의 전용 적용 절차를 쓸 경우 도구의 계약과 백업 검사를 유지한다.
+1. 적용 전 `python scripts/check_migrations.py`로 대상 커밋의 파일과 체크섬을 확인한다. 미병합 번호 충돌이 해당 배포 후보에 포함됐으면 멈춘다. 쓰기 작업 승인과 검증된 백업을 확보한 뒤 승인된 쓰기 프로필에서 DB와 역할, 스키마를 다시 확인한다. `016`의 빈 사용자 조건, `017`의 이메일 삭제, 코드가 새 컬럼을 읽는 `018_user_consents.sql`과 온보딩 변경은 앱 중지와 기동 순서를 함께 확정한다. 현재 `User` 모델은 `019_first_walk_guide.sql`이 만드는 `users.first_walk_guide_completed_at`도 매핑하므로, 016~019를 적용한 뒤 새 코드를 기동한다. 019가 없으면 사용자 조회가 있는 가입과 로그인이 `UndefinedColumn`(SQLSTATE 42703)으로 실패해 500이 된다([#65](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/65)). #44 이후 코드는 다음 온보딩 단계를 계산할 때 `volunteer_onboarding_routines`를 읽는다. 따라서 022와 026까지 적용한 뒤 기동한다. 026이 없으면 Step 2를 마친 계정에서 단계를 계산하는 연령 확인 정정, Step 2 조회, Step 3 API가 500이 된다. 기존 `002~008`의 전용 적용 절차를 쓸 경우 도구의 계약과 백업 검사를 유지한다.
 2. 전체 이름을 명시해 한 파일씩 실행한다. 아래 명령은 형식 예시다. 각각 파일 내 트랜잭션과 외부 단일 트랜잭션을 구분한다. `-X`는 사용자 psql 시작 파일을 무시하고, `ON_ERROR_STOP=1`은 스크립트 오류에서 실행을 멈춘다. `--single-transaction`을 파일 내부에 `BEGIN/COMMIT`이 있는 SQL에 겹쳐 쓰지 않는다. [PostgreSQL 16 psql 문서](https://www.postgresql.org/docs/16/app-psql.html)
 
    ```sh

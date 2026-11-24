@@ -8,8 +8,9 @@ the age review flow (#41) and GET /users/me (#45).
   common years.
 - Account status: app.account_status (ACTIVE or AGE_REVIEW_REQUIRED).
 - Steps: first incomplete step in the order AGE_REVIEW, PLEDGE, BASIC_INFORMATION,
-  PET_EXPERIENCE, WALKING_ROUTINE. Step 3 is not implemented yet, so an account with
-  Step 2 done always reports WALKING_ROUTINE; nothing marks Step 3 done.
+  PET_EXPERIENCE, WALKING_ROUTINE, or None when everything is done. Each step is checked
+  on its stored record, so a skipped earlier step is still reported first. Step 3 is
+  done when its volunteer_onboarding_routines row exists (Issue #44).
 """
 from datetime import date, datetime, timedelta, timezone
 
@@ -20,7 +21,8 @@ from app.account_status import ACCOUNT_ACTIVE, ensure_active
 from app.api_contract import ContractError
 from app.auth import get_contract_user
 from app.database import get_db
-from app.models import User, UserRole, VolunteerOnboardingBasic, VolunteerOnboardingExperience
+from app.models import (User, UserRole, VolunteerOnboardingBasic, VolunteerOnboardingExperience,
+                        VolunteerOnboardingRoutine)
 from app.pledge_service import current_pledge_acknowledgement
 
 KST = timezone(timedelta(hours=9), "Asia/Seoul")
@@ -32,10 +34,12 @@ STEP_PET_EXPERIENCE = "PET_EXPERIENCE"
 STEP_WALKING_ROUTINE = "WALKING_ROUTINE"
 
 ONBOARDING_NOT_ALLOWED_MESSAGE = "사용자 정보 입력 권한이 없습니다."
-# Notion has a message only for required_step=BASIC_INFORMATION (Step 2 spec).
+# Notion has a message only for required_step=BASIC_INFORMATION (Step 2 spec) and
+# PET_EXPERIENCE (Step 3 specs).
 PREVIOUS_STEP_MESSAGES = {
     STEP_PLEDGE: "최초 산책 서약을 먼저 완료해 주세요.",
     STEP_BASIC_INFORMATION: "기본 정보 입력을 먼저 완료해 주세요.",
+    STEP_PET_EXPERIENCE: "이전 단계를 먼저 완료해 주세요.",
 }
 
 
@@ -111,5 +115,6 @@ def first_incomplete_step(db: Session, user: User) -> str | None:
         return STEP_BASIC_INFORMATION
     if db.get(VolunteerOnboardingExperience, user.id) is None:
         return STEP_PET_EXPERIENCE
-    # Step 3 (walking routine) adds its check here; until then it is never done.
-    return STEP_WALKING_ROUTINE
+    if db.get(VolunteerOnboardingRoutine, user.id) is None:
+        return STEP_WALKING_ROUTINE
+    return None

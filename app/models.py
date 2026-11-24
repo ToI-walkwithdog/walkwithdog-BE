@@ -154,6 +154,56 @@ class VolunteerExperienceChallenge(Base):
     challenge_code = Column(String(30), nullable=False)
 
 
+# Step 3 codes (Issue #44). Time slots: morning 06:00 <= t < 12:00, afternoon 12:00 <= t < 22:00.
+# Durations of one walk (Notion Step 3 save spec, 2026-11-24): UP_TO_30_MIN 0 < t <= 30 minutes,
+# BETWEEN_30_AND_60_MIN 30 < t < 60, OVER_60_MIN t >= 60. Comfortable sizes reuse DOG_SIZE_CODES.
+TIME_SLOT_CODES = ("WEEKDAY_MORNING", "WEEKDAY_AFTERNOON", "WEEKEND_MORNING", "WEEKEND_AFTERNOON")
+WALKING_DURATION_CODES = ("UP_TO_30_MIN", "BETWEEN_30_AND_60_MIN", "OVER_60_MIN")
+
+
+class VolunteerOnboardingRoutine(Base):
+    """Onboarding Step 3 walking routine (Issue #44, migration 026). A row means Step 3 is
+    complete. The region and time slot rows are saved in the same transaction; their counts
+    (1 to 3 regions, 1 to 4 slots) are checked by the server, not by the database."""
+    __tablename__ = "volunteer_onboarding_routines"
+    __table_args__ = (
+        CheckConstraint(_in("walking_duration_code", WALKING_DURATION_CODES), name="ck_onboarding_routine_duration"),
+        CheckConstraint(_in("comfortable_dog_size_code", DOG_SIZE_CODES), name="ck_onboarding_routine_dog_size"),
+    )
+
+    user_id = Column(Integer, ForeignKey("users.id", name="fk_onboarding_routines_user_id"), primary_key=True)
+    walking_duration_code = Column(String(30), nullable=False)
+    comfortable_dog_size_code = Column(String(20), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class VolunteerRoutineRegion(Base):
+    """Step 3 walk areas, one row per region master code (SIGUNGU or 세종 전체)."""
+    __tablename__ = "volunteer_routine_regions"
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "region_code", name="pk_volunteer_routine_regions"),
+    )
+
+    user_id = Column(Integer, ForeignKey("volunteer_onboarding_routines.user_id",
+                                         name="fk_routine_regions_routine"), nullable=False)
+    region_code = Column(String(20), ForeignKey("regions.region_code", name="fk_routine_regions_region_code"),
+                         nullable=False)
+
+
+class VolunteerRoutineTimeSlot(Base):
+    """Step 3 available time slots, one row per code."""
+    __tablename__ = "volunteer_routine_time_slots"
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "time_slot_code", name="pk_volunteer_routine_time_slots"),
+        CheckConstraint(_in("time_slot_code", TIME_SLOT_CODES), name="ck_routine_time_slot_code"),
+    )
+
+    user_id = Column(Integer, ForeignKey("volunteer_onboarding_routines.user_id",
+                                         name="fk_routine_time_slots_routine"), nullable=False)
+    time_slot_code = Column(String(40), nullable=False)
+
+
 class PhoneVerification(Base):
     """SMS code requests (Issue #40, migration 024). Only an HMAC of the code is stored."""
     __tablename__ = "phone_verifications"
@@ -372,6 +422,9 @@ class BreedTrait(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+# The Step 3 region rows reference the region master, so its table must be in the same metadata.
+from app.region_models import Region  # noqa: E402,F401
 
 # Register walk tables whenever the existing models entrypoint is imported.
 from app.walk_models import (  # noqa: E402,F401
