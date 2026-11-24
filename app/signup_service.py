@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 from app.api_contract import ContractError
 from app.auth import hash_password
 from app.models import User, UserConsent, UserRole
-from app.privacy_policy import CONSENT_ACTION_AGREE, PrivacyInput, check_against_policy, current_privacy_policy
+from app.policy_documents import active_signup_privacy_policy
+from app.privacy_policy import CONSENT_ACTION_AGREE, PrivacyInput, check_against_policy
 from app.schemas import SignupUserData
 
 DUPLICATE_ERRORS = {
@@ -51,7 +52,7 @@ def conflicted_field(exc: IntegrityError) -> str | None:
 
 def register_user(db: Session, login_id: str, nickname: str, password: str, privacy: PrivacyInput) -> SignupUserData:
     """Store the normalized account, age declaration and actual consents together."""
-    consent_types = check_against_policy(privacy, current_privacy_policy())
+    consent_types = check_against_policy(privacy, active_signup_privacy_policy())
     values = {"login_id": login_id, "nickname": nickname}
     try:
         taken = first_taken_field(db, values)

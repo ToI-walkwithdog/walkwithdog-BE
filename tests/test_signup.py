@@ -1,5 +1,6 @@
 """Sign-up and availability contract tests on an isolated SQLite DB (synthetic data only)."""
 import os
+import tempfile
 import unicodedata
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.auth import UNUSABLE_PASSWORD, verify_password
     from app.database import Base, get_db
     from app.models import User, UserConsent, UserRole
-    from app.routers import auth, users
+    from app.routers import auth, policies, users
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -51,6 +52,7 @@ MESSAGES = {
 }
 AVAILABILITY_LOGIN_ID_FORMAT = "아이디에 사용할 수 없는 문자가 포함되어 있습니다."
 INTERNAL_SERVER_ERROR = "일시적인 오류가 발생했습니다."
+POLICY_DOCUMENT_UNAVAILABLE = "정책 문서를 불러올 수 없습니다."
 TOO_MANY_REQUESTS = "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."
 LOGIN_ID_LENGTH = {"field": "login_id", "min_length": 4, "max_length": 20}
 NICKNAME_LENGTH = {"field": "nickname", "min_length": 3, "max_length": 20}
@@ -69,6 +71,7 @@ class SignupTests(unittest.TestCase):
         self.Session = sessionmaker(bind=self.engine)
         app = FastAPI()
         app.include_router(auth.router)
+        app.include_router(policies.router)
         app.include_router(users.router)
 
         def test_db():
@@ -280,14 +283,44 @@ class SignupTests(unittest.TestCase):
         for overrides in (
             {"PRIVACY_REQUIRED_CONSENTS": "UNSUPPORTED"},
             {"PRIVACY_OPTIONAL_CONSENTS": "PRIVACY_COLLECTION_USE"},
-            {"PRIVACY_DOCUMENT_VERSION": "v" * 33},
         ):
             with self.subTest(overrides=overrides), patch.dict(os.environ, overrides):
                 self.assert_contract(self.signup(), 500, "INTERNAL_SERVER_ERROR", {}, INTERNAL_SERVER_ERROR)
         with patch.dict(os.environ):
-            del os.environ["PRIVACY_DOCUMENT_VERSION"]
+            del os.environ["PRIVACY_REQUIRED_CONSENTS"]
             self.assert_contract(self.signup(), 500, "INTERNAL_SERVER_ERROR", {}, INTERNAL_SERVER_ERROR)
+        with patch.dict(os.environ, {"PRIVACY_DOCUMENT_VERSION": "v" * 33}):
+            self.assert_contract(self.signup(), 503, "POLICY_DOCUMENT_UNAVAILABLE", {}, POLICY_DOCUMENT_UNAVAILABLE)
+        with patch.dict(os.environ):
+            del os.environ["PRIVACY_DOCUMENT_VERSION"]
+            self.assert_contract(self.signup(), 503, "POLICY_DOCUMENT_UNAVAILABLE", {}, POLICY_DOCUMENT_UNAVAILABLE)
         self.assertEqual(self.user_count(), 0)
+        with self.Session() as db:
+            self.assertEqual(db.query(UserConsent).count(), 0)
+
+    def test_signup_stores_the_version_from_public_privacy_document(self):
+        response = self.client.get("/policies/privacy")
+        self.assertEqual(response.status_code, 200)
+        version = response.json()["data"]["document_version"]
+        self.assertEqual(version, TEST_DOCUMENT_VERSION)
+        self.assertEqual(self.signup(privacy=privacy(document_version=version)).status_code, 200)
+        self.assertEqual(self.client.get("/policies/privacy").status_code, 200)
+        self.assertEqual(self.user_count(), 1)
+        with self.Session() as db:
+            records = db.query(UserConsent).all()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].document_version, version)
+
+    def test_when_document_is_unavailable_signup_preserves_validation_order_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"POLICY_DOCUMENTS_DIR": directory}):
+            self.assert_contract(self.signup(privacy={}), 422, "INVALID_PRIVACY_PAYLOAD", {"field": "privacy"})
+            for payload in (privacy(collection_use_agreed=False), privacy(document_version="previous-v1")):
+                with self.subTest(payload=payload):
+                    self.assert_contract(self.signup(privacy=payload), 503, "POLICY_DOCUMENT_UNAVAILABLE", {},
+                                         POLICY_DOCUMENT_UNAVAILABLE)
+        self.assertEqual(self.user_count(), 0)
+        with self.Session() as db:
+            self.assertEqual(db.query(UserConsent).count(), 0)
 
     # Duplicates
 
@@ -504,7 +537,9 @@ class SignupTests(unittest.TestCase):
         self.assertIn("privacy", schemas["SignupRequest"]["required"])
         self.assertEqual(set(schemas["PrivacyInput"]["required"]), {"document_version", "age_14_plus_confirmed"})
         self.assertFalse(schemas["PrivacyInput"]["additionalProperties"])
-        self.assertEqual(set(paths["/users/"]["post"]["responses"]), {"200", "409", "422", "429", "500"})
+        signup_responses = paths["/users/"]["post"]["responses"]
+        self.assertEqual(set(signup_responses), {"200", "409", "422", "429", "500", "503"})
+        self.assertEqual(signup_responses["503"]["description"], "POLICY_DOCUMENT_UNAVAILABLE")
         for path in ("/users/id-availability", "/users/nickname-availability"):
             self.assertEqual(set(paths[path]["get"]["responses"]), {"200", "422", "429", "500"})
         self.assertNotIn("409", paths["/users/id-availability"]["get"]["responses"])

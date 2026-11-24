@@ -1,0 +1,20 @@
+{
+  "documents": [
+    {
+      "kind": "terms",
+      "document_version": "terms-test-v1",
+      "title": "테스트 이용약관",
+      "effective_at": "2026-12-01T00:00:00+09:00",
+      "file": "terms/terms-test-v1.md",
+      "sha256": "bae1ae58e154d498aa486ca39d6524edf668d0a61c1ab1301bad6a77e6d3cb28"
+    },
+    {
+      "kind": "privacy",
+      "document_version": "privacy-test-v1",
+      "title": "테스트 개인정보 문서",
+      "effective_at": "2026-12-01T00:00:00+09:00",
+      "file": "privacy/privacy-test-v1.md",
+      "sha256": "2e135de1589022a81a4445d224e5f12c61a807c8b91ace3500fee8d3325a5769"
+    }
+  ]
+}
