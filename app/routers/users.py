@@ -1,5 +1,3 @@
-from datetime import timezone
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -14,7 +12,7 @@ from app.schemas import (AvailabilityResponse, MeResponse, PledgeRequest, Pledge
                          SignupResponse, UserResponse, UserShelterUpdate)
 from app.account_status import ensure_active
 from app.api_contract import ContractError
-from app.onboarding_common import onboarding_status
+from app.onboarding_common import as_utc, onboarding_status
 from app.pledge_service import PLEDGE_COMPLETED_MESSAGE, PLEDGE_NOT_ALLOWED_MESSAGE, acknowledge_pledge
 from app.signup_service import is_taken, register_user
 
@@ -112,14 +110,11 @@ def get_pledge_user(user: User = Depends(get_contract_user)) -> User:
 def put_my_pledge(payload: PledgeRequest, user: User = Depends(get_pledge_user), db: Session = Depends(get_db)):
     # Same version again returns the first confirmation time with 200 (idempotent).
     record = acknowledge_pledge(db, user.id, payload.pledge_version)
+    # Always UTC ISO 8601 (#45), like GET /users/me: PostgreSQL returns TIMESTAMPTZ in the session
+    # time zone, so an aware value is converted, not passed through (Issue #34).
     data = {"pledge_completed": True, "pledge_version": record.pledge_version,
             "acknowledged_at": as_utc(record.acknowledged_at).isoformat()}
     return ok(data, PLEDGE_COMPLETED_MESSAGE)
-
-
-def as_utc(value):
-    # SQLite drops the time zone; PostgreSQL TIMESTAMPTZ keeps it. Both are stored in UTC.
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 router.include_router(onboarding)
