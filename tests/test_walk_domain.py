@@ -10,9 +10,18 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.auth import UNUSABLE_PASSWORD
     from app.models import Base, Dog, Shelter, User
     from app.walk_models import (
-        WALK_MODELS, DogWalkSetting, DogWalkSlot, DogTraitSummary, VolunteerProfile,
+        WALK_MODELS, DogWalkSetting, DogWalkSlot, DogTraitSummary,
+        ShelterVolunteerReview, ShelterVolunteerReviewTag, VolunteerProfile,
         Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest, WalkReview,
     )
+
+CORE_007_MODELS = (
+    DogWalkSetting, DogWalkSlot, WalkRequest, Walk, WalkPoint,
+    WalkMarker, WalkReview, DogTraitSummary, VolunteerProfile, WalkIncident,
+)
+REVIEW_020_MODELS = (
+    ShelterVolunteerReview, ShelterVolunteerReviewTag,
+)
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.dialects import postgresql
@@ -29,17 +38,18 @@ from scripts.walk_schema import CONTRACT, MOTION_CONTRACT, compare_table
 class WalkMetadataTests(unittest.TestCase):
     def test_all_ten_models_register_with_existing_base_and_relationships(self):
         configure_mappers()
-        self.assertEqual(len(WALK_MODELS), 10)
-        self.assertTrue(all(model.metadata is Base.metadata for model in WALK_MODELS))
-        self.assertEqual(set(json.loads(CONTRACT.read_text())), {m.__tablename__ for m in WALK_MODELS})
-        for model in WALK_MODELS:
+        self.assertEqual(len(CORE_007_MODELS), 10)
+        self.assertEqual(set(WALK_MODELS), set(CORE_007_MODELS) | set(REVIEW_020_MODELS))
+        self.assertTrue(all(model.metadata is Base.metadata for model in CORE_007_MODELS))
+        self.assertEqual(set(json.loads(CONTRACT.read_text())), {m.__tablename__ for m in CORE_007_MODELS})
+        for model in CORE_007_MODELS:
             for relationship in model.__mapper__.relationships:
                 self.assertIsNotNone(relationship.back_populates)
             for foreign in model.__table__.foreign_keys:
                 self.assertEqual(foreign.ondelete, "NO ACTION")
 
     def test_checked_in_sql_exactly_matches_orm_postgresql_ddl(self):
-        names = {m.__tablename__ for m in WALK_MODELS}
+        names = {m.__tablename__ for m in CORE_007_MODELS}
         source = (ROOT / "migrations/007_walk_domain.sql").read_text()
         statements = []
         motion = json.loads(MOTION_CONTRACT.read_text())
@@ -109,7 +119,7 @@ class WalkMetadataTests(unittest.TestCase):
 
     def test_types_nullability_defaults_and_all_constraint_contracts(self):
         contract = json.loads(CONTRACT.read_text())
-        for model in WALK_MODELS:
+        for model in CORE_007_MODELS:
             table = model.__table__
             snapshot = contract[table.name]
             if table.name == "dog_walk_settings":
@@ -195,6 +205,110 @@ class WalkMetadataTests(unittest.TestCase):
                     self.assertIn(constraint.name, snapshot["constraints"])
             for index in table.indexes:
                 self.assertIn(index.name, snapshot["indexes"])
+
+    def test_020_shelter_volunteer_review_schema_contract(self):
+        import re
+        configure_mappers()
+        self.assertTrue(all(model.metadata is Base.metadata for model in REVIEW_020_MODELS))
+        sql_text = (ROOT / "migrations/020_shelter_volunteer_reviews.sql").read_text(encoding="utf-8")
+        sql_body = "\n".join(line for line in sql_text.splitlines() if not line.strip().startswith("--"))
+
+        table_blocks = dict(re.findall(
+            r"CREATE TABLE IF NOT EXISTS\s+([a-z0-9_]+)\s*\((.*?)\n\);",
+            sql_body,
+            flags=re.DOTALL,
+        ))
+        self.assertEqual(set(table_blocks), {m.__tablename__ for m in REVIEW_020_MODELS})
+
+        sql_indexes = {
+            name: (tbl, [c.strip() for c in cols.split(",")])
+            for name, tbl, cols in re.findall(
+                r"CREATE INDEX IF NOT EXISTS\s+([a-z0-9_]+)\s+ON\s+([a-z0-9_]+)\s*\(([^)]+)\);",
+                sql_body,
+            )
+        }
+
+        expected_columns = {
+            "shelter_volunteer_reviews": {
+                "id": ("INTEGER", False, False),
+                "walk_id": ("INTEGER", False, False),
+                "shelter_id": ("INTEGER", False, False),
+                "volunteer_user_id": ("INTEGER", False, False),
+                "reviewed_by": ("INTEGER", False, False),
+                "rating": ("NUMERIC(2, 1)", False, False),
+                "comment": ("VARCHAR(500)", True, False),
+                "created_at": ("TIMESTAMP WITH TIME ZONE", False, True),
+                "updated_at": ("TIMESTAMP WITH TIME ZONE", False, True),
+            },
+            "shelter_volunteer_review_tags": {
+                "id": ("INTEGER", False, False),
+                "review_id": ("INTEGER", False, False),
+                "tag_code": ("VARCHAR(30)", False, False),
+            },
+        }
+        expected_fks = {
+            "shelter_volunteer_reviews": {
+                ("walk_id", "walks.id", "NO ACTION"),
+                ("shelter_id", "shelters.id", "NO ACTION"),
+                ("volunteer_user_id", "users.id", "NO ACTION"),
+                ("reviewed_by", "users.id", "NO ACTION"),
+            },
+            "shelter_volunteer_review_tags": {
+                ("review_id", "shelter_volunteer_reviews.id", "CASCADE"),
+            },
+        }
+        expected_uniques = {
+            "shelter_volunteer_reviews": {"uq_shelter_volunteer_reviews_walk": ("walk_id",)},
+            "shelter_volunteer_review_tags": {"uq_shelter_volunteer_review_tags_review_code": ("review_id", "tag_code")},
+        }
+        expected_checks = {
+            "shelter_volunteer_reviews": {
+                "ck_shelter_volunteer_review_rating": "rating >= 0.5 AND rating <= 5.0 AND CAST(ROUND(rating * 10) AS INTEGER) % 5 = 0",
+                "ck_shelter_volunteer_review_comment_len": "comment IS NULL OR length(comment) <= 500",
+            },
+            "shelter_volunteer_review_tags": {
+                "ck_shelter_volunteer_review_tag_code": "tag_code IN ('PUNCTUALITY', 'SAFETY_CARE', 'CONSIDERATE', 'DISAPPOINTING')",
+            },
+        }
+
+        orm_indexes = {}
+        for model in REVIEW_020_MODELS:
+            table = model.__table__
+            ddl = str(CreateTable(table, if_not_exists=True).compile(dialect=postgresql.dialect()))
+            self.assertEqual(set(table.columns.keys()), set(expected_columns[table.name]))
+            for col_name, (col_type, nullable, has_default) in expected_columns[table.name].items():
+                col = table.columns[col_name]
+                self.assertEqual(col.nullable, nullable, f"{table.name}.{col_name} nullable mismatch")
+                self.assertEqual(col.server_default is not None, has_default, f"{table.name}.{col_name} default mismatch")
+                self.assertIn(f"{col_name} {col_type}", ddl)
+                self.assertIn(col_name, table_blocks[table.name])
+
+            actual_fks = {
+                (fk.parent.name, fk.target_fullname, fk.ondelete)
+                for fk in table.foreign_keys
+            }
+            self.assertEqual(actual_fks, expected_fks[table.name])
+
+            actual_uniques = {
+                c.name: tuple(col.name for col in c.columns)
+                for c in table.constraints
+                if c.__class__.__name__ == "UniqueConstraint"
+            }
+            self.assertEqual(actual_uniques, expected_uniques[table.name])
+
+            actual_checks = {
+                c.name: str(c.sqltext)
+                for c in table.constraints
+                if c.__class__.__name__ == "CheckConstraint"
+            }
+            self.assertEqual(actual_checks, expected_checks[table.name])
+            for expr in expected_checks[table.name].values():
+                self.assertIn(expr, table_blocks[table.name])
+
+            for idx in table.indexes:
+                orm_indexes[idx.name] = (table.name, [col.name for col in idx.columns])
+
+        self.assertEqual(orm_indexes, sql_indexes)
 
 
 class WalkConstraintTests(unittest.TestCase):
@@ -351,6 +465,26 @@ class WalkConstraintTests(unittest.TestCase):
                 self.db.delete(self.db.get(User, 1))
                 self.db.flush()
         self.assertEqual(self.request.reviewed_by, 1)
+
+    def test_shelter_volunteer_review_constraints(self):
+        self.walk.status, self.walk.ended_at = "COMPLETED", self.end
+        self.db.flush()
+        for bad_rating in (0.0, 5.5, 4.3):
+            self.invalid(ShelterVolunteerReview(
+                walk_id=self.walk.id, shelter_id=1, volunteer_user_id=1, reviewed_by=1, rating=bad_rating
+            ))
+        review = ShelterVolunteerReview(
+            walk_id=self.walk.id, shelter_id=1, volunteer_user_id=1, reviewed_by=1, rating=4.5, comment="good"
+        )
+        self.db.add(review)
+        self.db.flush()
+        self.invalid(ShelterVolunteerReview(
+            walk_id=self.walk.id, shelter_id=1, volunteer_user_id=1, reviewed_by=1, rating=5.0
+        ))
+        self.invalid(ShelterVolunteerReviewTag(review_id=review.id, tag_code="UNKNOWN"))
+        self.db.add(ShelterVolunteerReviewTag(review_id=review.id, tag_code="PUNCTUALITY"))
+        self.db.flush()
+        self.invalid(ShelterVolunteerReviewTag(review_id=review.id, tag_code="PUNCTUALITY"))
 
 
 class WalkCatalogContractTests(unittest.TestCase):

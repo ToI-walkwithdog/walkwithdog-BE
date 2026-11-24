@@ -10,7 +10,7 @@ import unittest
 from sqlalchemy import create_engine, event
 from sqlalchemy.pool import StaticPool
 
-from app.routers import shelter_volunteer_reviews, walk_maps
+from app.routers import shelter_live_walks, shelter_volunteer_reviews, walk_maps
 from walk_record_test_support import START, WalkFixture
 
 
@@ -20,6 +20,7 @@ class ShelterVolunteerReviewF15Tests(WalkFixture, unittest.TestCase):
         event.listen(engine, "connect", lambda conn, _: conn.execute("PRAGMA foreign_keys=ON"))
         self.setup_walk_api(engine)
         self.app.include_router(walk_maps.router)
+        self.app.include_router(shelter_live_walks.router)
         self.app.include_router(shelter_volunteer_reviews.router)
 
     def _complete_walk(self, user=1, dog=1):
@@ -82,9 +83,17 @@ class ShelterVolunteerReviewF15Tests(WalkFixture, unittest.TestCase):
         self.assertEqual(direct_rev.status_code, 200, direct_rev.text)
         self.assertEqual(direct_rev.json()["rating"], "4.5")
 
-        sh_list = self.client.get("/shelters/walks/history", headers=self.auth(3))
-        if sh_list.status_code == 200:
-            self.assertEqual(sh_list.json()["walks"][0]["shelter_review"]["rating"], "4.5")
+        sh_list = self.client.get("/shelters/me/walks", headers=self.auth(3))
+        self.assertEqual(sh_list.status_code, 200, sh_list.text)
+        sh_walks = sh_list.json()["walks"]
+        self.assertEqual(len(sh_walks), 1)
+        self.assertEqual(sh_walks[0]["walk_id"], walk_id)
+        self.assertIsNotNone(sh_walks[0]["shelter_review"])
+        self.assertEqual(sh_walks[0]["shelter_review"]["rating"], "4.5")
+        self.assertEqual(
+            sh_walks[0]["shelter_review"]["tags"],
+            ["PUNCTUALITY", "SAFETY_CARE", "CONSIDERATE"],
+        )
 
     # 2. Exception: 1 review per walk (duplicate -> 409) & modification disallowed (405)
     def test_duplicate_review_rejected_and_editing_disallowed(self):
