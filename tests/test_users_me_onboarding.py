@@ -26,6 +26,8 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from privacy_test_support import onboarding_agreements, use_test_privacy_policy
+
 PLEDGE_VERSION = "pledge-test-v1"  # test-only values
 TEST_ENV = {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION,
             "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef"}
@@ -38,7 +40,8 @@ PROGRESS_FIELDS = {"account_status", "step1_completed", "step2_completed", "step
                    "next_onboarding_step"}
 STEP2 = {"has_experience": False}
 STEP3 = {"region_codes": ["11110"], "available_time_slot_codes": ["WEEKEND_MORNING"],
-         "walking_duration_code": "UP_TO_30_MIN", "comfortable_dog_size_code": "SMALL"}
+         "walking_duration_code": "UP_TO_30_MIN", "comfortable_dog_size_code": "SMALL",
+         "agreements": onboarding_agreements()}
 USER, PLEDGED, SHELTER, ADMIN = 1, 2, 4, 5
 
 
@@ -56,6 +59,7 @@ class UsersMeOnboardingTests(unittest.TestCase):
         cls.password_hash = hash_password(PASSWORD)
 
     def setUp(self):
+        use_test_privacy_policy(self)
         env = patch.dict(os.environ, TEST_ENV)
         env.start()
         self.addCleanup(env.stop)

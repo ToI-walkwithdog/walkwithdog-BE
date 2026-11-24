@@ -13,7 +13,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app import walking_routine_service
     from app.auth import UNUSABLE_PASSWORD, token_digest
     from app.database import Base, get_db
-    from app.models import (DOG_SIZE_CODES, TIME_SLOT_CODES, WALKING_DURATION_CODES, AuthSession, User,
+    from app.models import (DOG_SIZE_CODES, TIME_SLOT_CODES, WALKING_DURATION_CODES, AuthSession, User, UserConsent,
                             UserPledgeAcknowledgement, UserRole, VolunteerOnboardingBasic,
                             VolunteerOnboardingExperience, VolunteerOnboardingRoutine, VolunteerRoutineRegion,
                             VolunteerRoutineTimeSlot)
@@ -28,12 +28,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from privacy_test_support import TEST_DOCUMENT_VERSION, TEST_TERMS_VERSION, onboarding_agreements, use_test_privacy_policy
+
 ROOT = Path(__file__).resolve().parents[1]
 PLEDGE_VERSION = "pledge-test-v1"  # test-only value
 NOW = datetime(2026, 11, 24, 1, 0, tzinfo=timezone.utc)
 PATH = "/users/me/onboarding/walking-routine"
 FULL = {"region_codes": ["11680", "11110"], "available_time_slot_codes": ["WEEKDAY_MORNING", "WEEKEND_AFTERNOON"],
-        "walking_duration_code": "BETWEEN_30_AND_60_MIN", "comfortable_dog_size_code": "MEDIUM"}
+        "walking_duration_code": "BETWEEN_30_AND_60_MIN", "comfortable_dog_size_code": "MEDIUM",
+        "agreements": onboarding_agreements()}
 # Synthetic region master: active SIDO and SIGUNGU, 세종 전체, an inactive SIGUNGU and an
 # active SIGUNGU under an inactive SIDO.
 REGIONS = (("11", "서울특별시", LEVEL_SIDO, None, True), ("11110", "종로구", LEVEL_SIGUNGU, "11", True),
@@ -56,6 +59,7 @@ class FakeClock:
 
 class WalkingRoutineTests(unittest.TestCase):
     def setUp(self):
+        use_test_privacy_policy(self)
         env = patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION})
         env.start()
         self.addCleanup(env.stop)
@@ -133,6 +137,11 @@ class WalkingRoutineTests(unittest.TestCase):
                 counts.append(query.count())
             return tuple(counts)
 
+    def consent_rows(self):
+        with self.Session() as db:
+            return [(row.user_id, row.consent_type, row.document_version, row.action,
+                     row.recorded_at.replace(tzinfo=timezone.utc)) for row in db.query(UserConsent).order_by(UserConsent.id)]
+
     # Saving and reading
 
     def test_read_before_and_after_saving(self):
@@ -142,12 +151,17 @@ class WalkingRoutineTests(unittest.TestCase):
             "step3_completed": False, "routine": None, "next_onboarding_step": "WALKING_ROUTINE"}})
         self.assertEqual(before.headers["cache-control"], "no-store")
         self.assertEqual(self.rows(), (0, 0, 0))  # reading writes nothing
+        self.assertEqual(self.consent_rows(), [])
 
         saved = self.put(FULL)
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertEqual(saved.json(), {"code": "OK", "message": "산책 루틴 입력이 완료되었습니다.", "data": {
             "step3_completed": True, "completed_at": NOW.isoformat(), "next_onboarding_step": None}})
         self.assertEqual(self.rows(), (1, 2, 2))
+        self.assertEqual(set(self.consent_rows()), {
+            (READY, "TERMS_OF_SERVICE", TEST_TERMS_VERSION, "AGREE", NOW),
+            (READY, "PRIVACY_COLLECTION_USE", TEST_DOCUMENT_VERSION, "AGREE", NOW),
+        })
 
         after = self.get()
         self.assertEqual(after.json()["data"], {"step3_completed": True, "next_onboarding_step": None, "routine": {
@@ -191,7 +205,8 @@ class WalkingRoutineTests(unittest.TestCase):
             self.assertEqual(routine.user_id, READY)
             self.assertEqual(routine.completed_at.replace(tzinfo=timezone.utc), NOW)
         self.assertEqual(set(VolunteerOnboardingRoutine.__table__.columns.keys()),
-                         {"user_id", "walking_duration_code", "comfortable_dog_size_code", "completed_at", "updated_at"})
+                         {"user_id", "walking_duration_code", "comfortable_dog_size_code", "completed_at", "updated_at",
+                          "terms_document_version", "privacy_document_version"})
 
     def test_same_answer_again_keeps_the_first_time_and_a_different_one_is_409(self):
         self.assertEqual(self.put(FULL).status_code, 200)
@@ -209,6 +224,99 @@ class WalkingRoutineTests(unittest.TestCase):
                                   "산책 루틴 입력이 이미 완료되었습니다.")
         self.assertEqual(self.rows(), (1, 2, 2))
         self.assertEqual(self.get().json()["data"]["routine"]["walking_duration_code"], "BETWEEN_30_AND_60_MIN")
+
+    def test_required_agreements_reject_missing_malformed_or_false_values(self):
+        current = onboarding_agreements()
+        cases = (
+            (None, "INVALID_AGREEMENTS_PAYLOAD", "agreements"),
+            ([], "INVALID_AGREEMENTS_PAYLOAD", "agreements"),
+            ({"terms": current["terms"]}, "INVALID_AGREEMENTS_PAYLOAD", "agreements.privacy"),
+            ({"privacy": current["privacy"]}, "INVALID_AGREEMENTS_PAYLOAD", "agreements.terms"),
+            ({**current, "terms": {"agreed": True}}, "INVALID_AGREEMENTS_PAYLOAD",
+             "agreements.terms.document_version"),
+            ({**current, "terms": {"agreed": True, "document_version": " "}}, "INVALID_AGREEMENTS_PAYLOAD",
+             "agreements.terms.document_version"),
+            ({**current, "privacy": {"agreed": True, "document_version": 1}}, "INVALID_AGREEMENTS_PAYLOAD",
+             "agreements.privacy.document_version"),
+            ({**current, "privacy": {"agreed": "true", "document_version": TEST_DOCUMENT_VERSION}},
+             "INVALID_AGREEMENTS_PAYLOAD", "agreements.privacy.agreed"),
+            ({**current, "terms": {**current["terms"], "agreed": False}}, "TERMS_AGREEMENT_REQUIRED",
+             "agreements.terms.agreed"),
+            ({**current, "privacy": {**current["privacy"], "agreed": False}}, "PRIVACY_CONFIRMATION_REQUIRED",
+             "agreements.privacy.agreed"),
+        )
+        self.assert_error(self.put({key: value for key, value in FULL.items() if key != "agreements"}), 422,
+                          "INVALID_AGREEMENTS_PAYLOAD", {"field": "agreements"})
+        for agreements, code, field in cases:
+            with self.subTest(agreements=agreements):
+                self.assert_error(self.put({**FULL, "agreements": agreements}), 422, code, {"field": field})
+        self.assertEqual((self.rows(), self.consent_rows()), ((0, 0, 0), []))
+
+    def test_active_version_mismatch_and_unavailable_documents_leave_no_completion(self):
+        for kind, versions in (("terms", {"terms_version": "old-terms"}),
+                               ("privacy", {"privacy_version": "old-privacy"})):
+            with self.subTest(kind=kind):
+                response = self.put({**FULL, "agreements": onboarding_agreements(**versions)})
+                self.assert_error(response, 409, "POLICY_VERSION_MISMATCH",
+                                  {"field": f"agreements.{kind}.document_version"})
+        for setting in ("TERMS_DOCUMENT_VERSION", "PRIVACY_DOCUMENT_VERSION"):
+            with self.subTest(setting=setting), patch.dict(os.environ, {setting: "unregistered-version"}):
+                self.assert_error(self.put(FULL), 503, "POLICY_DOCUMENT_UNAVAILABLE", {})
+        self.assertEqual((self.rows(), self.consent_rows()), ((0, 0, 0), []))
+        self.assertEqual(self.get().json()["data"]["next_onboarding_step"], "WALKING_ROUTINE")
+
+    def test_latest_effective_privacy_and_scope_control_reuse(self):
+        old_time = NOW - timedelta(days=1)
+        for user_id, history, reuse in (
+            (READY, [(TEST_DOCUMENT_VERSION, "AGREE")], True),
+            (20, [("old-privacy", "AGREE")], False),
+            (21, [(TEST_DOCUMENT_VERSION, "AGREE"), (TEST_DOCUMENT_VERSION, "WITHDRAW")], False),
+        ):
+            with self.subTest(user_id=user_id):
+                if user_id != READY:
+                    self.add_user(user_id)
+                with self.Session.begin() as db:
+                    db.add_all(UserConsent(user_id=user_id, consent_type="PRIVACY_COLLECTION_USE",
+                                           document_version=version, action=action, recorded_at=old_time)
+                               for version, action in history)
+                self.assertEqual(self.put(FULL, user_id).status_code, 200)
+                expected = [(user_id, "PRIVACY_COLLECTION_USE", version, action, old_time)
+                            for version, action in history]
+                expected.append((user_id, "TERMS_OF_SERVICE", TEST_TERMS_VERSION, "AGREE", NOW))
+                if not reuse:
+                    expected.append((user_id, "PRIVACY_COLLECTION_USE", TEST_DOCUMENT_VERSION, "AGREE", NOW))
+                self.assertEqual([row for row in self.consent_rows() if row[0] == user_id], expected)
+
+    def test_exact_completed_agreements_can_be_replayed_after_policy_rotation(self):
+        saved = self.put(FULL)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        original = self.consent_rows()
+        with patch.dict(os.environ, {"TERMS_DOCUMENT_VERSION": "rotated-unavailable-terms",
+                                     "PRIVACY_DOCUMENT_VERSION": "rotated-unavailable-privacy"}):
+            self.clock.now = NOW + timedelta(days=1)
+            self.assertEqual(self.put(FULL).json(), saved.json())
+            changed = {**FULL, "agreements": onboarding_agreements(privacy_version="other-privacy")}
+            self.assert_error(self.put(changed), 409, "WALKING_ROUTINE_ALREADY_COMPLETED")
+        self.assertEqual(self.consent_rows(), original)
+
+    def test_legacy_routine_replay_preserves_completion_without_creating_consents(self):
+        with self.Session.begin() as db:
+            db.add(VolunteerOnboardingRoutine(user_id=READY, walking_duration_code="BETWEEN_30_AND_60_MIN",
+                                              comfortable_dog_size_code="MEDIUM", completed_at=NOW, updated_at=NOW))
+            db.flush()
+            db.add_all(VolunteerRoutineRegion(user_id=READY, region_code=code) for code in FULL["region_codes"])
+            db.add_all(VolunteerRoutineTimeSlot(user_id=READY, time_slot_code=code)
+                       for code in FULL["available_time_slot_codes"])
+        with patch.dict(os.environ, {"TERMS_DOCUMENT_VERSION": ""}):
+            self.assertEqual(self.get().json()["data"]["step3_completed"], True)
+            replay = self.put(FULL)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["data"]["completed_at"], NOW.isoformat())
+        self.assertEqual(self.consent_rows(), [])
+        with self.Session() as db:
+            routine = db.get(VolunteerOnboardingRoutine, READY)
+            self.assertIsNone(routine.terms_document_version)
+            self.assertIsNone(routine.privacy_document_version)
 
     # 422 rules (Notion codes, messages and data)
 

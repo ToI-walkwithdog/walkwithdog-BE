@@ -3,7 +3,7 @@
 The main flows run on a schema built only by the checked-in SQL files, in an order that satisfies
 every manifest `requires`, without create_all(): the base tables of a dev database before 016
 (005, 006, 007, 014, 015), then 002, 016_onboarding_signup, 017_remove_user_email, 018_user_consents,
-019, 023, 024, 025, 022 and 026. Account exit reads activity tables (chat, matching) that those files do not create, so
+019, 023, 024, 025, 022, 026 and 027. Account exit reads activity tables (chat, matching) that those files do not create, so
 its scenario runs on the model schema instead.
 
 Synthetic accounts and regions only. SMS goes to the in-memory MockSmsProvider; nothing is sent.
@@ -39,7 +39,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session as OrmSession, sessionmaker
 
-from privacy_test_support import privacy, use_test_privacy_policy
+from privacy_test_support import TEST_DOCUMENT_VERSION, TEST_TERMS_VERSION, onboarding_agreements, privacy, use_test_privacy_policy
 
 from scripts.prepare_demo_db import PreparationError, validate_local_engine
 
@@ -58,7 +58,7 @@ DEV_CHAIN_BEFORE_016 = ("005_user_roles.sql", "006_user_shelters.sql", "007_walk
 ONBOARDING_CHAIN = ("002_auth_sessions.sql", "016_onboarding_signup.sql", "017_remove_user_email.sql",
                     "018_user_consents.sql", "019_first_walk_guide.sql", "023_user_pledge_acknowledgements.sql",
                     "024_onboarding_basic_info.sql", "025_onboarding_dog_experience.sql", "022_regions.sql",
-                    "026_onboarding_walking_routine.sql")
+                    "026_onboarding_walking_routine.sql", "027_onboarding_agreements.sql")
 REGIONS = (("11", "서울특별시", LEVEL_SIDO, None), ("11110", "종로구", LEVEL_SIGUNGU, "11"),
            ("11680", "강남구", LEVEL_SIGUNGU, "11"), ("26", "부산광역시", LEVEL_SIDO, None),
            ("26350", "해운대구", LEVEL_SIGUNGU, "26"), ("36", "세종특별자치시", LEVEL_SIDO, None),
@@ -68,7 +68,8 @@ FULL_EXPERIENCE = {"has_experience": True, "experienced_breeds_text": "믹스견
                    "walking_frequency": "WEEKLY_3_4", "perceived_difficulty": "NORMAL",
                    "challenge_codes": ["LEASH_PULLING", "OTHER_DOG_REACTION"]}
 ROUTINE = {"region_codes": ["11110"], "available_time_slot_codes": ["WEEKDAY_MORNING", "WEEKEND_AFTERNOON"],
-           "walking_duration_code": "UP_TO_30_MIN", "comfortable_dog_size_code": "SMALL"}
+           "walking_duration_code": "UP_TO_30_MIN", "comfortable_dog_size_code": "SMALL",
+           "agreements": onboarding_agreements()}
 
 
 @unittest.skipUnless(TEST_URL, "SIGNUP_TEST_DATABASE_URL의 빈 격리 PostgreSQL이 필요합니다")
@@ -329,15 +330,19 @@ class OnboardingIntegrationPostgresTests(unittest.TestCase):
                           self.rows(VolunteerExperienceChallenge), self.rows(VolunteerOnboardingRoutine),
                           self.rows(VolunteerRoutineRegion), self.rows(VolunteerRoutineTimeSlot),
                           self.rows(AuthSession)), (1, 1, 1, 1, 0, 1, 1, 2, 1))
-        self.assertGreaterEqual(self.rows(UserConsent, user_id=user_id), 1)
         with self.Session() as db:
+            consents = db.query(UserConsent).filter_by(user_id=user_id).all()
+            self.assertEqual(len(consents), 2)
+            self.assertEqual({(row.consent_type, row.document_version, row.action) for row in consents},
+                             {("PRIVACY_COLLECTION_USE", TEST_DOCUMENT_VERSION, "AGREE"),
+                              ("TERMS_OF_SERVICE", TEST_TERMS_VERSION, "AGREE")})
             (verification,) = db.query(PhoneVerification).all()
             self.assertIsNotNone(verification.consumed_at)
             self.assertFalse(db.get(VolunteerOnboardingExperience, user_id).has_experience)
 
     def test_full_onboarding_with_dog_experience_on_the_migrated_schema(self):
         self.start()
-        routine = {"region_codes": ["11680", "26350", "36_SPECIAL_ALL"],
+        routine = {**ROUTINE, "region_codes": ["11680", "26350", "36_SPECIAL_ALL"],
                    "available_time_slot_codes": ["WEEKDAY_MORNING", "WEEKDAY_AFTERNOON", "WEEKEND_MORNING",
                                                  "WEEKEND_AFTERNOON"],
                    "walking_duration_code": "BETWEEN_30_AND_60_MIN", "comfortable_dog_size_code": "LARGE"}

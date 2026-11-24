@@ -26,6 +26,12 @@ def privacy(**changes):
             "age_14_plus_confirmed": True, **changes}
 
 
+def onboarding_agreements(*, terms_version=TEST_TERMS_VERSION, privacy_version=TEST_DOCUMENT_VERSION):
+    """The two explicitly accepted synthetic documents in a walking routine request."""
+    return {"terms": {"document_version": terms_version, "agreed": True},
+            "privacy": {"document_version": privacy_version, "agreed": True}}
+
+
 def use_test_privacy_policy(test_case, **overrides):
     """Apply TEST_POLICY_ENV (plus overrides) for one test; restored by addCleanup."""
     patcher = patch.dict(os.environ, {**TEST_POLICY_ENV, **overrides})

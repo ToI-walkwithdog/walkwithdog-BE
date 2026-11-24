@@ -10,7 +10,7 @@ then the region master inside the saving transaction.
 Save transaction (same rule as the pledge, Step 1 and Step 2):
   lock the users row FOR SHARE -> re-check ACTIVE and the earlier steps on that row ->
   check the regions under FOR SHARE (PostgreSQL) -> compare with a stored routine ->
-  insert the routine, its regions and its time slots -> commit.
+  check active documents -> insert the routine -> insert links and needed consents -> commit.
 A status change (FOR UPDATE on users) and a region sync that deactivates a chosen region
 (UPDATE on regions) wait for this save; a change committed first is seen and refused.
 Concurrent saves of one account: the primary keys keep one routine; the loser re-reads it and
@@ -19,16 +19,19 @@ answers 200 for the same answer or 409 for a different one. Any failure rolls ev
 from datetime import datetime
 from numbers import Real
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.account_status import is_active, lock_user
 from app.api_contract import ContractError
 from app.auth import contract_unauthorized
-from app.models import (DOG_SIZE_CODES, TIME_SLOT_CODES, WALKING_DURATION_CODES, User, UserRole,
+from app.models import (DOG_SIZE_CODES, TIME_SLOT_CODES, WALKING_DURATION_CODES, User, UserConsent, UserRole,
                         VolunteerOnboardingRoutine, VolunteerRoutineRegion, VolunteerRoutineTimeSlot)
 from app.onboarding_common import (ONBOARDING_NOT_ALLOWED_MESSAGE, STEP_BASIC_INFORMATION, STEP_PET_EXPERIENCE,
                                    STEP_PLEDGE, as_utc, first_incomplete_step, previous_step_required)
+from app.policy_documents import active_policy_document, check_document_version
+from app.privacy_policy import CONSENT_ACTION_AGREE
 from app.region_service import REGION_CODE_MAX_LENGTH, InvalidRegionCodes, require_selectable_regions
 
 REGION_MAX = 3
@@ -39,6 +42,7 @@ REGIONS = "region_codes"
 TIME_SLOTS = "available_time_slot_codes"
 DURATION = "walking_duration_code"
 DOG_SIZE = "comfortable_dog_size_code"
+AGREEMENT_TYPES = {"terms": "TERMS_OF_SERVICE", "privacy": "PRIVACY_COLLECTION_USE"}
 
 # Notion Step 3 save spec: (code, message) per rule.
 REGIONS_REQUIRED = ("REGIONS_REQUIRED", "산책 지역을 한 개 이상 선택해 주세요.")
@@ -152,7 +156,10 @@ def _same(stored: dict, answer: dict) -> bool:
 
 def _replay(db: Session, user: User, routine: VolunteerOnboardingRoutine, answer: dict) -> dict:
     stored = _stored(db, routine)
-    if not _same(stored, answer):
+    versions = (routine.terms_document_version, routine.privacy_document_version)
+    submitted = tuple(answer["agreements"][kind]["document_version"] for kind in AGREEMENT_TYPES)
+    # Legacy completions predate the agreement requirement and keep their original result.
+    if not _same(stored, answer) or (versions != (None, None) and versions != submitted):
         raise ContractError(409, "WALKING_ROUTINE_ALREADY_COMPLETED", "산책 루틴 입력이 이미 완료되었습니다.")
     return {"step3_completed": True, "completed_at": stored["completed_at"],
             "next_onboarding_step": first_incomplete_step(db, user)}
@@ -172,6 +179,26 @@ def _completed_routine(db: Session, user_id: int) -> VolunteerOnboardingRoutine 
     return db.get(VolunteerOnboardingRoutine, user_id)
 
 
+def _validate_document_versions(agreements: dict) -> None:
+    for kind, agreement in agreements.items():
+        active = active_policy_document(kind)
+        check_document_version(agreement["document_version"], active.document_version,
+                               f"agreements.{kind}.document_version")
+
+
+def _add_required_consents(db: Session, user_id: int, agreements: dict, now: datetime) -> None:
+    for kind, consent_type in AGREEMENT_TYPES.items():
+        version = agreements[kind]["document_version"]
+        latest_action = db.scalar(select(UserConsent.action).where(
+            UserConsent.user_id == user_id,
+            UserConsent.consent_type == consent_type,
+            UserConsent.document_version == version,
+        ).order_by(UserConsent.recorded_at.desc(), UserConsent.id.desc()).limit(1))
+        if latest_action != CONSENT_ACTION_AGREE:
+            db.add(UserConsent(user_id=user_id, consent_type=consent_type, document_version=version,
+                               action=CONSENT_ACTION_AGREE, recorded_at=now))
+
+
 def save_routine(db: Session, user_id: int, answer: dict, now: datetime) -> dict:
     try:
         user = lock_user(db, user_id)  # FOR SHARE, then the current state of the locked row
@@ -184,27 +211,34 @@ def save_routine(db: Session, user_id: int, answer: dict, now: datetime) -> dict
             result = _replay(db, user, existing, answer)
             db.rollback()  # nothing to write; release the locks
             return result
+        agreements = answer["agreements"]
+        _validate_document_versions(agreements)
         db.add(VolunteerOnboardingRoutine(
             user_id=user_id, walking_duration_code=answer[DURATION], comfortable_dog_size_code=answer[DOG_SIZE],
-            completed_at=now, updated_at=now))
-        db.flush()
+            completed_at=now, updated_at=now, terms_document_version=agreements["terms"]["document_version"],
+            privacy_document_version=agreements["privacy"]["document_version"]))
+        try:
+            # The routine PK decides which request may write consents for this completion.
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            user = lock_user(db, user_id)
+            if user is None:
+                raise contract_unauthorized("USER_NOT_FOUND") from None
+            ensure_routine_allowed(db, user)
+            existing = db.get(VolunteerOnboardingRoutine, user_id)
+            if existing is None:
+                raise
+            result = _replay(db, user, existing, answer)
+            db.rollback()
+            return result
         db.add_all(VolunteerRoutineRegion(user_id=user_id, region_code=code) for code in answer[REGIONS])
         db.add_all(VolunteerRoutineTimeSlot(user_id=user_id, time_slot_code=code) for code in answer[TIME_SLOTS])
+        _add_required_consents(db, user_id, agreements, now)
         db.flush()
         next_step = first_incomplete_step(db, user)
         db.commit()
         return {"step3_completed": True, "completed_at": as_utc(now).isoformat(), "next_onboarding_step": next_step}
-    except IntegrityError:
-        db.rollback()
-        # A concurrent save of this account committed first (primary key).
-        existing = db.get(VolunteerOnboardingRoutine, user_id)
-        if existing is None:
-            raise
-        user = db.get(User, user_id)
-        try:
-            return _replay(db, user, existing, answer)
-        finally:
-            db.rollback()
     except Exception:
         db.rollback()
         raise

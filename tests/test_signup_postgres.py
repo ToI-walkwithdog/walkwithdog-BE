@@ -50,7 +50,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from privacy_test_support import TEST_DOCUMENT_VERSION, privacy, use_test_privacy_policy
+from privacy_test_support import TEST_DOCUMENT_VERSION, TEST_TERMS_VERSION, onboarding_agreements, privacy, use_test_privacy_policy
 
 from scripts.prepare_demo_db import PreparationError, validate_local_engine
 
@@ -66,6 +66,7 @@ STEP1_MIGRATION = "024_onboarding_basic_info.sql"
 STEP2_MIGRATION = "025_onboarding_dog_experience.sql"
 REGION_MIGRATION = "022_regions.sql"
 STEP3_MIGRATION = "026_onboarding_walking_routine.sql"
+AGREEMENTS_MIGRATION = "027_onboarding_agreements.sql"
 USER_COLUMNS_AFTER_018 = {
     "first_walk_guide_completed_at": GUIDE_MIGRATION,
     "account_status": STEP1_MIGRATION,
@@ -75,9 +76,10 @@ USER_COLUMNS_AFTER_018 = {
 # from 022. 022 depends on nothing, so it runs right before 026: every stage that stops at
 # 019 to 025 still gets it.
 API_MIGRATIONS_AFTER_018 = (GUIDE_MIGRATION, PLEDGE_MIGRATION, STEP1_MIGRATION, STEP2_MIGRATION, REGION_MIGRATION,
-                            STEP3_MIGRATION)
+                            STEP3_MIGRATION, AGREEMENTS_MIGRATION)
 STEP3_FULL = {"region_codes": ["11680", "26350"], "available_time_slot_codes": ["WEEKDAY_MORNING", "WEEKEND_MORNING"],
-              "walking_duration_code": "UP_TO_30_MIN", "comfortable_dog_size_code": "SMALL"}
+              "walking_duration_code": "UP_TO_30_MIN", "comfortable_dog_size_code": "SMALL",
+              "agreements": onboarding_agreements()}
 # Synthetic region master rows for Step 3 tests.
 STEP3_REGIONS = (("11", "서울특별시", LEVEL_SIDO, None), ("11680", "강남구", LEVEL_SIGUNGU, "11"),
                  ("26", "부산광역시", LEVEL_SIDO, None), ("26350", "해운대구", LEVEL_SIGUNGU, "26"),
@@ -1674,6 +1676,12 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual(len({r.json()["data"]["completed_at"] for r in responses}), 1)
         self.assertEqual({r.json()["data"]["next_onboarding_step"] for r in responses}, {None})
         self.assertEqual(self.step3_rows(), (1, 2, 2))  # no duplicate link rows
+        with self.Session() as db:
+            consents = db.query(UserConsent).filter_by(user_id=1).all()
+            self.assertEqual(len(consents), 2)
+            self.assertEqual({(row.consent_type, row.document_version, row.action) for row in consents},
+                             {("TERMS_OF_SERVICE", TEST_TERMS_VERSION, "AGREE"),
+                              ("PRIVACY_COLLECTION_USE", TEST_DOCUMENT_VERSION, "AGREE")})
 
     def test_parallel_different_step3_saves_one_wins_the_other_gets_409(self):
         headers = self.start_step3_api()
@@ -1702,7 +1710,26 @@ class SignupPostgresTests(unittest.TestCase):
             response = self.put_step3(headers)
         self.assertEqual((response.status_code, response.json()["code"]), (500, "INTERNAL_SERVER_ERROR"))
         self.assertEqual(self.step3_rows(), (0, 0, 0))  # the routine and region rows were rolled back too
+        self.assertEqual(self.table_count(UserConsent), 0)
         self.assertEqual(self.put_step3(headers).status_code, 200)
+
+    def test_step3_consent_insert_failure_rolls_back_routine_and_preserves_signup_history(self):
+        headers = self.start_step3_api()
+        with self.Session.begin() as db:
+            db.add(UserConsent(user_id=1, consent_type="PRIVACY_COLLECTION_USE",
+                               document_version="old-privacy", action="AGREE", recorded_at=STEP1_START))
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE user_consents ADD CONSTRAINT test_refuse_new_privacy "
+                "CHECK (consent_type <> 'PRIVACY_COLLECTION_USE' OR document_version = 'old-privacy')"))
+        with self.assertLogs("app.api_contract", "ERROR"):
+            response = self.put_step3(headers)
+        self.assertEqual((response.status_code, response.json()["code"]), (500, "INTERNAL_SERVER_ERROR"))
+        self.assertEqual(self.step3_rows(), (0, 0, 0))
+        with self.Session() as db:
+            (record,) = db.query(UserConsent).filter_by(user_id=1).all()
+            self.assertEqual((record.consent_type, record.document_version, record.action, record.recorded_at),
+                             ("PRIVACY_COLLECTION_USE", "old-privacy", "AGREE", STEP1_START))
 
     def test_region_deactivation_waits_for_a_step3_save_that_locked_the_region(self):
         headers = self.start_step3_api()
@@ -1789,10 +1816,13 @@ class SignupPostgresTests(unittest.TestCase):
             ("volunteer_routine_time_slots", "pk_volunteer_routine_time_slots", "PRIMARY KEY (user_id, time_slot_code)"),
         ):
             self.assertIn(expected, constraints)
-        # The model declares exactly the columns the file creates.
+        # Check the historical projection without the columns added by 027.
         for model in (VolunteerOnboardingRoutine, VolunteerRoutineRegion, VolunteerRoutineTimeSlot):
+            expected_columns = set(model.__table__.columns.keys())
+            if model is VolunteerOnboardingRoutine:
+                expected_columns -= {"terms_document_version", "privacy_document_version"}
             self.assertEqual({column for column, _, _ in tables[model.__tablename__]},
-                             set(model.__table__.columns.keys()))
+                             expected_columns)
         self.assertEqual(self.user_rows(), accounts)
         self.run_migration(STEP3_MIGRATION)  # re-running is a no-op
         self.assertEqual(self.schema_snapshot(), (tables, indexes, constraints))
@@ -1843,6 +1873,42 @@ class SignupPostgresTests(unittest.TestCase):
         changed = self.put_step3(headers, {**STEP3_FULL, "walking_duration_code": "OVER_60_MIN"})
         self.assertEqual(changed.json()["code"], "WALKING_ROUTINE_ALREADY_COMPLETED")
         self.assertEqual(self.step3_rows(), (1, 2, 2))
+
+    def test_migration_027_preserves_legacy_routines_and_consent_history_and_accepts_terms(self):
+        self.migrate_dev_chain_through_016_with_accounts()
+        self.run_sql_file(EMAIL_REMOVAL)
+        self.run_sql_file(CONSENT_MIGRATION)
+        for name in API_MIGRATIONS_AFTER_018[:-1]:
+            self.run_migration(name)
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO volunteer_onboarding_routines "
+                "(user_id, walking_duration_code, comfortable_dog_size_code, completed_at, updated_at) "
+                "VALUES (1, 'UP_TO_30_MIN', 'SMALL', :time, :time)"), {"time": STEP1_START})
+            connection.execute(text(
+                "INSERT INTO user_consents (user_id, consent_type, document_version, action, recorded_at) "
+                "VALUES (1, 'PRIVACY_COLLECTION_USE', :version, 'AGREE', :time)"),
+                {"version": TEST_DOCUMENT_VERSION, "time": STEP1_START})
+        self.run_migration(AGREEMENTS_MIGRATION)
+        snapshot = self.schema_snapshot()
+        self.run_migration(AGREEMENTS_MIGRATION)
+        self.assertEqual(self.schema_snapshot(), snapshot)
+        session_factory = sessionmaker(bind=self.engine)
+        with session_factory.begin() as db:
+            legacy = db.get(VolunteerOnboardingRoutine, 1)
+            self.assertEqual((legacy.completed_at, legacy.terms_document_version, legacy.privacy_document_version),
+                             (STEP1_START, None, None))
+            (privacy_consent,) = db.query(UserConsent).filter_by(user_id=1).all()
+            self.assertEqual((privacy_consent.consent_type, privacy_consent.document_version,
+                              privacy_consent.action, privacy_consent.recorded_at),
+                             ("PRIVACY_COLLECTION_USE", TEST_DOCUMENT_VERSION, "AGREE", STEP1_START))
+            db.add(UserConsent(user_id=1, consent_type="TERMS_OF_SERVICE",
+                               document_version=TEST_TERMS_VERSION, action="AGREE", recorded_at=STEP1_START))
+        with session_factory() as db:
+            self.assertEqual(db.query(UserConsent).count(), 2)
+        with self.assertRaises(IntegrityError), session_factory.begin() as db:
+            db.add(UserConsent(user_id=1, consent_type="UNSUPPORTED_TYPE",
+                               document_version=TEST_TERMS_VERSION, action="AGREE", recorded_at=STEP1_START))
 
     def step3_rows_raw(self):
         with self.engine.connect() as connection:
