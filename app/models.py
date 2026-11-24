@@ -54,11 +54,10 @@ Index("uq_users_nickname_lower", func.lower(User.nickname), unique=True)
 
 
 class UserConsent(Base):
-    """Consent history (Issue #31, migration 018). Sign-up writes AGREE rows only for
-    active items the user agreed to, in the same transaction as the account."""
+    """Consent history. Sign-up and onboarding store explicitly agreed items."""
     __tablename__ = "user_consents"
     __table_args__ = (
-        CheckConstraint("consent_type IN ('PRIVACY_COLLECTION_USE', 'AI_OVERSEAS_TRANSFER')",
+        CheckConstraint("consent_type IN ('PRIVACY_COLLECTION_USE', 'AI_OVERSEAS_TRANSFER', 'TERMS_OF_SERVICE')",
                         name="ck_user_consents_consent_type"),
         CheckConstraint("action IN ('AGREE', 'WITHDRAW')", name="ck_user_consents_action"),
         Index("ix_user_consents_user_type_recorded", "user_id", "consent_type", "recorded_at"),
@@ -163,8 +162,8 @@ WALKING_DURATION_CODES = ("UP_TO_30_MIN", "BETWEEN_30_AND_60_MIN", "OVER_60_MIN"
 
 class VolunteerOnboardingRoutine(Base):
     """Onboarding Step 3 walking routine (Issue #44, migration 026). A row means Step 3 is
-    complete. The region and time slot rows are saved in the same transaction; their counts
-    (1 to 3 regions, 1 to 4 slots) are checked by the server, not by the database."""
+    complete. The agreement versions identify retries of new submissions. Pre-existing
+    routines keep both versions NULL."""
     __tablename__ = "volunteer_onboarding_routines"
     __table_args__ = (
         CheckConstraint(_in("walking_duration_code", WALKING_DURATION_CODES), name="ck_onboarding_routine_duration"),
@@ -176,6 +175,8 @@ class VolunteerOnboardingRoutine(Base):
     comfortable_dog_size_code = Column(String(20), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
+    terms_document_version = Column(String(32), nullable=True)
+    privacy_document_version = Column(String(32), nullable=True)
 
 
 class VolunteerRoutineRegion(Base):

@@ -367,6 +367,21 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "027_onboarding_agreements.sql",
+      "sha256": "61938ded8fdfa86e818a82c7053e754d3027141ec946f9096fcc80e02d16573f",
+      "requires": [
+        "018_user_consents.sql",
+        "026_onboarding_walking_routine.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [
