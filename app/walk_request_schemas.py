@@ -258,7 +258,7 @@ class VolunteerProfileResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     user_id: int
-    level: int = Field(default=1, description="하위 호환용 기존 값. 자동 승급하거나 산책 신청·승인·시작 자격 판단에 사용하지 않습니다.")
+    level: int = Field(default=1, description="서버에 저장된 봉사자 레벨. 산책 신청, 승인, 시작 자격은 기존 정책을 따릅니다.")
     total_walk_count: int = 0
     total_distance_m: Decimal = Decimal("0")
     total_duration_seconds: int = Field(default=0, description="COMPLETED 산책의 전체 경과 시간(duration_seconds) 합계. 이동 시간 합계가 아닙니다.")

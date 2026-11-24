@@ -5,7 +5,8 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import Shelter, User, UserRole, Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest, WalkReview, WalkReviewTag
-from app.walk_models import WalkPrivateMemo
+from app.volunteer_level_service import level_evaluation_for_summary
+from app.walk_models import VolunteerLevelEvaluation, WalkPrivateMemo
 from app.walk_record_schemas import WalkIncidentResponse, WalkMarkerResponse
 from app.walk_review_schemas import (
     SummaryMetrics,
@@ -45,6 +46,7 @@ def get_walk_summary(db: Session, walk_id: int, actor: User) -> WalkSummaryRespo
             joinedload(Walk.walk_request).joinedload(WalkRequest.shelter),
             joinedload(Walk.review).joinedload(WalkReview.tags),
             joinedload(Walk.handover),
+            joinedload(Walk.level_evaluation).joinedload(VolunteerLevelEvaluation.event),
         )
         .filter(Walk.id == walk_id)
         .first()
@@ -132,11 +134,14 @@ def get_walk_summary(db: Session, walk_id: int, actor: User) -> WalkSummaryRespo
         started_at=walk.started_at,
         ended_at=walk.ended_at,
     )
+    evaluation_status, level_event = level_evaluation_for_summary(walk, actor)
 
     return WalkSummaryResponse(
         walk=walk_info,
         handover_status=walk.handover_status,
         private_memo=walk.private_memo if actor.role == UserRole.USER else None,
+        level_evaluation_status=evaluation_status,
+        level_up_event=level_event,
         summary=summary_metrics,
         points=points,
         points_total=points_total,

@@ -1,10 +1,11 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from app.walk_record_schemas import HandoverStatus, UTCResponse, WalkIncidentResponse, WalkMarkerResponse
+from app.walk_request_schemas import WalkRequestResponse
 
 VALID_CONDITION_TAGS = {"ENERGETIC", "CALM", "EXCITED", "TENSE", "TIRED", "SCARED", "UNWELL"}
 
@@ -80,10 +81,25 @@ class SummaryPoint(BaseModel):
     longitude: Decimal
 
 
+class WalkLevelUpEvent(UTCResponse):
+    event_id: int = Field(validation_alias="id")
+    before_level: int
+    after_level: int
+    policy_version: str
+    earned_at: datetime
+
+    @field_validator("earned_at")
+    @classmethod
+    def utc_earned_at(cls, value):
+        return WalkRequestResponse.utc_datetime(value)
+
+
 class WalkSummaryResponse(BaseModel):
     walk: SummaryWalkInfo
     handover_status: HandoverStatus
     private_memo: WalkPrivateMemoResponse | None = None
+    level_evaluation_status: Literal["NOT_ELIGIBLE", "PENDING", "COMPLETED", "FAILED"]
+    level_up_event: WalkLevelUpEvent | None = None
     summary: SummaryMetrics
     points: list[SummaryPoint]
     points_total: int
