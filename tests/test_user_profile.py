@@ -13,6 +13,7 @@ from test_onboarding_basic_info import OTHER_E164, OTHER_PHONE, PHONE, START, St
 from app.account_status import change_to_age_review
 from app.models import PhoneVerification, User, VolunteerOnboardingBasic
 from app.routers import profile
+import app.profile_service as profile_service
 
 PROFILE = "/users/me/profile"
 PROFILE_SEND, PROFILE_CONFIRM = PROFILE + "/phone-verifications", PROFILE + "/phone-verifications/confirm"
@@ -56,6 +57,20 @@ class ProfileTestCase(Step1TestCase):
         confirmed = self.profile_confirm(verification_id, self.last_code(), user_id)
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
         return verification_id
+
+    def first_check_misses(self, name):
+        """The first call of profile_service.<name> answers False, as if another request committed
+        the same value right after the check: the save then meets the UNIQUE index."""
+        original, calls = getattr(profile_service, name), []
+
+        def miss(*args):
+            calls.append(args)
+            return False if len(calls) == 1 else original(*args)
+
+        patcher = patch.object(profile_service, name, miss)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
 
     def basic(self, user_id=1):
         with self.Session() as db:
@@ -167,6 +182,14 @@ class ProfilePatchTests(ProfileTestCase):
         self.assertEqual(self.patch_profile({"expected_profile_version": 0, "nickname": "봉사자1"}).json()["data"]
                          ["changed_fields"], [])  # one's own nickname is not a conflict
 
+    def test_a_lost_nickname_race_on_the_unique_index_is_a_nickname_conflict(self):
+        self.assertEqual(self.patch_profile({"expected_profile_version": 0, "nickname": "walker"}, 2).status_code, 200)
+        calls = self.first_check_misses("nickname_used_by_other")
+        self.assert_error(self.patch_profile({"expected_profile_version": 0, "nickname": "Walker"}),
+                          409, "NICKNAME_ALREADY_EXISTS")
+        self.assertEqual(len(calls), 2)  # the miss, then the mapping after the IntegrityError
+        self.assertEqual((self.user().nickname, self.version()), ("봉사자1", 0))
+
 
 class ProfilePhoneChangeTests(ProfileTestCase):
     def test_send_confirm_and_patch_change_the_phone_atomically(self):
@@ -193,15 +216,12 @@ class ProfilePhoneChangeTests(ProfileTestCase):
         self.complete_step1(phone=THIRD_PHONE, user_id=2)
         other_account_proof = self.profile_verified(phone="010-2222-3333", user_id=2)
         profile_proof = self.profile_verified()
-        cases = (
-            ({}, 409, "PHONE_VERIFICATION_REQUIRED"),
-            ({"phone_verification_id": other_account_proof}, 404, "VERIFICATION_NOT_FOUND"),
-            ({"phone_verification_id": str(uuid.uuid4())}, 404, "VERIFICATION_NOT_FOUND"),
-        )
-        for extra, status, code in cases:
+        # Issue #103 §6: no proof, another account's proof or an unknown id are all 409, never 404.
+        for extra in ({}, {"phone_verification_id": other_account_proof}, {"phone_verification_id": str(uuid.uuid4())}):
             with self.subTest(extra=extra):
                 body = {"expected_profile_version": 1, "nickname": "저장안됨", "phone_number": OTHER_PHONE, **extra}
-                self.assert_error(self.patch_profile(body), status, code)
+                self.assert_error(self.patch_profile(body), 409, "PHONE_VERIFICATION_REQUIRED")
+        self.assertIsNone(self.proof(other_account_proof).consumed_at)
         different_number = {"expected_profile_version": 1, "nickname": "저장안됨", "phone_number": "010-4444-7777",
                             "phone_verification_id": profile_proof}
         self.assert_error(self.patch_profile(different_number), 409, "PHONE_VERIFICATION_REQUIRED")
@@ -234,6 +254,10 @@ class ProfilePhoneChangeTests(ProfileTestCase):
             proof_id = str(db.query(PhoneVerification.id).filter_by(user_id=2).scalar())
         self.assert_error(self.save(proof_id, user_id=2), 409, "PHONE_VERIFICATION_REQUIRED")
         self.assertIsNone(self.basic(2))
+        # A profile proof for the stored number cannot replay a completed Step 1 either.
+        own_number_proof = self.profile_verified(PHONE)
+        self.assert_error(self.save(own_number_proof), 409, "BASIC_INFO_ALREADY_COMPLETED")
+        self.assertEqual(self.version(), 1)
 
     def test_a_newer_request_of_either_purpose_replaces_the_proof(self):
         self.complete_step1()
@@ -258,6 +282,21 @@ class ProfilePhoneChangeTests(ProfileTestCase):
         self.complete_step1(phone=OTHER_PHONE, user_id=2)
         self.clock.advance(seconds=61)
         self.assert_error(self.profile_send(OTHER_PHONE), 409, "PHONE_ALREADY_REGISTERED")
+
+    def test_a_lost_phone_race_on_the_unique_index_keeps_the_proof_unused(self):
+        self.complete_step1(user_id=1)
+        self.complete_step1(phone=THIRD_PHONE, user_id=2)
+        proof1 = self.profile_verified(OTHER_PHONE, user_id=1)
+        proof2 = self.profile_verified(OTHER_PHONE, user_id=2)
+        body = lambda proof, nickname: {"expected_profile_version": 1, "nickname": nickname,
+                                        "phone_number": OTHER_PHONE, "phone_verification_id": proof}
+        self.assertEqual(self.patch_profile(body(proof2, "먼저등록"), 2).status_code, 200)
+        calls = self.first_check_misses("registered_to_other_user")
+        self.assert_error(self.patch_profile(body(proof1, "번호경합"), 1), 409, "PHONE_ALREADY_REGISTERED")
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(self.proof(proof1).consumed_at)
+        self.assertEqual((self.user().nickname, self.version(), self.basic().phone_e164),
+                         ("봉사자1", 1, "+821012345678"))
 
     def test_a_failed_commit_leaves_the_proof_unconsumed(self):
         self.complete_step1()
@@ -300,3 +339,7 @@ class ProfilePhoneChangeTests(ProfileTestCase):
         for secret in ("박서연", "김민지", "9876", "5432", "+8210", code, "test-only-hmac-key"):
             self.assertNotIn(secret, text)
         self.assertRegex(text, r"profile updated user_id=1 fields=full_name,phone_number")
+        audit = [record for record in records if getattr(record, "audit_event", None) == "PROFILE_UPDATED"]
+        self.assertEqual(len(audit), 1)
+        self.assertEqual((audit[0].audit_user_id, audit[0].audit_fields), (1, ["full_name", "phone_number"]))
+        self.assertEqual(audit[0].audit_at, (START + timedelta(seconds=61)).isoformat())

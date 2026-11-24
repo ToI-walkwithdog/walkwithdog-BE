@@ -117,12 +117,12 @@ def nickname_used_by_other(db: Session, nickname: str, user_id: int) -> bool:
 
 
 def usable_profile_proof(db: Session, user_id: int, verification_id, phone_e164: str, now: datetime):
-    """The locked proof for this phone change, or a 404/409. Never another purpose or account."""
+    """The locked proof for this phone change, or 409 PHONE_VERIFICATION_REQUIRED. A missing proof,
+    another account's or another purpose's proof all get that same answer (Issue #103 §6)."""
     verification = (db.query(PhoneVerification).filter(PhoneVerification.id == verification_id)
                     .populate_existing().with_for_update().one_or_none())
-    if verification is None or verification.user_id != user_id:
-        raise ContractError(404, "VERIFICATION_NOT_FOUND", "인증 요청을 찾을 수 없습니다.")
-    if (verification.purpose != PURPOSE_PROFILE or verification.phone_e164 != phone_e164
+    if (verification is None or verification.user_id != user_id
+            or verification.purpose != PURPOSE_PROFILE or verification.phone_e164 != phone_e164
             or verification.verified_at is None or verification.consumed_at is not None
             or as_utc(now) >= as_utc(verification.verified_valid_until)
             or not is_latest_for_user(db, verification)):
@@ -178,8 +178,11 @@ def update_profile(db: Session, user_id: int, body, now: datetime) -> dict:
         db.flush()
         result = {**profile_data(user, basic), "changed_fields": changed}
         db.commit()
-        # Audit without personal values: who, when and which fields.
-        logger.info("profile updated user_id=%s fields=%s at=%s", user_id, ",".join(changed), as_utc(now).isoformat())
+        # Audit without personal values: who, when and which fields (also as structured fields).
+        at = as_utc(now).isoformat()
+        logger.info("profile updated user_id=%s fields=%s at=%s", user_id, ",".join(changed), at,
+                    extra={"audit_event": "PROFILE_UPDATED", "audit_user_id": user_id,
+                           "audit_fields": list(changed), "audit_at": at})
         return result
     except IntegrityError:
         db.rollback()

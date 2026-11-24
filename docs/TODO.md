@@ -121,3 +121,7 @@
 - [ ] FE에 인증번호 입력 UI가 없다. 17단계 연동에서 프로필 번호 변경의 발송, 인증번호 입력과 확인, `PATCH /users/me/profile` 저장 흐름을 추가한다. 확인만으로는 번호가 바뀌지 않는다.
 - [ ] FE 내 정보 수정은 조회한 `profile_version`을 `expected_profile_version`으로 보내고, 409 `PROFILE_VERSION_MISMATCH`이면 다시 조회해 사용자에게 확인받는다.
 - [ ] `users.phone`은 인증되지 않은 이전 필드로 읽거나 쓰지 않는다. 사용처를 확인한 뒤 정리 여부를 별도 Issue로 결정한다.
+- [ ] 배포 전 필수(개인정보): 온보딩과 프로필 인증 발송이 재발송 간격과 일일 한도보다 먼저 409 `PHONE_ALREADY_REGISTERED`를 반환해 번호 등록 여부를 횟수 제한 없이 확인할 수 있다(온보딩 발송의 기존 동작). 19단계 배포 전에 별도 Issue로 응답 순서나 시도 제한을 정한다.
+- [ ] 개발 DB에 035를 적용할 때 `phone_verifications` 크기를 확인한다. 크면 CHECK를 `NOT VALID` 추가 후 `VALIDATE`로 나눈다(16단계).
+- [ ] 20단계: `app/account_status.py`의 잠금 설명(Step 1 저장의 FOR SHARE)을 FOR UPDATE로 고친다.
+- [ ] 20단계: 같은 사용자의 Step 1 저장이나 프로필 PATCH와 겹칠 때 NOWAIT 잠금(보호소 코드 검증, 예약)이 즉시 실패할 수 있는지 18단계 검증에서 확인하고 필요하면 재시도 안내를 정한다.

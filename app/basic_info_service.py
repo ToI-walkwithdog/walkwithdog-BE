@@ -9,8 +9,9 @@ AGE_REVIEW_REQUIRED in its own committed transaction, then 422; over 120 is 422 
    -> insert volunteer_onboarding_basics, set phone_verifications.consumed_at and add 1 to
       users.profile_version (#103; a replay never adds again)
    -> commit. Any failure rolls all of it back.
-The users row is locked FOR UPDATE (not FOR SHARE) because the save now writes that row;
-the order users -> volunteer_onboarding_basics -> phone_verifications matches the profile PATCH.
+The users row is locked FOR UPDATE (not FOR SHARE) because the save now writes that row.
+Taking it first, as the profile PATCH does, serializes the two for one account; Step 1 then
+locks only the verification row (volunteer_onboarding_basics is read, not locked).
 An existing Step 1 is checked before the age rule so a retried or mismatched request
 from a completed account can never change its status.
 
@@ -108,6 +109,7 @@ def _replay(db: Session, user_id: int, basic: VolunteerOnboardingBasic, full_nam
     """Completed Step 1: the same request again gets the first result, anything else 409."""
     verification = db.get(PhoneVerification, verification_id) if verification_id else None
     same_phone = (verification is not None and verification.user_id == user_id
+                  and verification.purpose == PURPOSE_ONBOARDING  # never a profile proof (#103)
                   and verification.phone_e164 == basic.phone_e164)
     if basic.full_name == full_name and basic.birth_date == birth and same_phone:
         return saved_response(user_id, basic, now, next_step(db, user_id))

@@ -60,10 +60,10 @@ def get_profile(user: User = Depends(get_profile_user), db: Session = Depends(ge
 
 
 @router.patch("", responses={**COMMON_ERRORS,
-                             404: {"model": ContractErrorResponse, "description": "VERIFICATION_NOT_FOUND"},
                              409: {"model": ContractErrorResponse,
                                    "description": "PROFILE_VERSION_MISMATCH, NICKNAME_ALREADY_EXISTS, "
-                                                  "PHONE_VERIFICATION_REQUIRED, PHONE_ALREADY_REGISTERED, "
+                                                  "PHONE_VERIFICATION_REQUIRED(증명 없음, 타인, 다른 목적, 다른 번호, "
+                                                  "사용됨, 15분 경과, 최신 아님), PHONE_ALREADY_REGISTERED, "
                                                   "PROFILE_BASIC_INFO_REQUIRED"},
                              422: {"model": ContractErrorResponse,
                                    "description": "INVALID_PROFILE_PAYLOAD, NICKNAME_REQUIRED, INVALID_NICKNAME_LENGTH, "
