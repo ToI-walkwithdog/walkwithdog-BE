@@ -197,6 +197,15 @@ class Walk(Timestamps, Base):
     end_reason = Column(String(20), nullable=True)
     planned_duration_minutes = Column(Integer, nullable=True)
     expected_end_at = Column(DateTime(timezone=True), nullable=True)
+    handover_required = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+
+    @property
+    def handover_status(self) -> str:
+        if not self.handover_required:
+            return "NOT_REQUIRED"
+        if self.handover is None:
+            return "NOT_CONFIRMED"
+        return self.handover.handover_status
 
     @property
     def is_overdue(self) -> bool:
@@ -216,6 +225,45 @@ class Walk(Timestamps, Base):
     review = relationship("WalkReview", back_populates="walk", uselist=False, passive_deletes="all")
     volunteer_review = relationship("ShelterVolunteerReview", back_populates="walk", uselist=False, passive_deletes="all")
     incidents = relationship("WalkIncident", back_populates="walk", passive_deletes="all")
+    handover = relationship("WalkHandover", back_populates="walk", uselist=False, passive_deletes="all")
+
+
+class WalkHandover(Timestamps, Base):
+    """A volunteer's statement attached to a walk; the 032 schema is separate from the 007 registry."""
+
+    __tablename__ = "walk_handovers"
+    __table_args__ = (
+        UniqueConstraint("walk_id", name="uq_walk_handovers_walk"),
+        CheckConstraint(
+            "(handover_result = 'COMPLETE' AND dog_returned AND equipment_returned AND condition_shared "
+            "AND issue_description IS NULL AND self_confirmed_at IS NOT NULL AND issue_reported_at IS NULL) OR "
+            "(handover_result = 'ISSUE' AND NOT (dog_returned AND equipment_returned AND condition_shared) "
+            "AND issue_description IS NOT NULL AND trim(issue_description) <> '' AND length(issue_description) <= 500 "
+            "AND self_confirmed_at IS NULL AND issue_reported_at IS NOT NULL)",
+            name="ck_walk_handover_result",
+        ),
+        CheckConstraint("level_evaluation_pending_at IS NULL OR handover_result = 'COMPLETE'",
+                        name="ck_walk_handover_pending"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    walk_id = Column(Integer, reference("walks"), nullable=False)
+    volunteer_user_id = Column(Integer, reference("users"), nullable=False)
+    handover_result = Column(String(8), nullable=False)
+    dog_returned = Column(Boolean, nullable=False)
+    equipment_returned = Column(Boolean, nullable=False)
+    condition_shared = Column(Boolean, nullable=False)
+    acknowledge_auto_timeout = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    issue_description = Column(String(500), nullable=True)
+    self_confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    issue_reported_at = Column(DateTime(timezone=True), nullable=True)
+    level_evaluation_pending_at = Column(DateTime(timezone=True), nullable=True)
+
+    walk = relationship("Walk", back_populates="handover")
+
+    @property
+    def handover_status(self) -> str:
+        return "SELF_REPORTED" if self.handover_result == "COMPLETE" else "ISSUE_REPORTED"
 
 
 class WalkPoint(Base):

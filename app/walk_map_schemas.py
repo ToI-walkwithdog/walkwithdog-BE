@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.schemas import DogCardResponse
-from app.walk_record_schemas import UTCResponse, WalkIncidentResponse, WalkMarkerResponse, WalkResponse
+from app.walk_record_schemas import HandoverStatus, UTCResponse, WalkIncidentResponse, WalkMarkerResponse, WalkResponse
 from app.walk_request_schemas import VolunteerProfileResponse
 from app.shelter_volunteer_review_schemas import ShelterVolunteerReviewResponse
 from app.walk_review_schemas import WalkReviewResponse
@@ -101,6 +101,14 @@ class UserWalksResponse(BaseModel):
     limit: int
     offset: int
     walks: list[UserWalkItem]
+
+
+class WalkHistoryItem(UserWalkItem):
+    handover_status: HandoverStatus
+
+
+class WalkHistoryResponse(UserWalksResponse):
+    walks: list[WalkHistoryItem]
 
 
 class ShelterWalkDog(BaseModel):

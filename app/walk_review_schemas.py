@@ -4,7 +4,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.walk_record_schemas import UTCResponse, WalkIncidentResponse, WalkMarkerResponse
+from app.walk_record_schemas import HandoverStatus, UTCResponse, WalkIncidentResponse, WalkMarkerResponse
 
 VALID_CONDITION_TAGS = {"ENERGETIC", "CALM", "EXCITED", "TENSE", "TIRED", "SCARED", "UNWELL"}
 
@@ -57,6 +57,7 @@ class SummaryPoint(BaseModel):
 
 class WalkSummaryResponse(BaseModel):
     walk: SummaryWalkInfo
+    handover_status: HandoverStatus
     summary: SummaryMetrics
     points: list[SummaryPoint]
     points_total: int

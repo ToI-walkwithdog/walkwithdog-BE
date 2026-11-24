@@ -16,7 +16,7 @@ from sqlalchemy.orm import joinedload
 
 from app.dependencies import require_shelter_access
 from app.models import Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest
-from app.walk_models import DogWalkSetting
+from app.walk_models import DogWalkSetting, WalkHandover
 from app.volunteer_stats import refresh_volunteer_profile
 from app.gps_geometry import EARTH_RADIUS_M, distance_m
 from app.gps_motion_analysis import analyze_motion
@@ -145,6 +145,7 @@ def start_walk(db, actor, payload):
         started_at=now,
         planned_duration_minutes=planned_duration_minutes,
         expected_end_at=expected_end_at,
+        handover_required=True,
     )
     db.add(walk)
     db.flush()
@@ -561,6 +562,56 @@ def end_walk(db, walk_id, actor, payload):
     return finalize_walk_statistics(db, walk, now, payload.status, end_reason, request.user_id)
 
 
+def lock_handover_walk(db, walk_id, actor):
+    require_walk_owner(db, walk_id, actor)
+    # Wait for an in-flight end or first submission; lock only the Walk row.
+    walk = db.query(Walk).filter_by(id=walk_id).populate_existing().with_for_update().first()
+    if walk is None:
+        raise HTTPException(404, "Walk not found")
+    if walk.walk_request.user_id != actor.id:
+        raise HTTPException(403, "본인 신청만 처리할 수 있습니다.")
+    return walk
+
+
+def save_handover(db, walk_id, actor, payload):
+    walk = lock_handover_walk(db, walk_id, actor)
+    completed = walk.status == "COMPLETED" and walk.end_reason in ("USER", "AUTO_TIMEOUT")
+    if not walk.handover_required or not (completed or walk.status == "INTERRUPTED"):
+        raise HTTPException(409, "인계를 접수할 수 없는 산책입니다.")
+
+    complete = payload.handover_result == "COMPLETE"
+    if complete and not completed:
+        raise HTTPException(409, "중단된 산책은 인계 문제만 접수할 수 있습니다.")
+    if complete and walk.end_reason == "AUTO_TIMEOUT" and not payload.acknowledge_auto_timeout:
+        raise HTTPException(422, "정상 인계를 접수하려면 자동 종료 사실을 확인해야 합니다.")
+
+    fields = payload.model_dump()
+    handovers = db.query(WalkHandover).filter_by(walk_id=walk.id)
+    existing = handovers.one_or_none()
+    if existing is None:
+        now = utc_now()
+        handover = WalkHandover(
+            walk_id=walk.id, volunteer_user_id=actor.id, **fields,
+            self_confirmed_at=now if complete else None,
+            issue_reported_at=None if complete else now,
+            level_evaluation_pending_at=now if complete and walk.end_reason == "USER" else None,
+        )
+        try:
+            flush_new_row(db, handover)
+        except IntegrityError as exc:
+            if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) != "uq_walk_handovers_walk":
+                raise
+            existing = handovers.one_or_none()
+            if existing is None:
+                raise
+        else:
+            return handover, True
+
+    if any(getattr(existing, name) != value for name, value in fields.items()):
+        raise HTTPException(409, "이 산책에 다른 인계 내용이 이미 접수되었습니다.")
+    return existing, False
+
+
 def close_stale_walks(db, now=None, user_id=None):
     """Closes all expired IN_PROGRESS walks idempotently."""
     if now is None:
@@ -618,14 +669,15 @@ def get_active_walk(db, actor):
 
 
 def walk_detail(db, walk_id, actor, limit, offset):
-    walk = db.query(Walk).options(joinedload(Walk.walk_request)).filter_by(id=walk_id).first()
+    walk = db.query(Walk).options(joinedload(Walk.walk_request), joinedload(Walk.handover)).filter_by(id=walk_id).first()
     if walk is None:
         raise HTTPException(404, "Walk not found")
     request = walk.walk_request
     if actor.id != request.user_id:
         require_shelter_access(actor, request.shelter_id)
     result = {"walk": walk, "user_id": request.user_id, "dog_id": request.dog_id,
-              "shelter_id": request.shelter_id, "limit": limit, "offset": offset}
+              "shelter_id": request.shelter_id, "limit": limit, "offset": offset,
+              "handover_status": walk.handover_status, "handover": walk.handover}
     for name, model, ordering in (
         ("points", WalkPoint, (WalkPoint.sequence_no,)),
         ("markers", WalkMarker, (WalkMarker.recorded_at, WalkMarker.id)),

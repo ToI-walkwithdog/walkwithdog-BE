@@ -75,3 +75,12 @@
 - `POST /walks/{walk_id}/markers`: 선택 필드 `client_marker_id`(UUID)와 `position_recorded_at`. 같은 키와 같은 본문은 200과 기존 마커(종료나 상한 뒤에도), 다른 본문은 409다. 좌표는 정확도 50m 이하이고 관측이 선택 시각 이전 30초 이내면 `CURRENT`(`position_recorded_at`이 없는 기존 호출은 정확도가 없거나 50m 이하이면 `CURRENT`), 아니면 같은 산책의 2분 이내 저장 좌표를 `LAST_KNOWN`으로 쓴다. 둘 다 없으면 409 `detail.code=MARKER_LOCATION_UNAVAILABLE`이다. 키 없는 기존 호출도 동작한다.
 - `POST /walks/{walk_id}/incidents`: `OTHER`는 trim 후 1~1,000자가 필수이고 모든 설명은 1,000자 이하다(422). 좌표를 생략하면 사건 시각 이전 30초 이내의 저장 좌표만 쓰고, 없으면 `null`로 접수한다. GPS가 없어도 신고는 막지 않는다. 좌표를 생략한 같은 `client_report_id` 재시도는 이후 GPS가 바뀌어도 처음 접수 결과를 200으로 돌려준다.
 - `031_walk_marker_idempotency.sql`은 030 다음에 적용하며 추가만 한다. 재실행해도 바뀌지 않는다. 개발 DB 적용과 FE 연동은 별도 승인으로 진행한다.
+
+## 산책 종료 후 보호소 인계 (#93)
+
+- 종료 결과를 받은 뒤 같은 `walk_id`로 `POST /walks/{walk_id}/handover`를 호출한다. 본인만 접수할 수 있다. `handover_result`와 JSON 불리언 체크 세 개(`dog_returned`, `equipment_returned`, `condition_shared`)가 필수다. `COMPLETE`는 모두 참이고 설명이 비어야 하며, `ISSUE`는 하나 이상 거짓이고 공백 제거 후 1~500자의 `issue_description`이 필요하다.
+- `COMPLETED/USER`는 두 결과 모두 허용한다. `COMPLETED/AUTO_TIMEOUT`의 정상 접수에는 `acknowledge_auto_timeout=true`가 필요하며 누락 또는 거짓은 422다. `INTERRUPTED`는 문제만 접수한다. 진행 중, 취소, 도입 전 산책과 다른 내용으로 하는 재제출은 409다.
+- 최초 접수는 201, 정규화한 동일 요청은 200과 기존 응답을 돌려준다. 정상은 `SELF_REPORTED`와 `self_confirmed_at`, 문제는 `ISSUE_REPORTED`와 `issue_reported_at`을 제공한다. 두 상태는 봉사자의 진술이며 보호소 직원 수락을 뜻하지 않는다.
+- 응답을 받지 못하면 동일 산책 상세에서 `handover_status`와 `handover`를 확인한다. `NOT_CONFIRMED`면 인계 대상 미접수이고 `NOT_REQUIRED`면 도입 전 산책이다. 산책 ID를 잃었으면 `GET /walks/history?handover_status=NOT_CONFIRMED`에서 본인 후보를 조회한다. 본인 요약에는 인계 상태를 추가했다.
+- 산책 종료와 확정 통계는 먼저 커밋한다. 새 정상 사용자 종료 산책의 자가 확인 접수 시 승급 평가 대기 시각은 인계 행과 함께 저장한다. 승급 평가와 레벨 변경은 후속 단계다.
+- `032_walk_handovers.sql`은 031 다음에 적용하며 기존 산책의 인계 대상값은 `false`다. 기능 적용 후 시작한 산책부터 대상값을 `true`로 저장한다. 개발 DB 적용과 FE 연동은 별도 작업이다.

@@ -42,6 +42,7 @@ def get_walk_summary(db: Session, walk_id: int, actor: User) -> WalkSummaryRespo
         .options(
             joinedload(Walk.walk_request).joinedload(WalkRequest.shelter),
             joinedload(Walk.review).joinedload(WalkReview.tags),
+            joinedload(Walk.handover),
         )
         .filter(Walk.id == walk_id)
         .first()
@@ -132,6 +133,7 @@ def get_walk_summary(db: Session, walk_id: int, actor: User) -> WalkSummaryRespo
 
     return WalkSummaryResponse(
         walk=walk_info,
+        handover_status=walk.handover_status,
         summary=summary_metrics,
         points=points,
         points_total=points_total,
