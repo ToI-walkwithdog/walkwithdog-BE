@@ -61,9 +61,14 @@ def compute_walk_overdue(walk, now=None) -> tuple[bool, int]:
     return True, max(0, int(overdue_seconds // 60))
 
 
-def resolve_planned_duration_minutes(db, request) -> int:
-    """강아지 산책 설정의 권장 산책 시간(분)을 우선 사용하고, 없으면 예약 소요시간(분)을 쓴다."""
+def resolve_planned_duration_minutes(db, request, date_slot=None) -> int:
+    """A dated walk uses the scheduled duration and any explicit maximum."""
     setting = db.query(DogWalkSetting).filter(DogWalkSetting.dog_id == request.dog_id).first()
+    if date_slot is not None:
+        minutes = date_slot.duration_minutes
+        if setting is not None and setting.max_walk_minutes is not None:
+            minutes = min(minutes, setting.max_walk_minutes)
+        return minutes
     if setting is not None and setting.recommended_duration_minutes is not None:
         return setting.recommended_duration_minutes
     fallback = int((as_utc(request.requested_end_at) - as_utc(request.requested_start_at)).total_seconds() // 60)
@@ -104,14 +109,14 @@ def start_walk(db, actor, payload):
     if not as_utc(request.requested_start_at) <= now < as_utc(request.requested_end_at):
         raise HTTPException(409, "승인된 예약 시간 안에서만 산책을 시작할 수 있습니다.")
     locked_profile(db, request.user_id)
-    validate_linked_eligibility(db, request, request.dog, request.user, require_future=False)
+    date_slot = validate_linked_eligibility(db, request, request.dog, request.user, require_future=False)
     active = db.query(Walk.id).join(WalkRequest).filter(
         Walk.status == "IN_PROGRESS",
         or_(WalkRequest.dog_id == request.dog_id, WalkRequest.user_id == request.user_id),
     ).first()
     if active:
         raise HTTPException(409, "강아지 또는 봉사자가 이미 산책 중입니다.")
-    planned_duration_minutes = resolve_planned_duration_minutes(db, request)
+    planned_duration_minutes = resolve_planned_duration_minutes(db, request, date_slot)
     expected_end_at = now + timedelta(minutes=planned_duration_minutes)
     walk = Walk(
         walk_request_id=request.id,

@@ -80,8 +80,10 @@ class BookingRoute(APIRoute):
                 try:
                     body = await request.json()
                 except (ValueError, RecursionError):
-                    body = None
-                is_date_booking |= isinstance(body, dict) and "date_slot_id" in body
+                    pass
+                else:
+                    if isinstance(body, dict):
+                        is_date_booking = "date_slot_id" in body
             request.state.date_booking = is_date_booking
             if not is_date_booking:
                 return await handler(request)
@@ -161,7 +163,16 @@ def persist_date_request(db, actor, payload, header):
 booking_router = APIRouter(route_class=BookingRoute)
 
 
-@booking_router.post("/walk-requests", response_model=WalkRequestResponse | DateWalkRequestResponse, status_code=201)
+@booking_router.post("/walk-requests", response_model=WalkRequestResponse | DateWalkRequestResponse, status_code=201,
+    responses={
+        401: {"description": "인증 실패. 날짜 신청은 AUTHENTICATION_REQUIRED, INVALID_ACCESS_TOKEN 또는 SESSION_EXPIRED."},
+        403: {"description": "역할, 계정 상태 또는 온보딩 제한."},
+        404: {"description": "강아지 없음 또는 WALK_DOG_NOT_AVAILABLE."},
+        409: {"description": "날짜 신청은 WALK_SLOT_CHANGED, WALK_SLOT_UNAVAILABLE, WALK_REQUEST_RETRYABLE, "
+                             "WALK_REQUEST_CONFLICT 또는 IDEMPOTENCY_KEY_REUSED."},
+        422: {"description": "기존 요청의 FastAPI 입력 오류 또는 날짜 신청의 INVALID_WALK_REQUEST."},
+        500: {"description": "서버 오류 또는 INTERNAL_SERVER_ERROR."},
+    })
 def apply_for_walk(payload: WalkRequestCreate, request: Request, actor: User = Depends(booking_actor),
                    db: Session = Depends(get_db), request_key: str | None = Header(None, alias="Idempotency-Key")):
     if request.state.date_booking:

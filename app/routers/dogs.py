@@ -6,11 +6,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from app.account_status import ensure_active
-from app.api_contract import ContractError, ContractRoute, ok
+from app.api_contract import ContractError, ContractErrorResponse, ContractRoute, ok
 from app.auth import get_contract_user
 from app.dependencies import require_shelter, require_shelter_access
 from app.models import DogWalkDateSlot, User, UserRole
@@ -22,8 +22,8 @@ from app.walk_date_slots import (availability_detail, cards_for_regions, date_sl
 from app.database import SessionLocal
 from app.models import Dog, DogWalkSetting, Shelter
 from app.dog_walk_settings import apply_walk_settings, dog_list_query
-from app.walk_schemas import (DateSlotInput, DateSlotPatch, DateSlotResponse, DogSizeCode, WalkSettingsPatch,
-                              WalkSettingsResponse)
+from app.walk_schemas import (DateSlotInput, DateSlotPatch, DateSlotResponse, DogAvailabilityDetailResponse,
+                              DogAvailabilityListResponse, DogSizeCode, WalkSettingsPatch, WalkSettingsResponse)
 from app.schemas import (
     DogCreate,
     DogResponse,
@@ -187,9 +187,19 @@ def availability_actor(actor: User = Depends(get_contract_user), db: Session = D
 
 
 availability_router = APIRouter(route_class=AvailabilityRoute, dependencies=[Depends(availability_actor)])
+availability_errors = {
+    401: {"model": ContractErrorResponse, "description": "AUTHENTICATION_REQUIRED, INVALID_ACCESS_TOKEN, SESSION_EXPIRED"},
+    403: {"model": ContractErrorResponse, "description": "WALK_LIST_NOT_ALLOWED, AGE_REVIEW_REQUIRED, ONBOARDING_NOT_COMPLETED"},
+    500: {"model": ContractErrorResponse, "description": "INTERNAL_SERVER_ERROR"},
+}
 
 
-@availability_router.get("/walk-availability")
+@availability_router.get("/walk-availability", response_model=DogAvailabilityListResponse, responses={
+    **availability_errors,
+    422: {"model": ContractErrorResponse, "description": (
+        "REGIONS_REQUIRED, REGION_LIMIT_EXCEEDED, INVALID_REGION_CODE, INVALID_DOG_SIZE, INVALID_PAGINATION")},
+    503: {"model": ContractErrorResponse, "description": "REGION_DATA_UNAVAILABLE"},
+})
 def list_walk_availability(region_codes: Annotated[list[str] | None, Query()] = None,
                            size_code: DogSizeCode | None = None, limit: int = Query(20, ge=1, le=100),
                            offset: int = Query(0, ge=0), db: Session = Depends(get_db)):
@@ -198,7 +208,11 @@ def list_walk_availability(region_codes: Annotated[list[str] | None, Query()] = 
               "산책 가능 목록을 조회했습니다.")
 
 
-@availability_router.get("/{dog_id}/walk-availability")
+@availability_router.get("/{dog_id}/walk-availability", response_model=DogAvailabilityDetailResponse, responses={
+    **availability_errors,
+    404: {"model": ContractErrorResponse, "description": "WALK_DOG_NOT_AVAILABLE"},
+    422: {"model": ContractErrorResponse, "description": "INVALID_DOG_ID"},
+})
 def get_walk_availability(dog_id: Annotated[int, Field(gt=0, le=2147483647)], db: Session = Depends(get_db)):
     return ok(availability_detail(db, dog_id, datetime.now(timezone.utc)), "산책 상세와 신청 가능 일정을 조회했습니다.")
 
@@ -330,6 +344,16 @@ def update_dog_traits(
 slot_batch = TypeAdapter(Annotated[list[DateSlotInput], Field(min_length=1)])
 
 
+class RegisteredDog(DogResponse):
+    age_months: int
+
+
+class DogRegistrationResponse(BaseModel):
+    dog: RegisteredDog
+    walk_settings: WalkSettingsResponse
+    date_slots: list[DateSlotResponse]
+
+
 def date_slot_error(exc):
     original = getattr(exc, "orig", None)
     if isinstance(exc, IntegrityError) or getattr(original, "pgcode", None) in ("40001", "40P01", "55P03"):
@@ -337,7 +361,7 @@ def date_slot_error(exc):
     return HTTPException(500, "산책 일정을 저장하지 못했습니다.")
 
 
-@router.post("/walk-registration", status_code=201)
+@router.post("/walk-registration", response_model=DogRegistrationResponse, status_code=201)
 def register_dog_with_date_slots(
     name: str = Form(..., min_length=1, max_length=50), breed: str | None = Form(None, max_length=50),
     age: int | None = Form(None, ge=0), age_months: int = Form(0, ge=0, le=11),
@@ -365,9 +389,9 @@ def register_dog_with_date_slots(
         db.flush()
         setting = apply_walk_settings(db, dog, settings)
         date_slots = validate_and_create_date_slots(db, dog.id, slot_inputs)
-        output = {"dog": {**DogResponse.model_validate(dog).model_dump(), "age_months": dog.age_months},
-                  "walk_settings": WalkSettingsResponse.model_validate(setting),
-                  "date_slots": [DateSlotResponse.model_validate(slot) for slot in date_slots]}
+        output = DogRegistrationResponse(dog=RegisteredDog.model_validate(dog),
+                                         walk_settings=WalkSettingsResponse.model_validate(setting),
+                                         date_slots=[DateSlotResponse.model_validate(slot) for slot in date_slots])
         db.commit()
         return output
     except Exception as exc:

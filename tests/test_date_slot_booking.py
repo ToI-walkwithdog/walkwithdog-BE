@@ -131,6 +131,11 @@ class DateSlotBookingTests(DateBookingFixture, unittest.TestCase):
         self.assertEqual(set(detail["shelter"]), {"id", "name", "region_code", "region_name"})
 
     def test_availability_reuses_onboarding_and_validates_parameters(self):
+        paths = self.app.openapi()["paths"]
+        for path in (LIST_URL, "/dogs/{dog_id}/walk-availability"):
+            responses = paths[path]["get"]["responses"]
+            self.assertIn("$ref", responses["200"]["content"]["application/json"]["schema"])
+            self.assertTrue({"401", "403", "422", "500"} <= set(responses))
         self.codes(self.client.get(LIST_URL), "AUTHENTICATION_REQUIRED", 401)
         self.codes(self.client.get(LIST_URL, headers=self.auth(3)), "WALK_LIST_NOT_ALLOWED", 403)
         self.codes(self.client.get(LIST_URL, headers=self.auth(1)), "REGIONS_REQUIRED", 422)
@@ -152,7 +157,8 @@ class DateSlotBookingTests(DateBookingFixture, unittest.TestCase):
 
     def test_date_slot_booking_approves_starts_and_ends_without_a_weekly_slot(self):
         path = "/dogs/1/walk-settings"
-        self.assertEqual(self.client.patch(path, json={"slots": []}, headers=self.auth(3)).status_code, 200)
+        settings = {"slots": [], "recommended_duration_minutes": 45, "max_walk_minutes": 20}
+        self.assertEqual(self.client.patch(path, json=settings, headers=self.auth(3)).status_code, 200)
         date_id = self.create_slot()
         reply = self.submit(date_id, uuid4())
         self.codes(reply, "WALK_REQUEST_CREATED", 201)
@@ -167,6 +173,8 @@ class DateSlotBookingTests(DateBookingFixture, unittest.TestCase):
         self.assertEqual(self.start(result["id"], user=2).status_code, 403)
         started = self.start(result["id"])
         self.assertEqual(started.status_code, 201, started.text)
+        self.assertEqual(started.json()["planned_duration_minutes"], 20)
+        self.assertEqual(started.json()["expected_end_at"], "2030-01-07T00:20:00Z")
         self.advance(60)
         self.assertEqual(self.end(started.json()["id"]).status_code, 200)
 
@@ -187,7 +195,11 @@ class DateSlotBookingTests(DateBookingFixture, unittest.TestCase):
         old = self.post()
         self.assertEqual(old.status_code, 201, old.text)
         self.assertNotIn("date_slot_id", old.json())
-        self.assertEqual(self.post(user=2).status_code, 201)
+        payload = {"dog_id": 1, "requested_start_at": START.isoformat(), "requested_end_at": END.isoformat()}
+        legacy_with_header = self.client.post("/walk-requests", json=payload,
+            headers={**self.auth(2), "Idempotency-Key": str(uuid4())})
+        self.assertEqual(legacy_with_header.status_code, 201, legacy_with_header.text)
+        self.assertNotIn("date_slot_id", legacy_with_header.json())
         earlier = self.create_slot()
         later = self.create_slot(slot("10:00", "11:00"))
         detail = self.client.get("/dogs/1/walk-availability", headers=self.auth()).json()["data"]

@@ -189,8 +189,8 @@ def validate_linked_eligibility(db, request, dog, volunteer, *, require_future=T
         return
     walkable_setting(db, dog, volunteer, request.shelter_id)
     try:
-        check_booking_slot(db, dog.id, request.date_slot_id, start, end, utc_now(),
-                           exclude_id=request.id, require_future=require_future)
+        return check_booking_slot(db, dog.id, request.date_slot_id, start, end, utc_now(),
+                                  exclude_id=request.id, require_future=require_future)
     except ContractError as exc:
         raise HTTPException(409, exc.message) from None
 

@@ -1,5 +1,5 @@
 """Walk-setting payloads: omitted PATCH fields differ from explicit nulls."""
-from datetime import date, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -53,6 +53,59 @@ class DateSlotPatch(BaseModel):
         if not self.model_fields_set or any(getattr(self, field) is None for field in self.model_fields_set):
             raise ValueError("수정할 날짜 일정 값을 입력하세요.")
         return self
+
+
+class AvailableDateSlot(BaseModel):
+    date_slot_id: int
+    starts_at: datetime
+    ends_at: datetime
+
+
+class AvailabilityShelter(BaseModel):
+    id: int
+    name: str
+    region_code: str | None
+    region_name: str | None
+
+
+class AvailableDog(BaseModel):
+    dog_id: int
+    name: str
+    image_url: str | None
+    size_code: DogSizeCode | None
+    difficulty_score: float | None
+    max_walk_minutes: int | None
+    shelter: AvailabilityShelter
+    date_slots: list[AvailableDateSlot]
+
+
+class AvailableDogPreview(AvailableDog):
+    has_more_date_slots: bool
+
+
+class AvailableDogDetail(AvailableDog):
+    description: str | None
+    precautions: str | None
+
+
+class DogAvailabilityPage(BaseModel):
+    items: list[AvailableDogPreview]
+    limit: int
+    offset: int
+    has_more: bool
+    next_offset: int | None
+
+
+class DogAvailabilityListResponse(BaseModel):
+    code: Literal["OK"]
+    data: DogAvailabilityPage
+    message: str
+
+
+class DogAvailabilityDetailResponse(BaseModel):
+    code: Literal["OK"]
+    data: AvailableDogDetail
+    message: str
 
 
 class WalkSlotInput(BaseModel):
