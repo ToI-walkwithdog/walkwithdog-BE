@@ -8,6 +8,7 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.dependencies import require_role, require_shelter, require_shelter_access
 from app.models import Shelter, User, UserRole, VolunteerProfile, WalkRequest
+from app.onboarding_common import require_onboarding_for_new_walk
 from app.walk_request_schemas import (
     RequestStatus, ReservationTab, VolunteerProfileResponse,
     WalkRequestAction, WalkRequestCreate, WalkRequestDetailResponse, WalkRequestResponse,
@@ -53,7 +54,11 @@ def persist_request(db, operation, actor):
 @router.post("/walk-requests", response_model=WalkRequestResponse, status_code=201)
 def apply_for_walk(payload: WalkRequestCreate, actor: User = Depends(require_volunteer),
                    db: Session = Depends(get_db)):
-    return persist_request(db, lambda: create_request(db, actor, payload), actor)
+    def operation():
+        require_onboarding_for_new_walk(db, actor)
+        return create_request(db, actor, payload)
+
+    return persist_request(db, operation, actor)
 
 
 @router.patch("/walk-requests/{request_id}", response_model=WalkRequestResponse)

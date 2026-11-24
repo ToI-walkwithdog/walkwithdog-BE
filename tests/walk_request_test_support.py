@@ -1,5 +1,5 @@
 """Shared synthetic fixtures for SQLite and disposable PostgreSQL request tests."""
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import os
 from unittest.mock import patch
 
@@ -7,8 +7,8 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.auth import UNUSABLE_PASSWORD, token_digest
     from app.database import Base, get_db
     from app.models import (
-        AuthSession, Dog, DogWalkSetting, DogWalkSlot, Shelter, User, UserRole,
-        VolunteerProfile, WalkRequest,
+        AuthSession, Dog, DogWalkSetting, DogWalkSlot, Shelter, User, UserPledgeAcknowledgement, UserRole,
+        VolunteerOnboardingBasic, VolunteerOnboardingExperience, VolunteerOnboardingRoutine, VolunteerProfile, WalkRequest,
     )
     from app.routers import dogs, shelters, walk_requests
 
@@ -19,10 +19,25 @@ from sqlalchemy.orm import sessionmaker
 NOW = datetime(2030, 1, 6, tzinfo=timezone.utc)  # Sunday; next Seoul Monday is Jan 7.
 START = datetime(2030, 1, 7, tzinfo=timezone.utc)  # Monday 09:00 Seoul.
 END = START + timedelta(hours=1)
+PLEDGE_VERSION = "walk-fixture-pledge-v1"
+
+
+def seed_completed_onboarding(db, user_id, *, pledge_version=PLEDGE_VERSION):
+    """Seed the stored completion records used by the real onboarding check."""
+    db.add_all([
+        UserPledgeAcknowledgement(user_id=user_id, pledge_version=pledge_version, acknowledged_at=NOW),
+        VolunteerOnboardingBasic(user_id=user_id, full_name="합성사용자", birth_date=date(2000, 1, 1),
+                                 phone_e164=f"+821000{user_id:06d}", phone_verified_at=NOW,
+                                 completed_at=NOW, updated_at=NOW),
+        VolunteerOnboardingExperience(user_id=user_id, has_experience=False, completed_at=NOW, updated_at=NOW),
+        VolunteerOnboardingRoutine(user_id=user_id, walking_duration_code="UP_TO_30_MIN",
+                                   comfortable_dog_size_code="SMALL", completed_at=NOW, updated_at=NOW),
+    ])
 
 
 class RequestFixture:
     def setup_api(self, engine):
+        self.enterContext(patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION}))
         self.engine = engine
         self.addCleanup(engine.dispose)
         Base.metadata.create_all(engine)
@@ -59,6 +74,8 @@ class RequestFixture:
             for identifier in range(1, 8):
                 db.add(AuthSession(token_hash=token_digest(f"req-{identifier}"), user_id=identifier,
                                    expires_at=datetime(2035, 1, 1, tzinfo=timezone.utc)))
+            for identifier in (1, 2, 6):
+                seed_completed_onboarding(db, identifier)
             db.add(VolunteerProfile(user_id=6, level=2, total_walk_count=3, unique_dog_count=2))
             for dog_id in (1, 2, 3, 4, 6, 7, 8, 9):
                 setting = DogWalkSetting(dog_id=dog_id, walkable=dog_id != 6,

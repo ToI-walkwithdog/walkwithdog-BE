@@ -51,6 +51,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from privacy_test_support import TEST_DOCUMENT_VERSION, TEST_TERMS_VERSION, onboarding_agreements, privacy, use_test_privacy_policy
+from walk_request_test_support import seed_completed_onboarding
 
 from scripts.prepare_demo_db import PreparationError, validate_local_engine
 
@@ -1287,6 +1288,8 @@ class SignupPostgresTests(unittest.TestCase):
 
     def test_walk_request_that_locked_first_commits_before_the_status_change(self):
         headers = self.start_walk_api()
+        with self.Session.begin() as db:
+            seed_completed_onboarding(db, 1, pledge_version=PLEDGE_VERSION)
         entered, release = self.hold("app.walk_request_service.lock_resources")  # after the share lock
         results = {}
         body = {"dog_id": 1, "requested_start_at": self.walk_start.isoformat(),
