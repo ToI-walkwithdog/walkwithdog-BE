@@ -9,12 +9,13 @@ afterwards, so the same test DB can be reused; no other schema is touched.
 """
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from pathlib import Path
 import re
 import re as regex
 import sys
-from threading import Barrier, Event, Thread
+from threading import Barrier, Event, Thread, local
 import time
 import unittest
 from unittest.mock import patch
@@ -1439,9 +1440,13 @@ class SignupPostgresTests(unittest.TestCase):
         workers = 4
         barrier = Barrier(workers)
         original = sys.modules["app.dog_experience_service"].first_incomplete_step
+        waited = local()
 
         def synchronized(*args, **kwargs):
-            barrier.wait(10)  # every request saw "not completed" before any insert
+            # Only the precondition check waits; the next step of the answer (#45) calls it again.
+            if not getattr(waited, "done", False):
+                waited.done = True
+                barrier.wait(10)  # every request saw "not completed" before any insert
             return original(*args, **kwargs)
 
         with patch("app.dog_experience_service.first_incomplete_step", side_effect=synchronized), \
@@ -1455,9 +1460,12 @@ class SignupPostgresTests(unittest.TestCase):
         headers = self.start_step2_api()
         barrier = Barrier(2)
         original = sys.modules["app.dog_experience_service"].first_incomplete_step
+        waited = local()
 
         def synchronized(*args, **kwargs):
-            barrier.wait(10)
+            if not getattr(waited, "done", False):  # the precondition check only (see above)
+                waited.done = True
+                barrier.wait(10)
             return original(*args, **kwargs)
 
         bodies = [STEP2_FULL, {"has_experience": False}]
@@ -1865,6 +1873,81 @@ class SignupPostgresTests(unittest.TestCase):
         self.assertEqual(self.table_count(Region), len(STEP3_REGIONS))  # the shared master stays
         self.assertEqual(self.remaining(), {"users": 0, "auth_sessions": 0, "user_consents": 0,
                                             "user_pledge_acknowledgements": 0})
+
+
+    # GET /users/me onboarding progress (Issue #45)
+
+    def me(self, headers):
+        response = self.client.get("/users/me", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        return response.json()["data"]
+
+    def test_users_me_reads_with_three_selects_and_never_writes_on_postgres(self):
+        from sqlalchemy import event
+        headers = self.start_step3_api()  # pledge, Step 1 and Step 2 done
+        statements = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement.lstrip().split(None, 1)[0].upper())
+
+        event.listen(self.engine, "before_cursor_execute", record)
+        self.addCleanup(event.remove, self.engine, "before_cursor_execute", record)
+        for stage in ("before Step 3", "after Step 3"):
+            statements.clear()
+            data = self.me(headers)
+            with self.subTest(stage=stage):
+                # Session, account row and one progress snapshot. No INSERT, UPDATE or DELETE.
+                self.assertEqual(statements, ["SELECT"] * 3)
+            if stage == "before Step 3":
+                self.assertEqual((data["step3_completed"], data["next_onboarding_step"]), (False, "WALKING_ROUTINE"))
+                event.remove(self.engine, "before_cursor_execute", record)
+                self.assertEqual(self.put_step3(headers).json()["data"]["next_onboarding_step"], None)
+                event.listen(self.engine, "before_cursor_execute", record)
+        self.assertEqual((data["step3_completed"], data["onboarding_completed"], data["next_onboarding_step"]),
+                         (True, True, None))
+
+    def test_users_me_takes_status_and_steps_from_the_progress_query_not_the_authenticated_row(self):
+        headers = self.start_step3_api()
+        authenticated, release = Event(), Event()
+        original = sys.modules["app.onboarding_common"].load_progress
+
+        def after_authentication(*args, **kwargs):
+            if not authenticated.is_set():  # the reader only; the Step 3 save below runs normally
+                authenticated.set()  # the account row was read as ACTIVE without Step 3
+                release.wait(10)
+            return original(*args, **kwargs)
+
+        results = {}
+        with patch("app.onboarding_common.load_progress", side_effect=after_authentication):
+            reader = self.run_in_thread(results, "me", lambda: self.client.get("/users/me", headers=headers))
+            self.assertTrue(authenticated.wait(10))
+            # Another session commits Step 3 and then a status change before the progress query.
+            self.assertEqual(self.put_step3(headers).status_code, 200)
+            with self.Session() as db:
+                change_to_age_review(db, 1, self.now)
+            release.set()
+            reader.join(10)
+        data = results["me"].json()["data"]
+        # The status comes from the progress statement, not the row read at authentication. That
+        # statement reads status and records together (one statement is shown by the SELECT count test).
+        self.assertEqual((data["account_status"], data["step3_completed"], data["onboarding_completed"],
+                          data["next_onboarding_step"]), ("AGE_REVIEW_REQUIRED", True, False, "AGE_REVIEW"))
+
+    def test_parallel_users_me_requests_return_the_same_state(self):
+        headers = self.start_step3_api()
+        workers = 8
+        barrier = Barrier(workers)
+
+        def read(_):
+            barrier.wait(10)
+            return self.client.get("/users/me", headers=headers)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            responses = list(pool.map(read, range(workers)))
+        self.assertEqual({r.status_code for r in responses}, {200})
+        self.assertEqual(len({json.dumps(r.json()["data"], sort_keys=True) for r in responses}), 1)
+        self.assertEqual(responses[0].json()["data"]["next_onboarding_step"], "WALKING_ROUTINE")
 
 
 if __name__ == "__main__":

@@ -22,6 +22,10 @@ from privacy_test_support import privacy, use_test_privacy_policy
 class ShelterPermissionTests(unittest.TestCase):
     def setUp(self):
         use_test_privacy_policy(self)
+        # GET /users/me reads the server's current pledge version (#45); test-only value.
+        pledge_env = patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": "pledge-test-v1"})
+        pledge_env.start()
+        self.addCleanup(pledge_env.stop)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         event.listen(self.engine, "connect", lambda connection, _: connection.execute("PRAGMA foreign_keys=ON"))
         Base.metadata.create_all(self.engine)

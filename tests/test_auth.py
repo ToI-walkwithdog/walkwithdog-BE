@@ -30,6 +30,10 @@ class AuthTests(unittest.TestCase):
 
     def setUp(self):
         use_test_privacy_policy(self)
+        # GET /users/me reads the server's current pledge version (#45); test-only value.
+        pledge_env = patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": "pledge-test-v1"})
+        pledge_env.start()
+        self.addCleanup(pledge_env.stop)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
@@ -215,7 +219,12 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertEqual(response.json(), {
             "code": "OK", "message": "사용자 정보를 조회했습니다.",
-            "data": {"id": 1, "login_id": "user_one", "nickname": "one", "role": "user", "shelter_id": None}})
+            "data": {"id": 1, "login_id": "user_one", "nickname": "one", "role": "user", "shelter_id": None,
+                     # Onboarding progress (#45): a new account must pledge first.
+                     "account_status": "ACTIVE", "step1_completed": False, "step2_completed": False,
+                     "step3_completed": False, "pledge_completed": False, "current_pledge_version": "pledge-test-v1",
+                     "pledge_acknowledged_at": None, "onboarding_completed": False,
+                     "next_onboarding_step": "PLEDGE"}})
 
     def test_users_me_401_codes_and_no_db_write(self):
         token = self.login()

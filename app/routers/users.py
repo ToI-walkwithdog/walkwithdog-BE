@@ -14,6 +14,7 @@ from app.schemas import (AvailabilityResponse, MeResponse, PledgeRequest, Pledge
                          SignupResponse, UserResponse, UserShelterUpdate)
 from app.account_status import ensure_active
 from app.api_contract import ContractError
+from app.onboarding_common import onboarding_status
 from app.pledge_service import PLEDGE_COMPLETED_MESSAGE, PLEDGE_NOT_ALLOWED_MESSAGE, acknowledge_pledge
 from app.signup_service import is_taken, register_user
 
@@ -77,9 +78,11 @@ def login_id_availability(login_id: str | None = Query(default=None, description
                                  "description": "AUTHENTICATION_REQUIRED, INVALID_ACCESS_TOKEN, SESSION_EXPIRED, "
                                                 "USER_NOT_FOUND. Cache-Control: no-store"},
                            500: {"model": ContractErrorResponse, "description": "INTERNAL_SERVER_ERROR"}})
-def get_me(user: User = Depends(get_contract_user)):
-    # Read only: no DB write. Onboarding progress fields are added by Issue #45.
+def get_me(user: User = Depends(get_contract_user), db: Session = Depends(get_db)):
+    # Read only: no DB write. The progress fields come from one snapshot (Issue #45). Without a
+    # configured current pledge version this fails closed with 500, like the pledge API (#33).
     data = UserResponse.model_validate(user, from_attributes=True).model_dump(mode="json")
+    data.update(onboarding_status(db, user))
     response = ok(data, "사용자 정보를 조회했습니다.")
     response.headers["Cache-Control"] = "no-store"
     return response

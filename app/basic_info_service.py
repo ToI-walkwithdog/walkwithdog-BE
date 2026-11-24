@@ -23,9 +23,9 @@ from sqlalchemy.orm import Session
 from app.account_status import change_to_age_review, ensure_active, lock_user
 from app.api_contract import REQUIRED_FIELD_MESSAGE, ContractError
 from app.auth import contract_unauthorized
-from app.models import PhoneVerification, VolunteerOnboardingBasic
-from app.onboarding_common import (STEP_BASIC_INFORMATION, STEP_PET_EXPERIENCE, age_years, as_utc,
-                                   ensure_pledge_completed, kst_date)
+from app.models import PhoneVerification, User, VolunteerOnboardingBasic
+from app.onboarding_common import (age_years, as_utc, ensure_pledge_completed,
+                                   first_incomplete_step, kst_date)
 from app.phone_verification_service import (is_latest_for_user, mask_phone, parse_verification_id,
                                             phone_already_registered, registered_to_other_user)
 
@@ -82,13 +82,21 @@ def read_basic_info(db: Session, user_id: int, now: datetime) -> dict:
     """Read only: no write and no SMS."""
     basic = db.get(VolunteerOnboardingBasic, user_id)
     if basic is None:
-        return {"step1_completed": False, "profile": None, "next_step": STEP_BASIC_INFORMATION}
-    return {"step1_completed": True, "profile": profile_data(basic, now), "next_step": STEP_PET_EXPERIENCE}
+        return {"step1_completed": False, "profile": None, "next_step": next_step(db, user_id)}
+    return {"step1_completed": True, "profile": profile_data(basic, now), "next_step": next_step(db, user_id)}
 
 
-def saved_response(user_id: int, basic: VolunteerOnboardingBasic, now: datetime) -> dict:
-    return {"user_id": user_id, **profile_data(basic, now), "step1_completed": True,
-            "next_step": STEP_PET_EXPERIENCE}
+def next_step(db: Session, user_id: int) -> str | None:
+    """The shared first incomplete step (#45), not a fixed PET_EXPERIENCE: an account that has
+    finished later steps is told so. The field keeps its Step 1 name `next_step` (Notion)."""
+    user = db.get(User, user_id)
+    if user is None:  # deleted by a concurrent sign-up exit
+        raise contract_unauthorized("USER_NOT_FOUND")
+    return first_incomplete_step(db, user)
+
+
+def saved_response(user_id: int, basic: VolunteerOnboardingBasic, now: datetime, step: str | None) -> dict:
+    return {"user_id": user_id, **profile_data(basic, now), "step1_completed": True, "next_step": step}
 
 
 def _replay(db: Session, user_id: int, basic: VolunteerOnboardingBasic, full_name: str, birth: date,
@@ -98,7 +106,7 @@ def _replay(db: Session, user_id: int, basic: VolunteerOnboardingBasic, full_nam
     same_phone = (verification is not None and verification.user_id == user_id
                   and verification.phone_e164 == basic.phone_e164)
     if basic.full_name == full_name and basic.birth_date == birth and same_phone:
-        return saved_response(user_id, basic, now)
+        return saved_response(user_id, basic, now, next_step(db, user_id))
     raise ContractError(409, "BASIC_INFO_ALREADY_COMPLETED", "기본 정보가 이미 등록되었습니다.")
 
 
@@ -157,7 +165,7 @@ def save_basic_info(db: Session, user_id: int, full_name: str, birth: date, raw_
         db.add(basic)
         verification.consumed_at = now
         db.commit()
-        return saved_response(user_id, basic, now)
+        return saved_response(user_id, basic, now, next_step(db, user_id))
     except IntegrityError:
         db.rollback()
         # Lost a race: the same account saved first (primary key), or another account
