@@ -5,7 +5,7 @@ Every route must be one of:
   - public (no user identity, so there is nothing to check),
   - contract onboarding routes that answer 403 AGE_REVIEW_REQUIRED,
   - contract onboarding routes whose spec answers 403 ONBOARDING_NOT_ALLOWED for that
-    account (Step 3, Issue #44; unifying the code is an open item), or
+    account (Step 3 and location lookup, Issues #44 and #46), or
   - `detail` routes that answer 403 {"detail": ...} for that account.
 A route added later that fits none of these makes the inventory test fail.
 Isolated SQLite with synthetic accounts; no external service is called.
@@ -45,8 +45,9 @@ CONTRACT_BLOCKED = {("PUT", "/users/me/pledge"), ("GET", "/users/me/onboarding/b
                     ("PUT", "/users/me/onboarding/basic-info"), ("POST", "/users/me/phone-verifications"),
                     ("POST", "/users/me/phone-verifications/confirm"),
                     ("GET", "/users/me/onboarding/dog-experience"), ("PUT", "/users/me/onboarding/dog-experience")}
-# Step 3 (Issue #44, Notion): AGE_REVIEW_REQUIRED accounts get the role code, not AGE_REVIEW_REQUIRED.
-ONBOARDING_BLOCKED = {("GET", "/users/me/onboarding/walking-routine"), ("PUT", "/users/me/onboarding/walking-routine")}
+# Step 3 and location lookup use ONBOARDING_NOT_ALLOWED for AGE_REVIEW_REQUIRED accounts.
+ONBOARDING_BLOCKED = {("GET", "/users/me/onboarding/walking-routine"), ("PUT", "/users/me/onboarding/walking-routine"),
+                      ("POST", "/regions/resolve-location")}
 # Contract routes of the general-user onboarding: shelter and admin get this role 403.
 ONBOARDING_ROLE_CODES = {"ONBOARDING_NOT_ALLOWED", "PLEDGE_NOT_ALLOWED"}
 # No user identity: shared, read-only or sign-up data that anyone may request.

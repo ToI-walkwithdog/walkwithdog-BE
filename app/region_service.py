@@ -11,12 +11,17 @@ the rows from being deactivated by a concurrent sync until the caller commits.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import re
 
 from sqlalchemy.orm import Session
 
 from app.api_contract import ContractError
-from app.region_models import LEVEL_SIDO, SELECTABLE_LEVELS, Region
+from app.location_geocoder import GeocodingUnavailable, get_location_geocoder
+from app.region_master import SINGLE_TIER_SIDO
+from app.region_models import LEVEL_SIDO, SEJONG_ALL_CODE, SEJONG_SIDO_CODE, SELECTABLE_LEVELS, Region
+
+logger = logging.getLogger(__name__)
 
 SIDO_CODE_PATTERN = re.compile(r"[0-9]{2}")
 REGION_CODE_MAX_LENGTH = 20
@@ -139,3 +144,26 @@ def require_selectable_regions(db: Session, codes, *, lock: bool = False) -> lis
 
 def require_selectable_region(db: Session, code: str, *, lock: bool = False) -> Region:
     return require_selectable_regions(db, [code], lock=lock)[0]
+
+
+def resolve_location(db: Session, latitude: float, longitude: float) -> dict[str, str]:
+    """Map the provider's legal district to an active choice in the region master."""
+    try:
+        legal_code = get_location_geocoder().reverse_geocode(latitude, longitude)
+    except GeocodingUnavailable as exc:
+        logger.warning("Location lookup unavailable: %s", exc)
+        raise ContractError(503, "GEOCODING_UNAVAILABLE", "현재 위치를 확인할 수 없습니다.") from None
+
+    unsupported = ContractError(422, "REGION_NOT_SUPPORTED", "현재 위치에서 지역을 선택할 수 없습니다.")
+    if legal_code is None:
+        raise unsupported
+    code = legal_code[:5]
+    if code == SINGLE_TIER_SIDO[SEJONG_SIDO_CODE]:
+        code = SEJONG_ALL_CODE
+    try:
+        region = require_selectable_region(db, code)
+    except InvalidRegionCodes:
+        raise unsupported from None
+    sido = db.get(Region, region.parent_region_code)
+    return {"sido_code": sido.region_code, "sido_name": sido.region_name,
+            "region_code": region.region_code, "region_name": region.region_name}
