@@ -15,7 +15,6 @@ import json
 import os
 from pathlib import Path
 import re
-import sys
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -433,8 +432,7 @@ class OnboardingIntegrationPostgresTests(unittest.TestCase):
         token = self.log_in()
         self.pledge(token)
         verification_id = self.verified(token)
-        service = sys.modules["app.basic_info_service"]
-        original, calls = service.next_step, []
+        calls = []
 
         def fail_once(*args, **kwargs):
             calls.append("next_step")

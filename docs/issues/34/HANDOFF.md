@@ -47,7 +47,7 @@
 - `SIGNUP_TEST_DATABASE_URL`: 빈 로컬 격리 DB `toi_walk_test_*`. CI의 같은 그룹에서 실행된다. 테스트마다 `su_<uuid>` 스키마를 만들고 지운다. 클래스 시작과 끝에 DB가 비어 있는지 확인한다.
 - 주요 흐름은 `create_all()` 없이 실제 SQL로 만든 스키마에서 실행한다. 016 이전 dev 기본 테이블과 `005_user_roles`, `006_user_shelters`, `007_walk_domain`, `014_f08_live_walk`, `015_f09_walk_review` 다음에 `002_auth_sessions`, `016_onboarding_signup`, `017_remove_user_email`, `018_user_consents`, `019_first_walk_guide`, `023_user_pledge_acknowledgements`, `024_onboarding_basic_info`, `025_onboarding_dog_experience`, `022_regions`, `026_onboarding_walking_routine`을 적용한다. 각 파일의 manifest `requires`가 이미 적용됐는지와 모델 컬럼이 일치하는지 확인한다.
 - 가입 종료(H2, H3)는 채팅과 매칭 활동 테이블을 읽으므로 모델 스키마(`create_all`)에서 실행한다. 이 테이블은 이 SQL 체인이 만들지 않는 기본 스키마다.
-- 설정: `DATABASE_URL=sqlite://`(가져오기용), `PLEDGE_CURRENT_VERSION=pledge-test-v1`, 테스트용 `PHONE_VERIFICATION_HMAC_KEY`, 테스트용 개인정보 문서 버전, 주입 시계. H2만 `APP_ENV=test`, `ACCOUNT_EXIT_RECORD_POLICY=delete`.
+- 설정: `DATABASE_URL=sqlite://`(가져오기용), `PLEDGE_CURRENT_VERSION=pledge-test-v1`, 테스트용 `PHONE_VERIFICATION_HMAC_KEY`, 테스트용 개인정보 문서 버전, 주입 시계. H2와 H3만 `APP_ENV=test`, `ACCOUNT_EXIT_RECORD_POLICY=delete`.
 - 요청 제한 의존성은 이 파일에서만 끈다(`test_rate_limit`에서 따로 검증).
 
 ## 5. 기존 테스트 범위 구분
