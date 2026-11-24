@@ -45,6 +45,10 @@ class PrivacyPolicyNotConfigured(RuntimeError):
     """The server has no usable privacy policy settings; sign-up must not proceed."""
 
 
+class PrivacyDocumentVersionNotConfigured(PrivacyPolicyNotConfigured):
+    """The server cannot select an active privacy document version."""
+
+
 @dataclass(frozen=True)
 class PrivacyPolicy:
     document_version: str
@@ -80,8 +84,10 @@ def current_privacy_policy() -> PrivacyPolicy:
     """Read the active policy from settings on every call; raise if it is not usable."""
     version = (os.getenv("PRIVACY_DOCUMENT_VERSION") or "").strip()
     required_raw = os.getenv("PRIVACY_REQUIRED_CONSENTS")
-    if not version or len(version) > DOCUMENT_VERSION_MAX_LENGTH or required_raw is None:
-        raise PrivacyPolicyNotConfigured("PRIVACY_DOCUMENT_VERSION and PRIVACY_REQUIRED_CONSENTS must be set")
+    if not version or len(version) > DOCUMENT_VERSION_MAX_LENGTH:
+        raise PrivacyDocumentVersionNotConfigured("The privacy document version is missing or invalid")
+    if required_raw is None:
+        raise PrivacyPolicyNotConfigured("PRIVACY_REQUIRED_CONSENTS must be set")
     required = _consent_list("PRIVACY_REQUIRED_CONSENTS", required_raw)
     optional = _consent_list("PRIVACY_OPTIONAL_CONSENTS", os.getenv("PRIVACY_OPTIONAL_CONSENTS") or "")
     if required & optional:
@@ -110,14 +116,17 @@ def parse_privacy(value: object) -> PrivacyInput:
     return privacy
 
 
+def check_document_version(submitted: str, active: str, field: str) -> None:
+    if submitted != active:
+        raise ContractError(409, "POLICY_VERSION_MISMATCH", POLICY_VERSION_MISMATCH_MESSAGE, {"field": field})
+
+
 def check_against_policy(privacy: PrivacyInput, policy: PrivacyPolicy) -> list[str]:
     """Return the consent types to record. 422 for a missing required consent, then 409 for the version."""
     if any(not privacy.agreed(consent_type) for consent_type in policy.required_consents):
         raise ContractError(422, "PRIVACY_CONFIRMATION_REQUIRED", PRIVACY_CONFIRMATION_REQUIRED_MESSAGE,
                             {"field": "privacy"})
-    if privacy.document_version != policy.document_version:
-        raise ContractError(409, "POLICY_VERSION_MISMATCH", POLICY_VERSION_MISMATCH_MESSAGE,
-                            {"field": "privacy.document_version"})
+    check_document_version(privacy.document_version, policy.document_version, "privacy.document_version")
     # Active items the user explicitly agreed to. Inactive items are never recorded,
     # even if the client sent true for them.
     return sorted(consent_type for consent_type in policy.active_consents if privacy.agreed(consent_type))

@@ -10,7 +10,7 @@ from app.models import Dog
 from app.routers import auth, users, shelter_incidents, shelter_live_walks, shelters, dogs, surveys, matching, public_api, breed_traits, simulation, personality, chat
 from app.routers import walk_requests
 from app.routers import walks, walk_maps, walk_reviews, walk_guides, shelter_volunteer_reviews
-from app.routers import regions
+from app.routers import policies, regions
 from app.routers import onboarding_basic, onboarding_experience, onboarding_routine, age_review
 from app.walk_service import close_stale_walks
 
@@ -59,6 +59,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(policies.router)
 app.include_router(onboarding_basic.router)
 app.include_router(onboarding_experience.router)
 app.include_router(onboarding_routine.router)

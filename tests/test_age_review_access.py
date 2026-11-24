@@ -54,7 +54,7 @@ PUBLIC = {("GET", "/"), ("GET", "/db-test"), ("GET", "/dogs/"), ("GET", "/dogs/{
           ("GET", "/dogs/{dog_id}/personality"), ("GET", "/shelters/{shelter_id}"),
           ("GET", "/shelters/{shelter_id}/dogs"), ("GET", "/surveys/options"), ("GET", "/breed-traits/"),
           ("POST", "/users/"), ("GET", "/users/id-availability"), ("GET", "/users/nickname-availability"),
-          ("GET", "/regions/sido"), ("GET", "/regions/sigungu")}
+          ("GET", "/regions/sido"), ("GET", "/regions/sigungu"), ("GET", "/policies/{kind}")}
 # Import-key routes: without a Bearer token they use X-Import-Key, not an account.
 IMPORT_KEY = {("GET", "/public-api/test"), ("POST", "/public-api/fetch-dogs")}
 

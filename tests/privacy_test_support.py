@@ -5,13 +5,18 @@ service policy: the real document version and the active and required consent
 items are not decided yet and come from the deployment settings.
 """
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 TEST_DOCUMENT_VERSION = "privacy-test-v1"
+TEST_TERMS_VERSION = "terms-test-v1"
+TEST_POLICY_DIRECTORY = Path(__file__).resolve().parent / "fixtures" / "policies"
 TEST_POLICY_ENV = {
     "PRIVACY_DOCUMENT_VERSION": TEST_DOCUMENT_VERSION,
     "PRIVACY_REQUIRED_CONSENTS": "PRIVACY_COLLECTION_USE",
     "PRIVACY_OPTIONAL_CONSENTS": "AI_OVERSEAS_TRANSFER",
+    "TERMS_DOCUMENT_VERSION": TEST_TERMS_VERSION,
+    "POLICY_DOCUMENTS_DIR": str(TEST_POLICY_DIRECTORY),
 }
 
 

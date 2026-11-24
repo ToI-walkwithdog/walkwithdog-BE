@@ -43,6 +43,7 @@ ERROR_RESPONSES = {
                  responses={409: {"model": ContractErrorResponse,
                                   "description": "LOGIN_ID_ALREADY_EXISTS, NICKNAME_ALREADY_EXISTS, POLICY_VERSION_MISMATCH"},
                             **ERROR_RESPONSES,
+                            503: {"model": ContractErrorResponse, "description": "POLICY_DOCUMENT_UNAVAILABLE"},
                             422: {"model": ContractErrorResponse,
                                   "description": "계정 입력 오류, INVALID_PRIVACY_PAYLOAD, "
                                                  "PRIVACY_CONFIRMATION_REQUIRED, AGE_CONFIRMATION_REQUIRED"}})
