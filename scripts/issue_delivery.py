@@ -19,6 +19,7 @@ APPROVAL = re.compile(r"<!-- toi-approval\n(.*?)\n-->", re.DOTALL)
 REVIEW = re.compile(r"<!-- toi-review\n(.*?)\n-->", re.DOTALL)
 PROTECTED = (".github/", "docs/dev-automation/", "scripts/dev_", "scripts/issue_delivery.py",
              "scripts/check_migrations.py", "tests/test_dev_delivery.py", "CLAUDE.md", "AGENTS.md", ".gitignore")
+TEST_CONFIG = {"conftest.py", "pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg", "requirements.txt"}
 
 
 def gh(endpoint, *args):
@@ -56,7 +57,7 @@ def issue_digest(title, body):
 def read_approval(comment_id):
     comment = api(f"issues/comments/{comment_id}")
     user = comment["user"]["login"].lower()
-    if user not in logins("TOI_ISSUE_APPROVERS"):
+    if comment["user"]["type"] != "User" or user not in logins("TOI_ISSUE_APPROVERS"):
         raise GateError("Approval writer is not in the repository's trusted approver list")
     approval = marker(comment["body"], APPROVAL)
     if (set(approval) != {"issue", "issue_digest", "paths"} or not
@@ -186,10 +187,10 @@ def prepare(args):
 
 
 def check_protection(protection):
-    status = protection["required_status_checks"]
+    status = protection.get("required_status_checks") or {}
     reviews = protection.get("required_pull_request_reviews") or {}
-    if (not status["strict"] or not any(check["context"] == CHECK and check.get("app_id") == 15368
-                                       for check in status["checks"])
+    if (not status.get("strict") or not any(check["context"] == CHECK and check.get("app_id") == 15368
+                                       for check in status.get("checks", []))
             or not protection["enforce_admins"]["enabled"]
             or protection["allow_force_pushes"]["enabled"]
             or protection["allow_deletions"]["enabled"]
@@ -224,13 +225,82 @@ def check_pr(pr, state, actual):
     issue, declared = parse_scope(pr["body"])
     if (pr["base"]["ref"] != "dev" or pr["head"]["repo"]["full_name"] != REPO
             or pr["base"]["repo"]["full_name"] != REPO
-            or pr["head"]["ref"] != f"issue/{state['issue']}"
-            or issue != state["issue"] or declared != actual or not actual <= set(state["paths"])):
-        raise GateError("Repository, Issue, branch or exact changed paths do not match the approved scope")
-    if any(path.startswith(PROTECTED) and path != REGISTRY.as_posix() for path in actual):
-        raise GateError("Maintenance or gate changes require separate human review and merge")
+            or pr["head"]["ref"] != f"issue/{state['issue']}" or issue != state["issue"]):
+        raise GateError("PR repository, Issue or branch does not match the approved scope")
+    check_change_scope(state, actual, declared)
     if pr.get("auto_merge"):
         raise GateError("Unexpected GitHub auto-merge request")
+
+
+def check_change_scope(state, actual, declared):
+    if declared != actual or not actual <= set(state["paths"]):
+        raise GateError("Exact changed paths do not match the approved scope")
+    if any(path.rsplit("/", 1)[-1] in TEST_CONFIG
+           or (path.startswith(PROTECTED) and path != REGISTRY.as_posix()) for path in actual):
+        raise GateError("Maintenance or gate changes require separate human review and merge")
+
+
+def check_live_approval(state):
+    approval, approved_at = read_approval(state["approval_comment"])
+    if (approval["issue_digest"] != state["issue_digest"]
+            or paths(approval["paths"]) != set(state["paths"])):
+        raise GateError("Approval changed since the worktree was prepared")
+    check_issue(api(f"issues/{state['issue']}"), approval, approved_at)
+
+
+def open_pr(args):
+    require_enabled()
+    state = load_json(args.state)
+    branch = f"issue/{state['issue']}"
+    if state.get("branch") != branch:
+        raise GateError("State does not belong to a prepared Issue branch")
+    check_live_approval(state)
+    candidates = rows(f"pulls?state=all&base=dev&head={REPO.split('/')[0]}:{branch}&per_page=100")
+    if len(candidates) > 1:
+        raise GateError("Multiple PRs exist on the Issue branch; reconcile on GitHub")
+    if candidates:
+        pr = candidates[0]
+        if state.get("pr", pr["number"]) != pr["number"] or (pr["state"] != "open" and not pr.get("merged_at")):
+            raise GateError("Existing PR needs reconciliation; no new PR was created")
+        actual = pull_paths(pr)
+        check_pr(pr, state, actual)
+    else:
+        if "pr" in state:
+            raise GateError("Recorded PR is missing from GitHub; reconcile before retrying")
+        pending = args.state.with_suffix(args.state.suffix + ".pr-pending")
+        if pending.exists():
+            raise GateError("Previous PR write has an unknown outcome; reconcile it on GitHub")
+        body = args.body.read_text(encoding="utf-8")
+        issue, declared = parse_scope(body)
+        if issue != state["issue"]:
+            raise GateError("PR body must link the prepared Issue")
+        base = dev_sha()
+        head = api(f"git/ref/heads/{branch}")["object"]["sha"]
+        comparison = api(f"compare/{base}...{head}")
+        files = comparison["files"]
+        if (comparison["merge_base_commit"]["sha"] != base or not files or len(files) >= 300):
+            raise GateError("Push an up-to-date branch with a complete file inventory before creating its PR")
+        actual = file_paths(files)
+        check_change_scope(state, actual, declared)
+        with pending.open("x", encoding="utf-8") as stream:
+            json.dump({"branch": branch, "head": head}, stream)
+        pr = api("pulls", "--method", "POST", "-f", f"title={args.title}", "-f", f"body={body}",
+                 "-f", f"head={branch}", "-f", "base=dev", "-F", "draft=true")
+        if pr["head"]["sha"] != head:
+            raise GateError("PR Head changed during creation; reconcile the existing PR")
+    write_state(args.state, {**state, "pr": pr["number"]})
+    print(pr["html_url"])
+
+
+def file_paths(files):
+    return {path for item in files for path in (item["filename"], item.get("previous_filename")) if path}
+
+
+def pull_paths(pr):
+    files = rows(f"pulls/{pr['number']}/files?per_page=100")
+    if len(files) != pr["changed_files"]:
+        raise GateError("The GitHub files inventory is incomplete")
+    return file_paths(files)
 
 
 def verify_merge(pr, head):
@@ -249,34 +319,46 @@ def verify_merge(pr, head):
     return {"merge_sha": merge, "dev_sha": latest}
 
 
+def check_current_pr(pr, base, head):
+    if (pr["state"] != "open" or pr["draft"] or pr["base"]["sha"] != base or pr["mergeable"] is not True
+            or pr["mergeable_state"] != "clean"
+            or api(f"compare/{base}...{head}")["merge_base_commit"]["sha"] != base):
+        raise GateError("PR must be ready, CLEAN and include the current dev commit")
+
+
+def check_ci(number, base, head):
+    runs = api(f"actions/workflows/dev-ci.yml/runs?head_sha={head}&event=pull_request&per_page=20")["workflow_runs"]
+    if not runs:
+        raise GateError(f"No {WORKFLOW} run for the exact Head")
+    run = runs[0]
+    if (run["path"].split("@")[0] != WORKFLOW or run["head_sha"] != head or run["conclusion"] != "success"
+            or not any(item["number"] == number and item["base"]["sha"] == base for item in run["pull_requests"])):
+        raise GateError("Latest CI did not pass for this PR and exact base/head pair")
+    jobs = api(f"actions/runs/{run['id']}/jobs?per_page=100")["jobs"]
+    if not any(job["name"] == CHECK and job["conclusion"] == "success" for job in jobs):
+        raise GateError("Required CI job did not pass")
+    return run
+
+
 def deliver(args):
-    state = load_json(args.state)
     pr = api(f"pulls/{args.pr}")
+    if parse_scope(pr["body"])[0] is None:
+        raise GateError("Manual maintenance PRs are ineligible for Issue delivery")
+    state = load_json(args.state)
     head = pr["head"]["sha"]
     if not OBJECT_ID.fullmatch(head):
         raise GateError("PR head is not a full Git SHA")
     if state.get("pr", args.pr) != args.pr or not state.get("branch"):
         raise GateError("State does not match the prepared PR")
-    files = rows(f"pulls/{args.pr}/files?per_page=100")
-    actual = {path for item in files for path in (item["filename"], item.get("previous_filename")) if path}
-    if len(files) != pr["changed_files"]:
-        raise GateError("The GitHub files inventory is incomplete")
-    check_pr(pr, state, actual)
+    check_pr(pr, state, pull_paths(pr))
     if pr["merged"]:
         result = verify_merge(pr, head)
         write_state(args.state, {**state, "pr": args.pr, "verified_head": head, **result})
         print(json.dumps(result))
         return
-    approval, approved_at = read_approval(state["approval_comment"])
-    if (approval["issue_digest"] != state["issue_digest"]
-            or paths(approval["paths"]) != set(state["paths"])):
-        raise GateError("Approval changed since the worktree was prepared")
-    check_issue(api(f"issues/{state['issue']}"), approval, approved_at)
+    check_live_approval(state)
     base = dev_sha()
-    if (pr["state"] != "open" or pr["draft"] or pr["base"]["sha"] != base or pr["mergeable"] is not True
-            or pr["mergeable_state"] != "clean"
-            or api(f"compare/{base}...{head}")["merge_base_commit"]["sha"] != base):
-        raise GateError("PR must be ready, CLEAN and include the current dev commit")
+    check_current_pr(pr, base, head)
     check_protection(api("branches/dev/protection"))
     actor = gh("user")["login"].lower()
     author = pr["user"]["login"].lower()
@@ -285,20 +367,12 @@ def deliver(args):
                    if api(f"collaborators/{name}/permission")["permission"] in {"write", "maintain", "admin"}}
     check_reviews(rows(f"pulls/{args.pr}/reviews?per_page=100"), trusted, independent, state["issue"], head)
 
-    runs = api(f"actions/workflows/dev-ci.yml/runs?head_sha={head}&event=pull_request&per_page=20")["workflow_runs"]
-    if not runs:
-        raise GateError(f"No {WORKFLOW} run for the exact Head")
-    run = runs[0]
-    if (run["path"].split("@")[0] != WORKFLOW or run["head_sha"] != head or run["conclusion"] != "success"
-            or not any(item["number"] == args.pr and item["base"]["sha"] == base for item in run["pull_requests"])):
-        raise GateError("Latest CI did not pass for this PR and exact base/head pair")
-    jobs = api(f"actions/runs/{run['id']}/jobs?per_page=100")["jobs"]
-    if not any(job["name"] == CHECK and job["conclusion"] == "success" for job in jobs):
-        raise GateError("Required CI job did not pass")
+    run = check_ci(args.pr, base, head)
     if not args.execute:
         print(f"Verified PR #{args.pr} at {head}. Preview only.")
         return
     require_enabled()
+    check_live_approval(state)
     current = api(f"pulls/{args.pr}")
     if (dev_sha() != base or current["base"]["sha"] != base or current["head"]["sha"] != head
             or current["mergeable_state"] != "clean" or current["state"] != "open"
@@ -325,10 +399,13 @@ def main():
     setup = commands.add_parser("prepare")
     setup.add_argument("issue", type=positive)
     setup.add_argument("worktree", type=Path)
+    pr = commands.add_parser("pr")
+    pr.add_argument("--title", required=True)
+    pr.add_argument("--body", type=Path, required=True)
     merge = commands.add_parser("merge")
     merge.add_argument("pr", type=positive)
     merge.add_argument("--execute", action="store_true")
-    for command in (create, setup, merge):
+    for command in (create, setup, pr, merge):
         command.add_argument("--state", type=Path, required=True)
     for command in (create, setup):
         command.add_argument("--approval-comment", type=positive, required=True)
@@ -338,7 +415,7 @@ def main():
             draft = load_json(args.draft)
             print(issue_digest(draft["title"], draft["body"]))
         else:
-            {"register": register, "prepare": prepare, "merge": deliver}[args.command](args)
+            {"register": register, "prepare": prepare, "pr": open_pr, "merge": deliver}[args.command](args)
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print(f"Delivery blocked: {exc}", file=sys.stderr)
         return 1

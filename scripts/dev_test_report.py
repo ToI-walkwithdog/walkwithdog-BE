@@ -100,6 +100,7 @@ def validate_db_settings():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--collect-only", action="store_true")
     args = parser.parse_args()
     try:
         validate_db_settings()
@@ -109,7 +110,10 @@ def main():
         os.environ.pop(key, None)
     os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     report = TestReport()
-    status = pytest.main(["-q", "--strict-markers", "tests/"], plugins=[report])
+    options = ["-q", "--strict-markers", "tests/"]
+    if args.collect_only:
+        options.append("--collect-only")
+    status = pytest.main(options, plugins=[report])
     payload = {"exit_code": int(status), "counts": report.counts,
                "collected": report.collected, "events": report.events}
     args.out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

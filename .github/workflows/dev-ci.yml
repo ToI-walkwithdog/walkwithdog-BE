@@ -58,8 +58,8 @@ jobs:
               git show "$BASE_SHA:$path" > "$RUNNER_TEMP/trusted/$(basename "$path")"
             done
           else
-            # Initial bootstrap is a manually reviewed PR.
-            cp scripts/dev_gate.py scripts/dev_test_report.py docs/dev-automation/test-baseline.json "$RUNNER_TEMP/trusted/"
+            # First installation is a manually reviewed PR.
+            cp scripts/dev_gate.py scripts/dev_test_report.py "$RUNNER_TEMP/trusted/"
             python -c 'import json, os; from scripts.dev_gate import parse_scope; assert parse_scope(json.load(open(os.environ["GITHUB_EVENT_PATH"]))["pull_request"]["body"])[0] is None'
           fi
           python "$RUNNER_TEMP/trusted/dev_gate.py" scope "$GITHUB_EVENT_PATH"
@@ -77,6 +77,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Run complete suite against disposable PostgreSQL
         id: pytest
+        shell: bash
         run: |
           python - <<'PY'
           from contextlib import closing
@@ -88,7 +89,18 @@ jobs:
                   cursor.execute("CREATE DATABASE toi_walk_test_ci_regions")
           PY
           PYTHONPATH="$GITHUB_WORKSPACE" python "$RUNNER_TEMP/trusted/dev_test_report.py" --out "$RUNNER_TEMP/report.json"
-          python "$RUNNER_TEMP/trusted/dev_gate.py" tests "$RUNNER_TEMP/report.json" --base "$RUNNER_TEMP/trusted/test-baseline.json"
+          if [[ -f "$RUNNER_TEMP/trusted/test-baseline.json" ]]; then
+            baseline=(--base "$RUNNER_TEMP/trusted/test-baseline.json")
+          else
+            base_tree="$RUNNER_TEMP/dev-source"
+            mkdir "$base_tree"
+            git archive "$BASE_SHA" | tar -x -C "$base_tree"
+            (cd "$base_tree" && PYTHONPATH="$base_tree" python "$RUNNER_TEMP/trusted/dev_test_report.py" \
+              --collect-only --out "$RUNNER_TEMP/dev-collection.json")
+            baseline=(--bootstrap-collection "$RUNNER_TEMP/dev-collection.json")
+          fi
+          python "$RUNNER_TEMP/trusted/dev_gate.py" tests "$RUNNER_TEMP/report.json" \
+            "${baseline[@]}" --event "$GITHUB_EVENT_PATH"
       - name: Verify test-schema cleanup
         if: ${{ always() && steps.pytest.outcome != 'skipped' }}
         run: |

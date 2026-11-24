@@ -8,6 +8,7 @@ import sys
 
 REGISTRY = Path("docs/dev-automation/test-baseline.json")
 SCOPE = re.compile(r"<!-- toi-scope\n(.*?)\n-->", re.DOTALL)
+REMOVALS = re.compile(r"<!-- toi-test-removals\n(.*?)\n-->", re.DOTALL)
 OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 
 
@@ -78,7 +79,7 @@ def event_key(event):
 
 
 def entries(document):
-    if document["version"] != 1:
+    if document["version"] != 2:
         raise GateError("Unsupported test baseline version")
     result = {}
     for field, outcome in (("failures", "failed"), ("skips", "skipped")):
@@ -90,13 +91,56 @@ def entries(document):
     return result
 
 
-def compare(report, trusted, proposed):
-    collected = report["collected"]
-    if report["exit_code"] not in {0, 1} or not collected or len(collected) != len(set(collected)):
-        return ["The test suite did not produce a complete, unique collection"]
+def collection_ids(value):
+    if (not isinstance(value, list) or not value
+            or any(not isinstance(node, str) or not node for node in value)
+            or len(value) != len(set(value))):
+        raise GateError("Expected a complete, unique test collection")
+    return set(value)
+
+
+def maintenance_removals(event):
+    if event is None:
+        return set()
+    body = event["pull_request"]["body"]
+    issue, _ = parse_scope(body)
+    if not REMOVALS.search(body.replace("\r\n", "\n")):
+        return set()
+    if issue is not None:
+        raise GateError("Test removals require a separately approved manual maintenance PR")
+    removal = marker(body, REMOVALS)
+    if set(removal) != {"nodeids"}:
+        raise GateError("Expected exact nodeids for maintenance removals")
+    return collection_ids(removal["nodeids"])
+
+
+def bootstrap_baseline(candidate, base_collection, event):
+    pr = event["pull_request"]
+    issue, _ = parse_scope(pr["body"])
+    if (issue is not None or pr["base"]["ref"] != "dev"
+            or candidate["source_commit"] != pr["base"]["sha"]):
+        raise GateError("Bootstrap requires manual maintenance and a baseline recorded on the current dev")
+    if base_collection["exit_code"] != 0 or base_collection["events"]:
+        raise GateError("Bootstrap requires successful collection on the actual dev tree")
+    return {**candidate, "collected": base_collection["collected"]}
+
+
+def compare(report, trusted, proposed, approved_removals=frozenset()):
+    collected = collection_ids(report["collected"])
+    if report["exit_code"] not in {0, 1}:
+        return ["The test suite did not complete"]
     old = entries(trusted)
     current = entries(proposed)
+    previous_collection = collection_ids(trusted["collected"])
+    proposed_collection = collection_ids(proposed["collected"])
     errors = []
+    missing = previous_collection - collected
+    if missing != approved_removals:
+        errors.append(f"Missing collected tests: {sorted(missing - approved_removals)}; "
+                      f"unused maintenance removals: {sorted(approved_removals - missing)}")
+    if proposed_collection != collected:
+        errors.append(f"Candidate inventory must match collection. Add: {sorted(collected - proposed_collection)}; "
+                      f"remove: {sorted(proposed_collection - collected)}")
     if proposed["source_commit"] != trusted["source_commit"]:
         errors.append("Baseline source commit is immutable in feature PRs")
     for key, entry in current.items():
@@ -105,14 +149,20 @@ def compare(report, trusted, proposed):
 
     bad = {}
     good = set()
+    executed = set()
     for event in report["events"]:
         key = event_key(event)
+        if key[1] in {"setup", "call"} and event["subtest"] is None:
+            executed.add(key[0])
         if event["outcome"] == "passed":
             good.add(key)
         else:
             if key in bad:
                 errors.append(f"Multiple adverse outcomes for {key}")
             bad[key] = event
+    if collected != executed:
+        errors.append(f"Collected tests without outcomes: {sorted(collected - executed)}; "
+                      f"outcomes without collection: {sorted(executed - collected)}")
     if (report["exit_code"] == 1) != any(event["outcome"] == "failed" for event in bad.values()):
         errors.append("Pytest exit code and failure reports disagree")
 
@@ -140,19 +190,42 @@ def main():
     scope.add_argument("event", type=Path)
     tests = commands.add_parser("tests")
     tests.add_argument("report", type=Path)
-    tests.add_argument("--base", type=Path, required=True)
+    baseline = tests.add_mutually_exclusive_group(required=True)
+    baseline.add_argument("--base", type=Path)
+    baseline.add_argument("--bootstrap-collection", type=Path)
+    tests.add_argument("--event", type=Path)
     tests.add_argument("--candidate", type=Path, default=REGISTRY)
+    inventory = commands.add_parser("inventory")
+    inventory.add_argument("report", type=Path)
+    inventory.add_argument("--candidate", type=Path, default=REGISTRY)
     args = parser.parse_args()
     try:
         if args.command == "scope":
             check_scope(load_json(args.event))
+        elif args.command == "inventory":
+            report = load_json(args.report)
+            if report["exit_code"] not in {0, 1}:
+                raise GateError("Cannot update inventory from incomplete collection")
+            candidate = load_json(args.candidate)
+            candidate["collected"] = sorted(collection_ids(report["collected"]))
+            args.candidate.write_text(json.dumps(candidate, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         else:
             report = load_json(args.report)
-            errors = compare(report, load_json(args.base), load_json(args.candidate))
+            candidate = load_json(args.candidate)
+            event = load_json(args.event) if args.event else None
+            if args.bootstrap_collection:
+                if not event:
+                    raise GateError("Bootstrap requires a PR event")
+                trusted = bootstrap_baseline(candidate, load_json(args.bootstrap_collection), event)
+                removals = set()
+            else:
+                trusted = load_json(args.base)
+                removals = maintenance_removals(event)
+            errors = compare(report, trusted, candidate, removals)
             print(f"Collected {len(report['collected'])} tests. Outcomes: {report['counts']}")
             if errors:
                 raise GateError("\n".join(errors))
-            print("All adverse outcomes match the reviewed baseline")
+            print("Test collection and adverse outcomes match the reviewed baseline")
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print(f"Gate blocked: {exc}", file=sys.stderr)
         return 1
