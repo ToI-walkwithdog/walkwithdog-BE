@@ -3,6 +3,8 @@
 Provisional GPS policy: known accuracy <=50m, segment speed <=5m/s, no distance
 bridge over sampling gaps >300s. Rejected batches never partially persist.
 """
+import hashlib
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -36,9 +38,18 @@ def get_auto_end_after_seconds():
     return int(os.getenv("AUTO_END_AFTER_SECONDS", "3600"))
 
 
+def last_activity_at(walk):
+    """Server receipt time of the last new point, or the start time when none arrived."""
+    return as_utc(walk.last_point_received_at or walk.started_at)
+
+
+def auto_end_at(walk):
+    """Issue #89: the single no-signal deadline. A walk expires strictly after this time."""
+    return last_activity_at(walk) + timedelta(seconds=get_auto_end_after_seconds())
+
+
 def is_walk_expired(walk, now):
-    last_active = as_utc(walk.last_point_received_at or walk.started_at)
-    return (now - last_active).total_seconds() > get_auto_end_after_seconds()
+    return now > auto_end_at(walk)
 
 
 def get_walk_overdue_grace_minutes() -> int:
@@ -197,8 +208,9 @@ def append_points(db, walk_id, actor, payload):
             elapsed = (stamp - as_utc(previous.recorded_at)).total_seconds()
             if elapsed <= 0:
                 raise HTTPException(409, "좌표 기록 시각은 순번에 따라 증가해야 합니다.")
-            if distance_m(previous, point) / elapsed > MAX_SPEED_M_S:
-                raise HTTPException(409, "비정상적인 GPS 위치 이동이 감지되었습니다.")
+            # Issue #89: an implausible jump (> MAX_SPEED_M_S) is kept as a raw observation.
+            # total_distance() and analyze_motion() already leave such segments out, so one
+            # bad GPS fix no longer blocks every later batch.
         row = WalkPoint(walk_id=walk.id, latitude=point.latitude, longitude=point.longitude,
                         recorded_at=stamp, accuracy_m=point.accuracy_m, sequence_no=sequence)
         added.append(row)
@@ -233,30 +245,106 @@ def get_marker_max_per_walk():
     return value if value > 0 else 500
 
 
-def resolve_marker_location(walk, payload):
-    """GPS가 약하거나 좌표가 없으면 산책의 마지막 위치를 쓴다."""
-    weak = payload.latitude is None or (
-        payload.accuracy_m is not None and payload.accuracy_m > get_marker_max_accuracy_m())
-    if not weak:
-        return payload.latitude, payload.longitude, "CURRENT"
-    if walk.last_latitude is None or walk.last_longitude is None:
-        raise HTTPException(409, "위치 정보가 없어 마커를 저장할 수 없습니다.")
-    return walk.last_latitude, walk.last_longitude, "LAST_KNOWN"
+# Issue #89 location windows (Notion initial values, approved): a body position counts as
+# CURRENT when observed at most 30 s before the tap; otherwise the walk's own stored point
+# from the last 2 minutes is LAST_KNOWN. Incidents accept a stored point up to 30 s old.
+MARKER_CURRENT_MAX_AGE = timedelta(seconds=30)
+MARKER_LAST_KNOWN_MAX_AGE = timedelta(minutes=2)
+INCIDENT_POSITION_MAX_AGE = timedelta(seconds=30)
+
+
+def recent_point(db, walk_id, at, max_age, max_accuracy):
+    """The latest stored observation of this walk in [at - max_age, at] with a known, good accuracy."""
+    return (db.query(WalkPoint)
+            .filter(WalkPoint.walk_id == walk_id, WalkPoint.recorded_at <= at, WalkPoint.recorded_at >= at - max_age,
+                    WalkPoint.accuracy_m.isnot(None), WalkPoint.accuracy_m <= max_accuracy)
+            .order_by(WalkPoint.recorded_at.desc(), WalkPoint.sequence_no.desc()).first())
+
+
+def resolve_marker_location(db, walk, payload, recorded_at):
+    """Return (latitude, longitude, location_source, position_recorded_at); never a guessed position."""
+    max_accuracy = get_marker_max_accuracy_m()
+    if payload.latitude is not None:
+        observed = None if payload.position_recorded_at is None else as_utc(payload.position_recorded_at)
+        if observed is None:  # earlier clients: keep the existing accuracy-only rule
+            usable = payload.accuracy_m is None or payload.accuracy_m <= max_accuracy
+        else:
+            usable = (payload.accuracy_m is not None and payload.accuracy_m <= max_accuracy
+                      and timedelta(0) <= recorded_at - observed <= MARKER_CURRENT_MAX_AGE)
+        if usable:
+            return payload.latitude, payload.longitude, "CURRENT", observed
+    point = recent_point(db, walk.id, recorded_at, MARKER_LAST_KNOWN_MAX_AGE, max_accuracy)
+    if point is None:
+        raise HTTPException(409, {"code": "MARKER_LOCATION_UNAVAILABLE",
+                                  "message": "최근 위치를 확인할 수 없어 마커를 저장하지 않았습니다."})
+    return point.latitude, point.longitude, "LAST_KNOWN", as_utc(point.recorded_at)
+
+
+def decimal_text(value):
+    return None if value is None else format(Decimal(value).normalize(), "f")
+
+
+def marker_fingerprint(payload):
+    """SHA-256 of the normalized request body, fixed by the first request with this client_marker_id."""
+    body = {
+        "marker_type": payload.marker_type, "memo": payload.memo,
+        "recorded_at": as_utc(payload.recorded_at).isoformat(),
+        "latitude": decimal_text(payload.latitude), "longitude": decimal_text(payload.longitude),
+        "accuracy_m": decimal_text(payload.accuracy_m),
+        "position_recorded_at": None if payload.position_recorded_at is None
+        else as_utc(payload.position_recorded_at).isoformat(),
+    }
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def require_walk_owner(db, walk_id, actor):
+    """Authentication and ownership before any replay lookup; the same errors as locked_walk()."""
+    hint = db.query(WalkRequest.user_id).join(Walk, Walk.walk_request_id == WalkRequest.id).filter(
+        Walk.id == walk_id).first()
+    if hint is None:
+        raise HTTPException(404, "Walk not found")
+    if actor.id != hint.user_id:
+        raise HTTPException(403, "본인 신청만 처리할 수 있습니다.")
+
+
+def marker_replay(db, walk_id, key, fingerprint):
+    existing = (db.query(WalkMarker).filter(WalkMarker.walk_id == walk_id, WalkMarker.client_marker_id == key)
+                .populate_existing().first())
+    if existing is not None and existing.request_fingerprint != fingerprint:
+        raise HTTPException(409, "같은 client_marker_id로 다른 내용의 마커가 이미 저장되었습니다.")
+    return existing
 
 
 def add_marker(db, walk_id, actor, payload):
+    """Return (marker, created). A stored key with the same body is answered before state and
+    limit checks, so a retry after the walk ended or reached the limit still gets 200."""
+    key, fingerprint = payload.client_marker_id, None
+    if key is not None:
+        require_walk_owner(db, walk_id, actor)
+        fingerprint = marker_fingerprint(payload)
+        existing = marker_replay(db, walk_id, key, fingerprint)
+        if existing is not None:
+            return existing, False
     walk, _ = locked_walk(db, walk_id, actor)
-    recorded_at = validate_event_time(walk, payload.recorded_at, utc_now())
+    now = utc_now()
+    if is_walk_expired(walk, now):
+        raise HTTPException(409, "산책 세션이 만료되었습니다.")
+    recorded_at = validate_event_time(walk, payload.recorded_at, now)
+    if key is not None:  # a concurrent request may have stored it before we took the lock
+        existing = marker_replay(db, walk.id, key, fingerprint)
+        if existing is not None:
+            return existing, False
     count = db.query(func.count(WalkMarker.id)).filter(WalkMarker.walk_id == walk.id).scalar()
     if count >= get_marker_max_per_walk():
         raise HTTPException(409, "산책당 저장할 수 있는 마커 수를 초과했습니다.")
-    latitude, longitude, location_source = resolve_marker_location(walk, payload)
+    latitude, longitude, location_source, position_recorded_at = resolve_marker_location(db, walk, payload, recorded_at)
     marker = WalkMarker(
         walk_id=walk.id, marker_type=payload.marker_type, memo=payload.memo,
-        latitude=latitude, longitude=longitude, recorded_at=recorded_at, location_source=location_source)
+        latitude=latitude, longitude=longitude, recorded_at=recorded_at, location_source=location_source,
+        client_marker_id=key, request_fingerprint=fingerprint, position_recorded_at=position_recorded_at)
     db.add(marker)
     db.flush()
-    return marker
+    return marker, True
 
 
 def locked_walk_for_incident(db, walk_id, actor, occurred_at):
@@ -313,36 +401,65 @@ def is_same_incident(existing, walk_id, incident_type, description, lat, lng, oc
     return True
 
 
+def flush_new_row(db, row):
+    """Issue #89: on PostgreSQL a unique race rolls back only a SAVEPOINT, so this request keeps its
+    locks and earlier work. pysqlite cannot nest a SAVEPOINT in SQLAlchemy's deferred transaction
+    (its RELEASE may commit), so the SQLite test engine keeps the previous full rollback."""
+    if db.get_bind().dialect.name == "postgresql":
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+        return
+    db.add(row)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise
+
+
+def same_report(existing, walk_id, payload, description, occurred_utc):
+    """A retry with omitted coordinates matches the stored coordinates, whatever they are now (#89)."""
+    lat = payload.latitude if payload.latitude is not None else existing.latitude
+    lng = payload.longitude if payload.longitude is not None else existing.longitude
+    return is_same_incident(existing, walk_id, payload.incident_type, description, lat, lng, occurred_utc)
+
+
+def stored_report(db, actor, payload):
+    return db.query(WalkIncident).filter_by(
+        reported_by=actor.id, client_report_id=payload.client_report_id
+    ).populate_existing().first()
+
+
 def report_incident(db, walk_id, actor, payload):
     occurred_utc = as_utc(payload.occurred_at)
-    desc = payload.description.strip() if payload.description and payload.description.strip() else INCIDENT_TYPE_LABELS.get(payload.incident_type, payload.incident_type)
+    # OTHER always carries the user's text (schema, #89); other types keep the default label.
+    desc = payload.description or INCIDENT_TYPE_LABELS.get(payload.incident_type, payload.incident_type)
+    conflict = "이미 동일한 client_report_id로 다른 내용의 신고가 접수되었습니다."
 
     if payload.client_report_id:
-        existing = db.query(WalkIncident).filter_by(
-            reported_by=actor.id, client_report_id=payload.client_report_id
-        ).first()
+        existing = stored_report(db, actor, payload)
         if existing:
-            lat = payload.latitude if payload.latitude is not None else existing.latitude
-            lng = payload.longitude if payload.longitude is not None else existing.longitude
-            if is_same_incident(existing, walk_id, payload.incident_type, desc, lat, lng, occurred_utc):
+            if same_report(existing, walk_id, payload, desc, occurred_utc):
                 return existing, False
-            raise HTTPException(409, "이미 동일한 client_report_id로 다른 내용의 신고가 접수되었습니다.")
+            raise HTTPException(409, conflict)
 
     walk, request, occurred_utc = locked_walk_for_incident(db, walk_id, actor, payload.occurred_at)
 
     if payload.latitude is None and payload.longitude is None:
-        lat, lng = walk.last_latitude, walk.last_longitude
+        # Issue #89: only a stored observation of this walk from the 30 s before the incident,
+        # never the walk's last position of any age. No usable fix: the report is kept without one.
+        point = recent_point(db, walk.id, occurred_utc, INCIDENT_POSITION_MAX_AGE, get_marker_max_accuracy_m())
+        lat, lng = (point.latitude, point.longitude) if point is not None else (None, None)
     else:
         lat, lng = payload.latitude, payload.longitude
 
     if payload.client_report_id:
-        existing = db.query(WalkIncident).filter_by(
-            reported_by=actor.id, client_report_id=payload.client_report_id
-        ).first()
+        existing = stored_report(db, actor, payload)
         if existing:
-            if is_same_incident(existing, walk.id, payload.incident_type, desc, lat, lng, occurred_utc):
+            if same_report(existing, walk.id, payload, desc, occurred_utc):
                 return existing, False
-            raise HTTPException(409, "이미 동일한 client_report_id로 다른 내용의 신고가 접수되었습니다.")
+            raise HTTPException(409, conflict)
 
     dup_window = get_incident_duplicate_window_seconds()
     existing_type_incidents = db.query(WalkIncident).filter(
@@ -373,18 +490,14 @@ def report_incident(db, walk_id, actor, payload):
         status="OPEN",
         client_report_id=payload.client_report_id,
     )
-    db.add(incident)
     try:
-        db.flush()
+        flush_new_row(db, incident)
     except IntegrityError:
-        db.rollback()
         if payload.client_report_id:
-            existing = db.query(WalkIncident).filter_by(
-                reported_by=actor.id, client_report_id=payload.client_report_id
-            ).first()
-            if existing and is_same_incident(existing, walk.id, payload.incident_type, desc, lat, lng, occurred_utc):
+            existing = stored_report(db, actor, payload)
+            if existing and same_report(existing, walk.id, payload, desc, occurred_utc):
                 return existing, False
-            raise HTTPException(409, "이미 동일한 client_report_id로 다른 내용의 신고가 접수되었습니다.")
+            raise HTTPException(409, conflict) from None
         raise
 
     return incident, True
@@ -432,6 +545,11 @@ def end_walk(db, walk_id, actor, payload):
     if actor.id != request.user_id and payload.status != "INTERRUPTED":
         raise HTTPException(403, "보호소와 관리자는 안전 중단만 처리할 수 있습니다.")
     now = utc_now()
+    if is_walk_expired(walk, now):
+        # Issue #89: a walk that already passed its no-signal deadline keeps that result. It is
+        # settled as COMPLETED/AUTO_TIMEOUT at the last activity time, never as USER or STAFF.
+        return finalize_walk_statistics(db, walk, last_activity_at(walk), "COMPLETED", "AUTO_TIMEOUT",
+                                        request.user_id)
     if now < as_utc(walk.started_at):
         raise HTTPException(409, "서버 종료 시각이 산책 시작 시각보다 빠릅니다.")
     for model, timestamp in ((WalkPoint, WalkPoint.recorded_at), (WalkMarker, WalkMarker.recorded_at),
@@ -447,22 +565,21 @@ def close_stale_walks(db, now=None, user_id=None):
     """Closes all expired IN_PROGRESS walks idempotently."""
     if now is None:
         now = utc_now()
-    timeout_seconds = get_auto_end_after_seconds()
-    query = db.query(Walk.id).join(WalkRequest).filter(Walk.status == "IN_PROGRESS")
+    query = db.query(Walk.id, Walk.started_at, Walk.last_point_received_at).join(WalkRequest).filter(
+        Walk.status == "IN_PROGRESS")
     if user_id is not None:
         query = query.filter(WalkRequest.user_id == user_id)
-    candidate_ids = [r[0] for r in query.all()]
+    # Issue #89: lock only walks that already look expired, so settling never contends with
+    # live walks; the same deadline (auto_end_at) is checked again under the row lock.
+    candidate_ids = [row.id for row in query.all() if is_walk_expired(row, now)]
     closed = []
     for walk_id in candidate_ids:
         walk = lock_row(db, Walk, walk_id)
-        if walk is None or walk.status != "IN_PROGRESS":
+        if walk is None or walk.status != "IN_PROGRESS" or not is_walk_expired(walk, now):
             continue
-        last_active = as_utc(walk.last_point_received_at or walk.started_at)
-        if (now - last_active).total_seconds() > timeout_seconds:
-            request = lock_row(db, WalkRequest, walk.walk_request_id)
-            end_time = last_active
-            finalize_walk_statistics(db, walk, end_time, "COMPLETED", "AUTO_TIMEOUT", request.user_id)
-            closed.append(walk)
+        request = lock_row(db, WalkRequest, walk.walk_request_id)
+        finalize_walk_statistics(db, walk, last_activity_at(walk), "COMPLETED", "AUTO_TIMEOUT", request.user_id)
+        closed.append(walk)
     db.flush()
     return closed
 
@@ -493,6 +610,8 @@ def get_active_walk(db, actor):
         "last_longitude": walk.last_longitude,
         "last_accuracy_m": walk.last_accuracy_m,
         "last_point_recorded_at": walk.last_point_recorded_at,
+        "last_point_received_at": walk.last_point_received_at,
+        "auto_end_at": auto_end_at(walk),
         "last_sequence_no": last_seq,
         "elapsed_seconds": elapsed_seconds,
     }

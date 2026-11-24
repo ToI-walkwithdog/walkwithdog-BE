@@ -426,6 +426,20 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "031_walk_marker_idempotency.sql",
+      "sha256": "0adfa49cc2aacebcfca7f887ea66785f1e6a7cd2da3c68bfcbf8960dc6d68ab9",
+      "requires": [
+        "030_shelter_code_verification.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [

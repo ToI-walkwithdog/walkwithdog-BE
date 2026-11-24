@@ -2,6 +2,7 @@
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -67,6 +68,7 @@ class WalkPointsBatch(BaseModel):
 
 
 MARKER_MEMO_MAX_LENGTH = 100
+INCIDENT_DESCRIPTION_MAX_LENGTH = 1000
 
 
 class WalkMarkerCreate(Coordinates):
@@ -80,11 +82,14 @@ class WalkMarkerCreate(Coordinates):
     longitude: Longitude | None = None
     accuracy_m: Annotated[Decimal, Field(ge=0, le=Decimal("99999999.99"), allow_inf_nan=False)] | None = None
     recorded_at: AwareDatetime
+    # Issue #89: optional retry key (one UUID per real tap) and the time the position was observed.
+    client_marker_id: UUID | None = None
+    position_recorded_at: AwareDatetime | None = None
 
-    @field_validator("recorded_at", mode="before")
+    @field_validator("recorded_at", "position_recorded_at", mode="before")
     @classmethod
     def iso_time(cls, value):
-        return WalkRequestCreate.iso_datetime(value)
+        return None if value is None else WalkRequestCreate.iso_datetime(value)
 
     @field_validator("accuracy_m", mode="before")
     @classmethod
@@ -136,6 +141,11 @@ class WalkIncidentCreate(Coordinates):
             self.description = self.description.strip()
             if not self.description:
                 self.description = None
+        # Issue #89: OTHER needs the user's own text; nothing is cut or replaced with a label.
+        if self.description is not None and len(self.description) > INCIDENT_DESCRIPTION_MAX_LENGTH:
+            raise ValueError(f"신고 내용은 {INCIDENT_DESCRIPTION_MAX_LENGTH}자 이하로 입력해야 합니다.")
+        if self.incident_type == "OTHER" and self.description is None:
+            raise ValueError("기타 신고는 보호소에 전달할 내용을 입력해야 합니다.")
         return self
 
 
@@ -149,7 +159,7 @@ class UTCResponse(BaseModel):
 
     @field_validator(
         "started_at", "ended_at", "expected_end_at", "created_at", "updated_at",
-        "recorded_at", "occurred_at", "last_point_recorded_at", "last_point_received_at",
+        "recorded_at", "occurred_at", "last_point_recorded_at", "last_point_received_at", "auto_end_at",
         check_fields=False,
     )
     @classmethod
@@ -196,6 +206,8 @@ class ActiveWalkResponse(UTCResponse):
     last_longitude: Decimal | None = None
     last_accuracy_m: Decimal | None = None
     last_point_recorded_at: datetime | None = None
+    last_point_received_at: datetime | None = None  # Issue #89: server receipt time of the last new point
+    auto_end_at: datetime  # Issue #89: no-signal auto end happens strictly after this time
     last_sequence_no: int | None = None
     elapsed_seconds: int
 
