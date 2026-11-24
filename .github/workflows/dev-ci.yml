@@ -1,4 +1,5 @@
-name: ToI Dev CI
+name: CI
+run-name: CI
 on:
   pull_request:
     branches: [dev]
