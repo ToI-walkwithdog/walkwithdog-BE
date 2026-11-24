@@ -166,6 +166,12 @@ def _require_regions(db: Session, codes: list[str]) -> None:
         raise _error(INVALID_REGION_CODE, REGIONS) from None
 
 
+def _completed_routine(db: Session, user_id: int) -> VolunteerOnboardingRoutine | None:
+    """The stored routine seen before inserting (a separate function so tests can line up
+    concurrent saves right after this check)."""
+    return db.get(VolunteerOnboardingRoutine, user_id)
+
+
 def save_routine(db: Session, user_id: int, answer: dict, now: datetime) -> dict:
     try:
         user = lock_user(db, user_id)  # FOR SHARE, then the current state of the locked row
@@ -173,7 +179,7 @@ def save_routine(db: Session, user_id: int, answer: dict, now: datetime) -> dict
             raise contract_unauthorized("USER_NOT_FOUND")
         ensure_routine_allowed(db, user)
         _require_regions(db, answer[REGIONS])
-        existing = db.get(VolunteerOnboardingRoutine, user_id)
+        existing = _completed_routine(db, user_id)
         if existing is not None:
             result = _replay(db, user, existing, answer)
             db.rollback()  # nothing to write; release the locks

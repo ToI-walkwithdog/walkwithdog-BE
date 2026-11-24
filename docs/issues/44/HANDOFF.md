@@ -102,7 +102,7 @@
 - `volunteer_routine_time_slots`: 복합 PK `(user_id, time_slot_code)`, 루틴 FK, CHECK `ck_routine_time_slot_code`
 - manifest 정식 등록: `requires` `022_regions.sql`, `025_onboarding_dog_experience.sql`, 트랜잭션 `file`, 체크섬 `e1ec4187…e029`
 - 추가 전용이다. 기존 테이블과 행은 바꾸지 않는다. 재실행해도 바뀌지 않는다. 롤백 SQL은 파일 머리말에 있다.
-- **기동 순서**: 이 코드는 다음 온보딩 단계를 계산할 때 `volunteer_onboarding_routines`를 읽는다. 022와 026을 적용하기 전에 기동하면 Step 2를 마친 계정의 연령 확인 정정, Step 2 조회, Step 3 API가 500이 된다. 실제 DB 적용은 프로젝트 정책대로 모든 기능 PR 병합 뒤 통합 마이그레이션에서 진행한다. 그 전에는 공용 서버에 배포하지 않는다.
+- **기동 순서**: 이 코드는 다음 온보딩 단계를 계산할 때 `volunteer_onboarding_routines`를 읽는다. 022와 026을 적용하기 전에 기동하면 Step 2를 마친 계정의 Step 2 조회와 재저장, Step 3 API가 500이 된다. 연령 확인 정정은 Step 1을 마친 계정을 먼저 거부하므로 영향이 없다. 실제 DB 적용은 프로젝트 정책대로 모든 기능 PR 병합 뒤 통합 마이그레이션에서 진행한다. 그 전에는 공용 서버에 배포하지 않는다.
 - 격리 PostgreSQL 테스트의 마이그레이션 체인(`API_MIGRATIONS_AFTER_018`)에 022와 026을 025 뒤에 추가했다. 022는 선행 SQL이 없으므로 어느 단계 뒤에 붙여도 된다.
 
 ## 4. 검증

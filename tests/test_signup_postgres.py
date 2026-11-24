@@ -1603,16 +1603,29 @@ class SignupPostgresTests(unittest.TestCase):
         return (self.table_count(VolunteerOnboardingRoutine), self.table_count(VolunteerRoutineRegion),
                 self.table_count(VolunteerRoutineTimeSlot))
 
-    def synchronized_region_check(self, workers):
-        """Every request passes the locked-row checks and sees no routine before any insert."""
+    def concurrent_step3_inserts(self, workers):
+        """Every request has seen "no routine" before any of them inserts, so all but one
+        must take the primary key conflict branch. Returns (context, replays): `replays`
+        records each re-read answer, which only that branch produces here."""
+        from contextlib import ExitStack
+        service = sys.modules["app.walking_routine_service"]
         barrier = Barrier(workers)
-        original = sys.modules["app.walking_routine_service"]._require_regions
+        original_check, original_replay = service._completed_routine, service._replay
+        replays = []
 
-        def synchronized(*args, **kwargs):
+        def checked_then_wait(*args, **kwargs):
+            existing = original_check(*args, **kwargs)
             barrier.wait(10)
-            return original(*args, **kwargs)
+            return existing
 
-        return patch("app.walking_routine_service._require_regions", side_effect=synchronized)
+        def counted_replay(*args, **kwargs):
+            replays.append("replay")
+            return original_replay(*args, **kwargs)
+
+        stack = ExitStack()
+        stack.enter_context(patch("app.walking_routine_service._completed_routine", side_effect=checked_then_wait))
+        stack.enter_context(patch("app.walking_routine_service._replay", side_effect=counted_replay))
+        return stack, replays
 
     def test_step3_save_that_locked_first_commits_before_the_status_change(self):
         headers = self.start_step3_api()
@@ -1645,9 +1658,11 @@ class SignupPostgresTests(unittest.TestCase):
     def test_parallel_identical_step3_saves_keep_one_routine_and_one_time(self):
         headers = self.start_step3_api()
         workers = 4
-        with self.synchronized_region_check(workers), ThreadPoolExecutor(max_workers=workers) as pool:
+        inserts, replays = self.concurrent_step3_inserts(workers)
+        with inserts, ThreadPoolExecutor(max_workers=workers) as pool:
             responses = list(pool.map(lambda _: self.put_step3(headers), range(workers)))
         self.assertEqual([r.status_code for r in responses], [200] * workers, [r.text for r in responses])
+        self.assertEqual(len(replays), workers - 1)  # the losers recovered from the primary key conflict
         self.assertEqual(len({r.json()["data"]["completed_at"] for r in responses}), 1)
         self.assertEqual({r.json()["data"]["next_onboarding_step"] for r in responses}, {None})
         self.assertEqual(self.step3_rows(), (1, 2, 2))  # no duplicate link rows
@@ -1656,10 +1671,12 @@ class SignupPostgresTests(unittest.TestCase):
         headers = self.start_step3_api()
         bodies = [STEP3_FULL, {**STEP3_FULL, "region_codes": ["36_SPECIAL_ALL"],
                                "available_time_slot_codes": list(TIME_SLOT_CODES)}]
-        with self.synchronized_region_check(2), ThreadPoolExecutor(max_workers=2) as pool:
+        inserts, replays = self.concurrent_step3_inserts(2)
+        with inserts, ThreadPoolExecutor(max_workers=2) as pool:
             responses = list(pool.map(lambda body: self.put_step3(headers, body), bodies))
         outcomes = sorted((r.status_code, r.json()["code"]) for r in responses)
         self.assertEqual(outcomes, [(200, "OK"), (409, "WALKING_ROUTINE_ALREADY_COMPLETED")])
+        self.assertEqual(len(replays), 1)  # the 409 came from the primary key conflict branch
         winner = bodies[[r.status_code for r in responses].index(200)]
         with self.Session() as db:
             self.assertEqual(sorted(r.region_code for r in db.query(VolunteerRoutineRegion)),
