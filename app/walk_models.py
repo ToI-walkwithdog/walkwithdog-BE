@@ -88,6 +88,14 @@ class WalkRequest(Timestamps, Base):
         CheckConstraint("status <> 'PENDING' OR reviewed_by IS NULL", name="ck_pending_unreviewed"),
         CheckConstraint("status <> 'REJECTED' OR rejection_reason IS NOT NULL", name="ck_rejection_reason"),
         CheckConstraint("status IN ('REJECTED', 'CANCELLED') OR rejection_reason IS NULL", name="ck_rejection_status"),
+        CheckConstraint("cancel_reason_code IN ('SCHEDULE_CHANGED', 'CANNOT_VISIT')", name="ck_cancel_reason_code"),
+        CheckConstraint("cancelled_actor_role IN ('USER', 'SHELTER', 'ADMIN')", name="ck_cancel_actor_role"),
+        CheckConstraint(
+            "(cancelled_at IS NULL AND cancelled_by IS NULL AND cancelled_actor_role IS NULL AND "
+            "cancel_reason_code IS NULL) OR (status = 'CANCELLED' AND cancelled_at IS NOT NULL AND "
+            "cancelled_by IS NOT NULL AND cancelled_actor_role IS NOT NULL)",
+            name="ck_walk_request_cancellation",
+        ),
         ForeignKeyConstraint(["date_slot_id", "dog_id"], ["dog_walk_date_slots.id", "dog_walk_date_slots.dog_id"],
                              name="fk_walk_requests_date_slot", ondelete="NO ACTION"),
         CheckConstraint("(idempotency_key IS NULL AND request_fingerprint IS NULL AND creation_receipt IS NULL) OR "
@@ -130,6 +138,11 @@ class WalkRequest(Timestamps, Base):
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
     rejection_reason = Column(Text, nullable=True)
     rejection_reason_code = Column(String(30), nullable=True)
+    cancel_reason_code = Column(String(20), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_by = Column(Integer, ForeignKey("users.id", name="fk_walk_requests_cancelled_by", ondelete="NO ACTION"),
+                          nullable=True)
+    cancelled_actor_role = Column(String(10), nullable=True)
     date_slot_id = Column(Integer, nullable=True)
     idempotency_key = Column(Uuid, nullable=True)
     request_fingerprint = Column(String(64), nullable=True)

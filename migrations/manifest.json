@@ -398,6 +398,20 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "029_reservation_cancellation.sql",
+      "sha256": "b35550eda7dc707ab7b59d035aa17052ee8d42f092ed724f3760062b9fcd2b9b",
+      "requires": [
+        "028_date_slot_booking.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [

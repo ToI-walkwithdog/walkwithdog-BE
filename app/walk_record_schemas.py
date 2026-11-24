@@ -186,6 +186,7 @@ class WalkResponse(UTCResponse):
 
 class ActiveWalkResponse(UTCResponse):
     walk_id: int
+    walk_request_id: int
     started_at: datetime
     planned_duration_minutes: int | None = None
     expected_end_at: datetime | None = None
