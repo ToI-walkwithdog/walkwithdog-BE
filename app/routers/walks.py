@@ -18,7 +18,8 @@ from app.walk_record_schemas import (
     ActiveWalkResponse, PointsReceipt, WalkDetailResponse, WalkEnd, WalkIncidentCreate, WalkIncidentResponse,
     WalkMarkerCreate, WalkMarkerResponse, WalkPointsBatch, WalkResponse, WalkStart,
 )
-from app.walk_service import add_marker, append_points, end_walk, get_active_walk, report_incident, start_walk, walk_detail
+from app.walk_service import (add_marker, append_points, close_stale_walks, end_walk, get_active_walk, report_incident,
+                              start_walk, walk_detail)
 
 router = APIRouter(prefix="/walks", tags=["walks"])
 require_volunteer = require_role(UserRole.USER)
@@ -36,21 +37,38 @@ def persist(db, operation, response_model, actor, *, start_request_id=None):
         raise
     except SQLAlchemyError as exc:
         db.rollback()
-        original = getattr(exc, "orig", None)
-        code = getattr(original, "pgcode", None)
-        name = getattr(getattr(original, "diag", None), "constraint_name", None)
-        if start_request_id is not None:  # Issue #87: the start screen branches on detail.code.
-            if code in ("55P03", "40P01", "40001"):
-                raise start_conflict("WALK_START_RETRYABLE", "다른 작업과 충돌했습니다. 진행 중 산책을 확인한 뒤 다시 시도하세요.") from None
-            if code == "23505" and name == "uq_walks_request":
-                raise start_conflict("WALK_START_ALREADY_STARTED", "이미 산책이 시작된 예약입니다.") from None
+        raise_db_error(exc, start_request_id)
+
+
+def settle_expired(db, actor, *, start_request_id=None):
+    """Issue #89: commit the actor's no-signal auto-timeouts in their own transaction first, so a
+    later 404 or 409 of the same request cannot roll the settlement back."""
+    try:
+        close_stale_walks(db, user_id=actor.id)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise_db_error(exc, start_request_id)
+
+
+def raise_db_error(exc, start_request_id=None):
+    original = getattr(exc, "orig", None)
+    code = getattr(original, "pgcode", None)
+    name = getattr(getattr(original, "diag", None), "constraint_name", None)
+    if start_request_id is not None:  # Issue #87: the start screen branches on detail.code.
         if code in ("55P03", "40P01", "40001"):
-            raise HTTPException(409, "다른 작업과 충돌했습니다. 다시 조회한 뒤 재시도하세요.") from None
-        if code == "23505" and name in ("uq_walks_request", "uq_walk_points_sequence"):
-            raise HTTPException(409, "산책 또는 좌표 순번이 중복됩니다. 저장 상태를 다시 확인하세요.") from None
-        if code == "23505" and name == "volunteer_profiles_pkey":
-            raise HTTPException(409, "봉사자 프로필 생성이 다른 요청과 충돌했습니다. 다시 시도하세요.") from None
-        raise HTTPException(500, "산책 기록을 저장하지 못했습니다.") from None
+            raise start_conflict("WALK_START_RETRYABLE", "다른 작업과 충돌했습니다. 진행 중 산책을 확인한 뒤 다시 시도하세요.") from None
+        if code == "23505" and name == "uq_walks_request":
+            raise start_conflict("WALK_START_ALREADY_STARTED", "이미 산책이 시작된 예약입니다.") from None
+    if code in ("55P03", "40P01", "40001"):
+        raise HTTPException(409, "다른 작업과 충돌했습니다. 다시 조회한 뒤 재시도하세요.") from None
+    if code == "23505" and name in ("uq_walks_request", "uq_walk_points_sequence"):
+        raise HTTPException(409, "산책 또는 좌표 순번이 중복됩니다. 저장 상태를 다시 확인하세요.") from None
+    if code == "23505" and name == "uq_walk_markers_client_marker_id":
+        raise HTTPException(409, "같은 마커 요청이 동시에 처리되었습니다. 다시 시도해 저장 결과를 확인하세요.") from None
+    if code == "23505" and name == "volunteer_profiles_pkey":
+        raise HTTPException(409, "봉사자 프로필 생성이 다른 요청과 충돌했습니다. 다시 시도하세요.") from None
+    raise HTTPException(500, "산책 기록을 저장하지 못했습니다.") from None
 
 
 @router.post("", response_model=WalkResponse, status_code=201)
@@ -59,17 +77,29 @@ def begin(payload: WalkStart, actor: User = Depends(require_volunteer), db: Sess
         require_onboarding_for_new_walk(db, actor)
         return start_walk(db, actor, payload)
 
+    settle_expired(db, actor, start_request_id=payload.walk_request_id)
     return persist(db, operation, WalkResponse, actor, start_request_id=payload.walk_request_id)
 
 
 @router.post("/{walk_id}/points", response_model=PointsReceipt)
 def points(walk_id: int, payload: WalkPointsBatch, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    settle_expired(db, actor)  # an expired walk is settled and committed, then the batch gets 409
     return persist(db, lambda: append_points(db, walk_id, actor, payload), PointsReceipt, actor)
 
 
 @router.post("/{walk_id}/markers", response_model=WalkMarkerResponse, status_code=201)
-def marker(walk_id: int, payload: WalkMarkerCreate, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return persist(db, lambda: add_marker(db, walk_id, actor, payload), WalkMarkerResponse, actor)
+def marker(walk_id: int, payload: WalkMarkerCreate, response: Response, actor: User = Depends(get_current_user),
+           db: Session = Depends(get_db)):
+    """client_marker_id 재요청: 같은 본문은 200과 기존 마커, 다른 본문은 409. 위치가 없으면
+    409 detail.code=MARKER_LOCATION_UNAVAILABLE."""
+    def operation():
+        stored, created = add_marker(db, walk_id, actor, payload)
+        if not created:
+            response.status_code = 200
+        return stored
+
+    settle_expired(db, actor)
+    return persist(db, operation, WalkMarkerResponse, actor)
 
 
 @router.post("/{walk_id}/incidents", response_model=WalkIncidentResponse, status_code=201)
@@ -96,7 +126,9 @@ def end(walk_id: int, payload: WalkEnd, actor: User = Depends(get_current_user),
 
 @router.get("/active", response_model=ActiveWalkResponse)
 def active(actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
-    """현재 로그인한 봉사자의 진행 중인 산책을 복원 조회합니다."""
+    """현재 로그인한 봉사자의 진행 중인 산책을 복원 조회합니다. 무수신 자동 종료 정산은 먼저 커밋되므로
+    404여도 AUTO_TIMEOUT 결과가 남습니다(#89). auto_end_at이 지나면 자동 종료됩니다."""
+    settle_expired(db, actor)
     return persist(db, lambda: get_active_walk(db, actor), ActiveWalkResponse, actor)
 
 

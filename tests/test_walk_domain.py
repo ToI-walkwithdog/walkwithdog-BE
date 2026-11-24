@@ -52,6 +52,7 @@ class WalkMetadataTests(unittest.TestCase):
             "size_code", "difficulty_score", "max_walk_minutes", "date_slot_id", "idempotency_key",
             "request_fingerprint", "creation_receipt",
             "cancel_reason_code", "cancelled_at", "cancelled_by", "cancelled_actor_role",
+            "client_marker_id", "position_recorded_at",  # Issue #89 (031); request_fingerprint is above
         }
         post_007_constraints = {n for n in motion["constraints"]} | {
             "ck_walk_last_coordinate_pair", "ck_walk_last_latitude", "ck_walk_last_longitude",
@@ -61,11 +62,12 @@ class WalkMetadataTests(unittest.TestCase):
             "ck_size_code", "ck_walk_difficulty_score", "ck_walk_max_minutes",
             "fk_walk_requests_date_slot", "ck_walk_request_receipt",
             "fk_walk_requests_cancelled_by", "ck_cancel_reason_code", "ck_cancel_actor_role",
-            "ck_walk_request_cancellation",
+            "ck_walk_request_cancellation", "ck_marker_client_key",
         }
         post_007_indexes = {
             "uq_walk_incidents_reported_client_report_id", "ix_walk_incidents_unacknowledged",
             "ix_walk_requests_date_slot", "uq_walk_requests_user_idempotency", "uq_walk_requests_occupied_date_slot",
+            "uq_walk_markers_client_marker_id",
         }
         historical_order = sort_tables(sorted(Base.metadata.tables.values(), key=lambda table: table.key),
                                        skip_fn=lambda fk: fk.constraint.name in
@@ -148,6 +150,13 @@ class WalkMetadataTests(unittest.TestCase):
             if table.name == "walk_markers":
                 snapshot["columns"].append({"name": "location_source", "type": "character varying(12)", "not_null": True, "default": "'CURRENT'::character varying"})
                 snapshot["constraints"].update({"ck_location_source": None, "ck_marker_other_memo": None})
+                snapshot["columns"].extend([  # Issue #89 (031)
+                    {"name": "client_marker_id", "type": "uuid", "not_null": False, "default": None},
+                    {"name": "request_fingerprint", "type": "character varying(64)", "not_null": False, "default": None},
+                    {"name": "position_recorded_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                ])
+                snapshot["constraints"].update({"ck_marker_client_key": None})
+                snapshot["indexes"].update({"uq_walk_markers_client_marker_id": None})
             if table.name == "walk_incidents":
                 snapshot["columns"].extend([
                     {"name": "client_report_id", "type": "character varying(36)", "not_null": False, "default": None},
