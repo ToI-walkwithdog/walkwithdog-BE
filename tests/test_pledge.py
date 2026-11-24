@@ -121,9 +121,12 @@ class PledgeTests(unittest.TestCase):
         response = self.client.put(PATH, json={"pledge_version": VERSION}, headers={"Authorization": f"Bearer {token}"})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual([r[0] for r in self.records()], [signup.json()["data"]["id"]])
-        # GET /users/me is unchanged here: onboarding status fields belong to Issue #45.
+        # GET /users/me (#45) now reports the pledge and sends the account to Step 1.
         me = self.client.get("/users/me", headers={"Authorization": f"Bearer {token}"}).json()["data"]
-        self.assertEqual(set(me), {"id", "login_id", "nickname", "role", "shelter_id"})
+        self.assertEqual((me["pledge_completed"], me["current_pledge_version"], me["pledge_acknowledged_at"]),
+                         (True, VERSION, response.json()["data"]["acknowledged_at"]))
+        self.assertEqual((me["step1_completed"], me["onboarding_completed"], me["next_onboarding_step"]),
+                         (False, False, "BASIC_INFORMATION"))
 
     def test_older_version_rows_are_kept_and_the_new_version_needs_its_own_pledge(self):
         old_time = datetime(2026, 1, 1, tzinfo=timezone.utc)

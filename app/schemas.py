@@ -132,10 +132,29 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 
+class MeData(UserResponse):
+    """GET /users/me (#45). Basic fields plus onboarding progress computed from stored records.
+
+    General users always get booleans for the step fields and onboarding_completed. Shelter and
+    admin accounts get null for step1/2/3_completed, onboarding_completed and next_onboarding_step
+    (not onboarding targets; null is not a home-entry signal for them) and keep the pledge fields.
+    """
+    account_status: Literal["ACTIVE", "AGE_REVIEW_REQUIRED"]
+    step1_completed: bool | None = Field(description="volunteer_onboarding_basics 기록 존재")
+    step2_completed: bool | None = Field(description="volunteer_onboarding_experiences 기록 존재(경험 없음 포함)")
+    step3_completed: bool | None = Field(description="volunteer_onboarding_routines 기록 존재")
+    pledge_completed: bool = Field(description="서버 현재 서약 버전의 확인 기록 존재")
+    current_pledge_version: str
+    pledge_acknowledged_at: str | None = Field(description="현재 버전 서약 확인 시각(UTC ISO 8601), 없으면 null")
+    onboarding_completed: bool | None = Field(description="ACTIVE이고 현재 서약과 Step 1~3이 모두 완료")
+    next_onboarding_step: Literal["AGE_REVIEW", "PLEDGE", "BASIC_INFORMATION", "PET_EXPERIENCE",
+                                  "WALKING_ROUTINE"] | None
+
+
 class MeResponse(BaseModel):
-    """GET /users/me. Basic account fields only; onboarding progress fields come later (#45)."""
+    """GET /users/me."""
     code: Literal["OK"] = "OK"
-    data: UserResponse
+    data: MeData
     message: str
 
 

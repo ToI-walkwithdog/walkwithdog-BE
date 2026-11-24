@@ -60,6 +60,10 @@ PASSWORD_LENGTH = {"field": "password", "min_length": 15, "max_length": 128}
 class SignupTests(unittest.TestCase):
     def setUp(self):
         use_test_privacy_policy(self)
+        # GET /users/me reads the server's current pledge version (#45); test-only value.
+        pledge_env = patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": "pledge-test-v1"})
+        pledge_env.start()
+        self.addCleanup(pledge_env.stop)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)

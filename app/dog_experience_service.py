@@ -19,10 +19,10 @@ from sqlalchemy.orm import Session
 from app.account_status import ensure_active, lock_user
 from app.api_contract import ContractError
 from app.auth import contract_unauthorized
-from app.models import (CHALLENGE_CODES, DIFFICULTY_CODES, DOG_SIZE_CODES, WALKING_FREQUENCY_CODES,
+from app.models import (CHALLENGE_CODES, DIFFICULTY_CODES, DOG_SIZE_CODES, WALKING_FREQUENCY_CODES, User,
                         VolunteerExperienceChallenge, VolunteerOnboardingExperience)
-from app.onboarding_common import (STEP_BASIC_INFORMATION, STEP_PET_EXPERIENCE, STEP_PLEDGE, STEP_WALKING_ROUTINE,
-                                   as_utc, first_incomplete_step, previous_step_required)
+from app.onboarding_common import (STEP_BASIC_INFORMATION, STEP_PET_EXPERIENCE, STEP_PLEDGE, as_utc,
+                                   first_incomplete_step, previous_step_required)
 
 # Notion proposal, not final (Issue #42 open item); the column is VARCHAR(200).
 BREED_MAX_LENGTH = 200
@@ -97,12 +97,20 @@ def _stored(db: Session, experience: VolunteerOnboardingExperience) -> dict:
             "completed_at": as_utc(experience.completed_at).isoformat()}
 
 
+def _next_step(db: Session, user_id: int) -> str | None:
+    """The shared first incomplete step (#45) instead of a fixed WALKING_ROUTINE."""
+    user = db.get(User, user_id)
+    if user is None:  # deleted by a concurrent sign-up exit
+        raise contract_unauthorized("USER_NOT_FOUND")
+    return first_incomplete_step(db, user)
+
+
 def read_experience(db: Session, user_id: int) -> dict:
     """Read only: no write."""
     experience = db.get(VolunteerOnboardingExperience, user_id)
     if experience is None:
         return {"step2_completed": False, "experience": None, "next_onboarding_step": STEP_PET_EXPERIENCE}
-    return {"step2_completed": True, "experience": _stored(db, experience), "next_onboarding_step": STEP_WALKING_ROUTINE}
+    return {"step2_completed": True, "experience": _stored(db, experience), "next_onboarding_step": _next_step(db, user_id)}
 
 
 def _same(stored: dict, answer: dict) -> bool:
@@ -115,7 +123,8 @@ def _replay(db: Session, experience: VolunteerOnboardingExperience, answer: dict
     stored = _stored(db, experience)
     if not _same(stored, answer):
         raise ContractError(409, "DOG_EXPERIENCE_ALREADY_COMPLETED", "반려견 경험 입력이 이미 완료되었습니다.")
-    return {"step2_completed": True, "completed_at": stored["completed_at"], "next_onboarding_step": STEP_WALKING_ROUTINE}
+    return {"step2_completed": True, "completed_at": stored["completed_at"],
+            "next_onboarding_step": _next_step(db, experience.user_id)}
 
 
 def save_experience(db: Session, user_id: int, answer: dict, now: datetime) -> dict:
@@ -139,9 +148,9 @@ def save_experience(db: Session, user_id: int, answer: dict, now: datetime) -> d
         db.flush()
         db.add_all(VolunteerExperienceChallenge(user_id=user_id, challenge_code=code)
                    for code in answer["challenge_codes"])
+        next_step = first_incomplete_step(db, user)  # sees the flushed Step 2 row
         db.commit()
-        return {"step2_completed": True, "completed_at": as_utc(now).isoformat(),
-                "next_onboarding_step": STEP_WALKING_ROUTINE}
+        return {"step2_completed": True, "completed_at": as_utc(now).isoformat(), "next_onboarding_step": next_step}
     except IntegrityError:
         db.rollback()
         # A concurrent save of this account committed first (primary key).
