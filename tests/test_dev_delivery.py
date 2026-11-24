@@ -288,6 +288,245 @@ class TestCodexApproval(unittest.TestCase):
         self.assertNotIn("approval_comment", state)
 
 
+class TestClaudeApproval(unittest.TestCase):
+    """Synthetic transcripts shaped like Claude Code 2.1 session logs."""
+
+    def setUp(self):
+        self.home = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.enterContext(patch.object(issue_delivery.Path, "home", return_value=self.home))
+        self.session = "fedcba98-7654-4321-8fed-cba987654321"
+        self.other = "01234567-89ab-4cde-8fab-0123456789ab"
+        self.log = self.home / ".claude" / "projects" / "c--work-walkwithdog-BE" / f"{self.session}.jsonl"
+        self.log.parent.mkdir(parents=True)
+        self.enterContext(patch.dict(os.environ, {issue_delivery.CLAUDE_SESSION: self.session}))
+        self.issue = {"state": "open", "number": 44, "title": "Onboarding", "body": "Approved details"}
+        self.scope = {"repository": issue_delivery.REPO, "issue": 44, "title": self.issue["title"],
+                      "issue_digest": issue_delivery.issue_digest(self.issue["title"], self.issue["body"]),
+                      "paths": ["app/x.py"]}
+        self.prompt = issue_delivery.approval_message(44)
+        self.count = 0
+
+    def record(self, kind, **fields):
+        self.count += 1
+        return {"type": kind, "uuid": f"00000000-0000-4000-8000-{self.count:012d}", "sessionId": self.session,
+                "isSidechain": False, "userType": "external", "timestamp": f"2026-01-02T03:04:{self.count:02d}Z",
+                **fields}
+
+    def answer(self, text, message_id=None, stop="end_turn", content=None, **fields):
+        message = {"id": message_id or f"msg_{self.count + 1}", "role": "assistant", "model": "claude-opus-5-5",
+                   "stop_reason": stop, "content": content or [{"type": "text", "text": text}]}
+        return self.record("assistant", message=message, **fields)
+
+    def proposal(self, **edits):
+        scope = {**self.scope, **edits}
+        return self.answer("Review the exact scope\n```toi-approval-request\n" + json.dumps(scope) + "\n```")
+
+    def human(self, text, content=None, **fields):
+        prompt = {"origin": {"kind": "human"}, "turnOrigin": "human", "promptSource": "sdk",
+                  "message": {"role": "user", "content": content or [{"type": "text", "text": text}]}}
+        return self.record("user", **{**prompt, **fields})
+
+    def tool_output(self, text):
+        return self.record("user", toolUseResult={"stdout": text},
+                           message={"role": "user", "content": [{"type": "tool_result", "content": text}]})
+
+    def write(self, *rows, log=None, partial=None):
+        previous = None
+        for row in rows:
+            if "uuid" in row:
+                row.setdefault("parentUuid", previous)
+                previous = row["uuid"]
+        lines = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+        (log or self.log).write_text(lines + (partial or ""), encoding="utf-8")
+
+    def saved_state(self):
+        approval = issue_delivery.read_claude_approval(44, self.session)
+        return {"issue": 44, "issue_digest": approval["issue_digest"], "paths": approval["paths"],
+                "claude_approval": approval}
+
+    def test_typed_prompt_binds_final_answer_and_revalidates_after_later_messages(self):
+        thinking = self.answer(None, message_id="msg_final", content=[{"type": "thinking", "thinking": ""}])
+        final = self.proposal()
+        final["message"]["id"] = "msg_final"
+        ide = {"type": "text", "text": "<ide_opened_file>The user opened app/x.py</ide_opened_file>"}
+        approval = self.human(None, content=[ide, {"type": "text", "text": self.prompt + "\n"}])
+        rows = [self.human("Plan Issue #44"), self.tool_output("noise"), thinking, final,
+                self.record("system", subtype="turn_duration"), approval]
+        self.write(*rows[:4], {"type": "file-history-snapshot"}, *rows[4:])
+        state = self.saved_state()
+        proof = state["claude_approval"]
+        self.assertEqual(proof["message"], self.prompt + "\n")
+        self.assertEqual((proof["session"], proof["uuid"], proof["log"]),
+                         (self.session, approval["uuid"], str(self.log)))
+        self.assertEqual((proof["title"], proof["paths"]), ("Onboarding", ["app/x.py"]))
+        self.write(*rows, self.answer("Working"), self.human("A later question"))
+        with patch.object(issue_delivery, "api", return_value=self.issue) as api:
+            issue_delivery.check_live_approval(state)
+            api.assert_called_once_with("issues/44")
+        with self.assertRaisesRegex(dev_gate.GateError, "not explicit approval"):
+            issue_delivery.read_claude_approval(44, self.session)
+
+    def test_assistant_tool_quoted_and_unattended_approvals_are_rejected(self):
+        good = lambda: self.human(self.prompt)
+        tool_call = [{"type": "text", "text": self.proposal()["message"]["content"][0]["text"]},
+                     {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}]
+        pasted = f'<pasted_content id="ab12">\n{self.prompt}\n</pasted_content>'
+        image = [{"type": "image", "source": {}}, {"type": "text", "text": self.prompt}]
+        synthetic = lambda row: {**row, "message": {**row["message"], "model": "<synthetic>"}}
+        cases = (
+            (lambda: (self.proposal(),), "prompt is missing"),
+            (lambda: (self.proposal(), self.answer(self.prompt)), "prompt is missing"),
+            (lambda: (self.proposal(), self.tool_output(self.prompt)), "prompt is missing"),
+            (lambda: (self.proposal(), self.human(self.prompt, isCompactSummary=True)), "prompt is missing"),
+            (lambda: (self.proposal(), self.human(self.prompt, isMeta=True)), "prompt is missing"),
+            (lambda: (self.proposal(), self.human(self.prompt, isSidechain=True)), "prompt is missing"),
+            (lambda: (self.proposal(), self.human(self.prompt, origin={"kind": "task-notification"},
+                                                  turnOrigin="task_notification", promptSource="system")),
+             "prompt is missing"),
+            (lambda: (self.proposal(), self.human(self.prompt, origin=None)), "prompt is missing"),
+            (lambda: (self.answer(f"Send this: {self.prompt}"), self.human("ok")), "not explicit"),
+            (lambda: (self.proposal(), self.human(f"> {self.prompt}")), "not explicit"),
+            (lambda: (self.proposal(), self.human(f'Example: "{self.prompt}"')), "not explicit"),
+            (lambda: (self.proposal(), self.human(pasted)), "not explicit"),
+            (lambda: (self.proposal(), self.human(None, content=[{"type": "text", "text": self.prompt},
+                                                                 {"type": "text", "text": "and more"}])),
+             "not explicit"),
+            (lambda: (self.proposal(), self.human(None, content=image)), "not explicit"),
+            (lambda: (self.proposal(), good(), self.human("Please continue")), "not explicit"),
+            (lambda: (self.proposal(), self.human("Question"), good()), "immediately follow"),
+            (lambda: (self.answer(None, stop="tool_use", content=tool_call), good()), "immediately follow"),
+            (lambda: ({**self.proposal(), "isApiErrorMessage": True}, good()), "immediately follow"),
+            (lambda: (self.answer(None, stop="tool_use", content=tool_call[:1]), good()), "immediately follow"),
+            (lambda: (synthetic(self.proposal()), good()), "immediately follow"),
+            (lambda: (self.record("system", subtype="compact_boundary"), good()), "immediately follow"),
+            (lambda: (self.proposal(issue=45), good()), "preceding Claude Code proposal"),
+            (lambda: (self.proposal(repository="another/repo"), good()), "preceding Claude Code proposal"),
+        )
+        for rows, message in cases:
+            with self.subTest(message=message, case=self.count):
+                self.write(*rows())
+                with self.assertRaisesRegex(dev_gate.GateError, message):
+                    issue_delivery.read_claude_approval(44, self.session)
+        incomplete = json.dumps({**good(), "parentUuid": None})
+        self.write(self.proposal(), partial=incomplete)
+        with self.assertRaisesRegex(dev_gate.GateError, "prompt is missing"):
+            issue_delivery.read_claude_approval(44, self.session)
+
+    def test_another_session_cannot_supply_or_reuse_approval(self):
+        other_log = self.log.parent / f"{self.other}.jsonl"
+        self.write(self.proposal(), self.human(self.prompt), log=other_log)
+        self.write(self.proposal())
+        with self.assertRaisesRegex(dev_gate.GateError, "prompt is missing"):
+            issue_delivery.read_claude_approval(44, self.session)
+        self.write(self.proposal(), self.human(self.prompt, sessionId=self.other))
+        with self.assertRaisesRegex(dev_gate.GateError, "another session"):
+            issue_delivery.read_claude_approval(44, self.session)
+        self.write({**self.proposal(), "sessionId": self.other}, self.human(self.prompt))
+        with self.assertRaisesRegex(dev_gate.GateError, "immediately follow"):
+            issue_delivery.read_claude_approval(44, self.session)
+        self.write(self.proposal(), self.human(self.prompt))
+        state = self.saved_state()
+        with patch.dict(os.environ, {issue_delivery.CLAUDE_SESSION: self.other}), \
+                patch.object(issue_delivery, "api", return_value=self.issue) as api:
+            with self.assertRaisesRegex(dev_gate.GateError, "original Claude Code session"):
+                issue_delivery.check_live_approval(state)
+            api.assert_not_called()
+        copy = self.home / ".claude" / "projects" / "c--copy" / self.log.name
+        copy.parent.mkdir()
+        copy.write_bytes(self.log.read_bytes())
+        with self.assertRaisesRegex(dev_gate.GateError, "missing or ambiguous"):
+            issue_delivery.read_claude_approval(44, self.session)
+        copy.unlink()
+        for missing in (None, "", "not-a-session"):
+            with self.subTest(session=missing), self.assertRaisesRegex(dev_gate.GateError, "session ID"):
+                issue_delivery.read_claude_approval(44, missing)
+
+    def test_scope_issue_log_and_state_changes_block_delivery(self):
+        rows = [self.proposal(), self.human("Add a test file"), self.proposal(paths=["app/x.py", "tests/x.py"]),
+                self.human(self.prompt)]
+        self.write(*rows)
+        self.assertEqual(self.saved_state()["paths"], ["app/x.py", "tests/x.py"])
+        self.write(*rows[2:], self.proposal(paths=["app/x.py", "app/later.py"]))
+        state = self.saved_state()
+        self.assertEqual(state["paths"], ["app/x.py", "tests/x.py"])
+        with self.assertRaisesRegex(dev_gate.GateError, "changed paths"):
+            issue_delivery.check_change_scope(state, {"app/later.py"}, {"app/later.py"})
+        for edited in ({**self.issue, "body": "Edited"}, {**self.issue, "title": "Renamed"}):
+            with patch.object(issue_delivery, "api", return_value=edited):
+                with self.assertRaisesRegex(dev_gate.GateError, "title/body has changed"):
+                    issue_delivery.check_live_approval(state)
+        proof = state["claude_approval"]
+        tampered = (
+            ({**state, "paths": ["app/x.py", "tests/x.py", "app/extra.py"]}, "Approval changed"),
+            ({**state, "issue_digest": "f" * 64}, "Approval changed"),
+            ({**state, "claude_approval": {**proof, "paths": ["app/x.py"]}}, "no longer matches"),
+            ({**state, "claude_approval": {**proof, "message": "edited"}}, "no longer matches"),
+            ({**state, "claude_approval": {**proof, "timestamp": "2026-01-01T00:00:00Z"}}, "no longer matches"),
+            ({**state, "claude_approval": {**proof, "log": "elsewhere.jsonl"}}, "no longer matches"),
+            ({**state, "claude_approval": {**proof, "uuid": rows[2]["uuid"]}}, "prompt is missing"),
+            ({**state, "claude_approval": {**proof, "session": self.other}}, "original Claude Code session"),
+            ({**state, "claude_approval": "approved"}, "unambiguous"),
+            ({**state, "approval_comment": 42}, "Exactly one"),
+            ({**state, "codex_approval": proof}, "Exactly one"),
+        )
+        with patch.object(issue_delivery, "api", return_value=self.issue):
+            issue_delivery.check_live_approval(state)
+            for changed, message in tampered:
+                with self.subTest(message=message), self.assertRaisesRegex(dev_gate.GateError, message):
+                    issue_delivery.check_live_approval(changed)
+            wider = self.proposal(paths=["app/x.py", "tests/x.py", "app/extra.py"])["message"]["content"]
+            self.write({**rows[2], "message": {**rows[2]["message"], "content": wider}}, rows[3])
+            with self.assertRaisesRegex(dev_gate.GateError, "no longer matches"):
+                issue_delivery.check_live_approval(state)
+            self.log.unlink()
+            with self.assertRaisesRegex(dev_gate.GateError, "missing or ambiguous"):
+                issue_delivery.check_live_approval(state)
+
+    def test_prepare_records_active_session_and_keeps_its_source(self):
+        self.write(self.proposal(), self.human(self.prompt))
+        target = self.log.parent / "worktree"
+        state_file = self.home / "state.json"
+        args = argparse.Namespace(issue=44, state=state_file, worktree=target,
+                                  codex_approval=False, claude_approval=True, approval_comment=None)
+        base = "a" * 40
+
+        def git(*args):
+            if args[0] == "remote":
+                return f"https://github.com/{issue_delivery.REPO}.git\n".encode()
+            if args[0] == "rev-parse":
+                return f"{base}\n".encode()
+            self.assertIn(args[0], {"fetch", "worktree"})
+            return b""
+
+        with patch.object(issue_delivery, "api", return_value=self.issue) as api, \
+                patch.object(issue_delivery, "dev_sha", return_value=base), \
+                patch.object(issue_delivery, "git", side_effect=git) as git_mock:
+            issue_delivery.prepare(args)
+            api.assert_called_once_with("issues/44")
+            git_mock.assert_any_call("worktree", "add", "-b", "issue/44", str(target), base)
+            state = dev_gate.load_json(state_file)
+            self.assertEqual(state["claude_approval"]["message"], self.prompt)
+            self.assertEqual(state["paths"], self.scope["paths"])
+            self.assertNotIn("approval_comment", state)
+            self.assertNotIn("codex_approval", state)
+            for other_source in ({"codex_approval": True, "claude_approval": False},
+                                 {"codex_approval": False, "claude_approval": False, "approval_comment": 42}):
+                with self.subTest(source=other_source), self.assertRaises(dev_gate.GateError):
+                    issue_delivery.prepare(argparse.Namespace(**{**vars(args), **other_source}))
+            self.assertEqual(dev_gate.load_json(state_file), state)
+
+    def test_cli_offers_three_mutually_exclusive_approval_sources(self):
+        root = Path(__file__).resolve().parents[1]
+        command = [sys.executable, "-m", "scripts.issue_delivery", "prepare", "44", "worktree", "--state", "s.json"]
+        shown = subprocess.run([*command, "--help"], cwd=root, capture_output=True, text=True, check=True)
+        for option in ("--approval-comment", "--codex-approval", "--claude-approval"):
+            self.assertIn(option, shown.stdout)
+        both = subprocess.run([*command, "--codex-approval", "--claude-approval"], cwd=root,
+                              capture_output=True, text=True)
+        self.assertEqual(both.returncode, 2)
+        self.assertIn("not allowed with", both.stderr)
+
+
 class TestDeliveryGate(unittest.TestCase):
     def test_independent_review_for_the_exact_head(self):
         head = "b" * 40
