@@ -10,6 +10,7 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.dependencies import require_role
 from app.models import User, UserRole
+from app.onboarding_common import require_onboarding_for_new_walk
 from app.walk_map_schemas import UserWalksResponse
 from app.walk_map_service import user_walk_history
 from app.walk_record_schemas import (
@@ -47,7 +48,11 @@ def persist(db, operation, response_model, actor):
 
 @router.post("", response_model=WalkResponse, status_code=201)
 def begin(payload: WalkStart, actor: User = Depends(require_volunteer), db: Session = Depends(get_db)):
-    return persist(db, lambda: start_walk(db, actor, payload), WalkResponse, actor)
+    def operation():
+        require_onboarding_for_new_walk(db, actor)
+        return start_walk(db, actor, payload)
+
+    return persist(db, operation, WalkResponse, actor)
 
 
 @router.post("/{walk_id}/points", response_model=PointsReceipt)

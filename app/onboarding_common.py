@@ -20,17 +20,17 @@ the age review flow (#41) and GET /users/me (#45).
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import Depends
+from fastapi import Depends, HTTPException
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.account_status import ACCOUNT_ACTIVE, ensure_active
-from app.api_contract import ContractError
-from app.auth import contract_unauthorized, get_contract_user
+from app.api_contract import ContractError, INTERNAL_SERVER_ERROR_MESSAGE
+from app.auth import contract_unauthorized, get_contract_user, unauthorized
 from app.database import get_db
 from app.models import (User, UserPledgeAcknowledgement, UserRole, VolunteerOnboardingBasic,
                         VolunteerOnboardingExperience, VolunteerOnboardingRoutine)
-from app.pledge_service import current_pledge_acknowledgement, current_pledge_version
+from app.pledge_service import PledgeVersionNotConfigured, current_pledge_acknowledgement, current_pledge_version
 
 KST = timezone(timedelta(hours=9), "Asia/Seoul")
 
@@ -179,6 +179,18 @@ def first_incomplete_step(db: Session, user: User) -> str | None:
         return STEP_AGE_REVIEW  # as before: no pledge version or record is needed for this answer
     progress = replace(load_progress(db, user.id), account_status=user.account_status)
     return next_onboarding_step(user.role, progress)
+
+
+def require_onboarding_for_new_walk(db: Session, user: User) -> None:
+    """Check new volunteer activities after role and locked account status checks."""
+    try:
+        step = first_incomplete_step(db, user)
+    except PledgeVersionNotConfigured:
+        raise HTTPException(500, INTERNAL_SERVER_ERROR_MESSAGE) from None
+    except ContractError:  # load_progress() could no longer find the account.
+        raise unauthorized() from None
+    if step is not None:
+        raise HTTPException(403, "온보딩을 먼저 완료해 주세요.")
 
 
 def onboarding_status(db: Session, user: User) -> dict:
