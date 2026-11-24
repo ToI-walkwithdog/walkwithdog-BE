@@ -11,6 +11,10 @@ from app.volunteer_stats import refresh_volunteer_profile
 from app.walk_map_service import OWNER_MAX_ROUTE_POINTS
 from datetime import timedelta
 
+# Issue #99: owner-only statistics on /volunteers/me; /users/{id}/profile must not expose them.
+HISTORY_STATISTICS = {"history_walk_count", "history_distance_m", "history_unique_dog_count",
+                      "history_distance_missing_count", "history_distance_is_complete"}
+
 
 class OwnerMapTests(WalkMapFixture, unittest.TestCase):
     def setUp(self):
@@ -162,6 +166,7 @@ class HistoryAndProfileTests(WalkMapFixture, unittest.TestCase):
         profile = self.get("/users/2/profile", 2).json()
         me = self.get("/volunteers/me", 2).json()
         self.assertEqual(profile.pop("nickname"), "사용자2")
+        self.assertFalse(HISTORY_STATISTICS & set(profile), "profile must not expose owner statistics")
         self.assertEqual(me, {
             **profile,
             "history_walk_count": 0,
@@ -177,6 +182,7 @@ class HistoryAndProfileTests(WalkMapFixture, unittest.TestCase):
         profile = self.get("/users/1/profile").json()
         me = self.get("/volunteers/me").json()
         self.assertEqual(profile.pop("nickname"), "사용자1")
+        self.assertFalse(HISTORY_STATISTICS & set(profile), "profile must not expose owner statistics")
         self.assertEqual(me, {
             **profile,
             "history_walk_count": 1,

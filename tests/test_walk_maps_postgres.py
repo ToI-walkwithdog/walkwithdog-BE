@@ -10,6 +10,10 @@ from walk_map_test_support import WalkMapFixture
 from app.models import VolunteerProfile
 from app.volunteer_stats import refresh_volunteer_profile
 from app.walk_map_service import OWNER_MAX_ROUTE_POINTS
+
+# Issue #99: owner-only statistics on /volunteers/me; /users/{id}/profile must not expose them.
+HISTORY_STATISTICS = {"history_walk_count", "history_distance_m", "history_unique_dog_count",
+                      "history_distance_missing_count", "history_distance_is_complete"}
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.exc import DBAPIError
 from scripts.backfill_volunteer_stats import rebuild_profiles
@@ -64,6 +68,7 @@ class WalkMapPostgresTests(MapIntegrationAssertions, WalkMapFixture, unittest.Te
         self.complete_via_api()
         profile, me = self.get("/users/1/profile").json(), self.get("/volunteers/me").json()
         profile.pop("nickname")
+        self.assertFalse(HISTORY_STATISTICS & set(profile), "profile must not expose owner statistics")
         self.assertEqual(me, {
             **profile,
             "history_walk_count": 1,
