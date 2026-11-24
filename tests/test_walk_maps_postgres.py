@@ -64,7 +64,14 @@ class WalkMapPostgresTests(MapIntegrationAssertions, WalkMapFixture, unittest.Te
         self.complete_via_api()
         profile, me = self.get("/users/1/profile").json(), self.get("/volunteers/me").json()
         profile.pop("nickname")
-        self.assertEqual(profile, me)
+        self.assertEqual(me, {
+            **profile,
+            "history_walk_count": 1,
+            "history_distance_m": "22.24",
+            "history_unique_dog_count": 1,
+            "history_distance_missing_count": 0,
+            "history_distance_is_complete": True,
+        })
         self.assertEqual((me["total_walk_count"], me["total_distance_m"], me["unique_dog_count"]), (1, "22.24", 1))
         history = self.get("/users/1/walks").json()
         self.assertEqual([(w["status"], w["counted_as_volunteer_record"]) for w in history["walks"]], [("COMPLETED", True)])
