@@ -454,6 +454,20 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "033_walk_private_memos.sql",
+      "sha256": "fa07a855f95d034703683899c55be6a5f8265e88ef6e59234a2bc55752ff7b6d",
+      "requires": [
+        "032_walk_handovers.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [

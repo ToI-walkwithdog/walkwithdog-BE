@@ -226,6 +226,7 @@ class Walk(Timestamps, Base):
     volunteer_review = relationship("ShelterVolunteerReview", back_populates="walk", uselist=False, passive_deletes="all")
     incidents = relationship("WalkIncident", back_populates="walk", passive_deletes="all")
     handover = relationship("WalkHandover", back_populates="walk", uselist=False, passive_deletes="all")
+    private_memo = relationship("WalkPrivateMemo", back_populates="walk", uselist=False, passive_deletes="all")
 
 
 class WalkHandover(Timestamps, Base):
@@ -264,6 +265,23 @@ class WalkHandover(Timestamps, Base):
     @property
     def handover_status(self) -> str:
         return "SELF_REPORTED" if self.handover_result == "COMPLETE" else "ISSUE_REPORTED"
+
+
+class WalkPrivateMemo(Timestamps, Base):
+    __tablename__ = "walk_private_memos"
+    __table_args__ = (
+        UniqueConstraint("walk_id", name="uq_walk_private_memos_walk"),
+        CheckConstraint("trim(memo) <> '' AND length(memo) <= 1000", name="ck_walk_private_memo_content"),
+        CheckConstraint("version >= 1", name="ck_walk_private_memo_version"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    walk_id = Column(Integer, reference("walks"), nullable=False)
+    author_user_id = Column(Integer, reference("users"), nullable=False)
+    memo = Column(String(1000), nullable=False)
+    version = Column(Integer, nullable=False)
+
+    walk = relationship("Walk", back_populates="private_memo")
 
 
 class WalkPoint(Base):

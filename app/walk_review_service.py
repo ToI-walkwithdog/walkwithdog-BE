@@ -4,17 +4,19 @@ from fastapi import HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import Shelter, User, Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest, WalkReview, WalkReviewTag
+from app.models import Shelter, User, UserRole, Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest, WalkReview, WalkReviewTag
+from app.walk_models import WalkPrivateMemo
 from app.walk_record_schemas import WalkIncidentResponse, WalkMarkerResponse
 from app.walk_review_schemas import (
     SummaryMetrics,
     SummaryPoint,
     SummaryWalkInfo,
+    WalkPrivateMemoWrite,
     WalkReviewCreate,
     WalkReviewResponse,
     WalkSummaryResponse,
 )
-from app.walk_service import utc_now
+from app.walk_service import lock_handover_walk, utc_now
 
 
 def get_walk_summary_max_points() -> int:
@@ -134,6 +136,7 @@ def get_walk_summary(db: Session, walk_id: int, actor: User) -> WalkSummaryRespo
     return WalkSummaryResponse(
         walk=walk_info,
         handover_status=walk.handover_status,
+        private_memo=walk.private_memo if actor.role == UserRole.USER else None,
         summary=summary_metrics,
         points=points,
         points_total=points_total,
@@ -144,6 +147,40 @@ def get_walk_summary(db: Session, walk_id: int, actor: User) -> WalkSummaryRespo
         shelter_link=shelter_link,
         review=review_resp,
     )
+
+
+def upsert_walk_private_memo(
+    db: Session, walk_id: int, actor: User, payload: WalkPrivateMemoWrite,
+) -> tuple[WalkPrivateMemo, bool]:
+    # This lock already handles owner checks and serializes this write with handover and other memo requests.
+    walk = lock_handover_walk(db, walk_id, actor)
+    if walk.status not in ("COMPLETED", "INTERRUPTED"):
+        raise HTTPException(409, "종료된 산책만 개인 메모를 저장할 수 있습니다.")
+    if walk.handover_status not in ("SELF_REPORTED", "ISSUE_REPORTED", "NOT_REQUIRED"):
+        raise HTTPException(409, "인계를 접수한 뒤 개인 메모를 저장할 수 있습니다.")
+
+    memo = walk.private_memo
+    if memo is not None and memo.memo == payload.memo:
+        return memo, False
+
+    current_version = memo.version if memo is not None else 0
+    if payload.expected_version != current_version:
+        raise HTTPException(409, "메모가 변경되었습니다. 최신 메모를 조회해 주세요.")
+
+    now = utc_now()
+    created = memo is None
+    if created:
+        memo = WalkPrivateMemo(
+            walk_id=walk.id, author_user_id=actor.id, memo=payload.memo, version=1,
+            created_at=now, updated_at=now,
+        )
+        db.add(memo)
+    else:
+        memo.memo = payload.memo
+        memo.version += 1
+        memo.updated_at = now
+    db.flush()
+    return memo, created
 
 
 def upsert_walk_review(db: Session, walk_id: int, actor: User, payload: WalkReviewCreate) -> tuple[WalkReviewResponse, bool]:
