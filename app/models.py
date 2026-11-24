@@ -3,7 +3,7 @@ import enum
 from sqlalchemy import (BigInteger, CheckConstraint, Column, Integer, SmallInteger, String, Text, DateTime,
                         ForeignKey, JSON, PrimaryKeyConstraint, UniqueConstraint, Boolean, Enum, Date, Time, Index,
                         Uuid)
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, true
 from app.database import Base
 from sqlalchemy.orm import relationship
 
@@ -282,6 +282,8 @@ class Shelter(Base):
     address = Column(String(255), nullable=True)
     website_url = Column(String(255), nullable=True)
     external_code = Column(String(50), nullable=True, unique=True)
+    region_code = Column(String(20), ForeignKey("regions.region_code", name="fk_shelters_region_code"),
+                         nullable=True, index=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     dogs = relationship("Dog", back_populates="shelter")
@@ -297,6 +299,7 @@ class Dog(Base):
     name = Column(String(50), nullable=False)
     breed = Column(String(50), nullable=True)
     age = Column(Integer, nullable=True)
+    age_months = Column(Integer, nullable=False, default=0, server_default="0")
     gender = Column(String(20), nullable=True)
     image_url = Column(String(255), nullable=True)
 
@@ -333,13 +336,20 @@ class Dog(Base):
 
 class DogWalkDateSlot(Base):
     __tablename__ = "dog_walk_date_slots"
-    
+    __table_args__ = (
+        CheckConstraint("start_time < end_time", name="ck_date_slot_time_order"),
+        CheckConstraint("duration_minutes IN (30, 60, 90)", name="dog_walk_date_slots_duration_minutes_check"),
+        UniqueConstraint("id", "dog_id", name="uq_date_slot_dog"),
+        Index("idx_dog_walk_date_slots_dog_date", "dog_id", "slot_date"),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
     dog_id = Column(Integer, ForeignKey("dogs.id", ondelete="CASCADE"), nullable=False)
     slot_date = Column(Date, nullable=False)
     start_time = Column(Time, nullable=False)
     end_time = Column(Time, nullable=False)
     duration_minutes = Column(Integer, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True, server_default=true())
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     dog = relationship("Dog", backref="date_slots")

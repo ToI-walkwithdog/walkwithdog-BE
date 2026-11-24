@@ -184,13 +184,21 @@ def first_incomplete_step(db: Session, user: User) -> str | None:
 def require_onboarding_for_new_walk(db: Session, user: User) -> None:
     """Check new volunteer activities after role and locked account status checks."""
     try:
-        step = first_incomplete_step(db, user)
+        require_walk_onboarding(db, user)
     except PledgeVersionNotConfigured:
         raise HTTPException(500, INTERNAL_SERVER_ERROR_MESSAGE) from None
-    except ContractError:  # load_progress() could no longer find the account.
-        raise unauthorized() from None
+    except ContractError as error:
+        if error.status_code == 401:
+            raise unauthorized() from None
+        raise HTTPException(error.status_code, error.message) from None
+
+
+def require_walk_onboarding(db: Session, user: User) -> None:
+    """Use the same progress rule for legacy and date-slot route contracts."""
+    step = first_incomplete_step(db, user)
     if step is not None:
-        raise HTTPException(403, "온보딩을 먼저 완료해 주세요.")
+        raise ContractError(403, "ONBOARDING_NOT_COMPLETED", "온보딩을 먼저 완료해 주세요.",
+                            {"next_onboarding_step": step})
 
 
 def onboarding_status(db: Session, user: User) -> dict:

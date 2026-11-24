@@ -28,29 +28,6 @@
       "message": "KeyError: 'shelter_volunteer_reviews'",
       "issue": 66,
       "reason": "007의 기존 10개 모델과 비교하는 테스트에 F-15의 020 평가 모델 2개가 함께 등록된다."
-    },
-    {
-      "nodeid": "tests/test_walk_settings_api.py::WalkSettingsAPITests::test_invalid_scalar_types_and_unknown_fields_are_422",
-      "phase": "call",
-      "subtest": {
-        "message": null,
-        "kwargs": {
-          "body": "{'difficulty': 'INTERMEDIATE'}"
-        }
-      },
-      "outcome": "failed",
-      "message": "AssertionError: 200 != 422",
-      "issue": null,
-      "reason": "INTERMEDIATE가 현재 유효한 산책 난이도인데 테스트는 422와 설정 무변경을 기대한다."
-    },
-    {
-      "nodeid": "tests/test_walk_settings_api.py::WalkSettingsAPITests::test_invalid_scalar_types_and_unknown_fields_are_422",
-      "phase": "call",
-      "subtest": null,
-      "outcome": "failed",
-      "message": "AssertionError: Tuples differ: ([(1, 4, True, 'INTERMEDIATE', '기존 주의사항', 30, datetime.datetime(<abbreviated>)]) != ([(1, 4, True, 'BEGINNER', '기존 주의사항', 30, datetime.datetime(<abbreviated>)])\n\nFirst differing element 0:\n[(1, 4, True, 'INTERMEDIATE', '기존 주의사항', 30, datetime.datetime(<abbreviated>)]\n[(1, 4, True, 'BEGINNER', '기존 주의사항', 30, datetime.datetime(<abbreviated>)]\n\n  ([(1,\n     4,\n     True,\n-    'INTERMEDIATE',\n+    'BEGINNER',\n     '기존 주의사항',\n     30,\n     datetime.datetime(<timestamp>),\n     datetime.datetime(<timestamp>)),\n    (2,\n     5,\n     False,\n     'BEGINNER',\n     None,\n     None,\n     datetime.datetime(<timestamp>),\n     datetime.datetime(<timestamp>))],\n   [(1, 1, 0, datetime.time(9, 0), datetime.time(11, 0))])",
-      "issue": null,
-      "reason": "INTERMEDIATE가 현재 유효한 산책 난이도인데 테스트는 422와 설정 무변경을 기대한다."
     }
   ],
   "skips": [
@@ -719,6 +696,26 @@
     "tests/test_check_migrations.py::test_unknown_dependency",
     "tests/test_check_migrations.py::test_unmerged_sql_is_never_listed_for_apply",
     "tests/test_check_migrations.py::test_wrong_order",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_availability_filters_before_paging_and_keeps_visit_information_private",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_availability_reuses_onboarding_and_validates_parameters",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_changed_wrong_and_expired_slots_are_rejected_without_creating_requests",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_date_slot_booking_approves_starts_and_ends_without_a_weekly_slot",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_existing_weekly_booking_blocks_date_overlap_but_allows_touching_boundaries",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_file_and_database_are_rolled_back_when_a_slot_is_invalid",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_management_enforces_owner_future_bounds_duration_and_overlap",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_new_registration_saves_image_dog_settings_and_slots_then_serves_the_image",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_region_management_reuses_selectable_region_and_shelter_permissions",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_retiring_and_replacing_slots_preserves_original_reservation_and_history",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_retry_preserves_first_response_after_status_time_and_pledge_change",
+    "tests/test_date_slot_booking.py::DateSlotBookingTests::test_slot_occupancy_blocks_both_paths_and_releases_after_rejection_or_cancellation",
+    "tests/test_date_slot_booking_postgres.py::DateSlotConcurrencyTests::test_concurrent_approval_then_cancellation_retries_in_order",
+    "tests/test_date_slot_booking_postgres.py::DateSlotConcurrencyTests::test_cross_contract_overlap_releases_after_cancel_and_retains_legacy_shape",
+    "tests/test_date_slot_booking_postgres.py::DateSlotConcurrencyTests::test_date_slot_start_and_cancel_do_not_wait_for_actor_lock_upgrade",
+    "tests/test_date_slot_booking_postgres.py::DateSlotConcurrencyTests::test_same_key_retries_without_second_booking_after_transient_lock",
+    "tests/test_date_slot_booking_postgres.py::DateSlotConcurrencyTests::test_slot_edit_cannot_run_between_reservation_check_and_commit",
+    "tests/test_date_slot_booking_postgres.py::DateSlotConcurrencyTests::test_two_users_try_same_slot_and_only_first_transaction_reserves_it",
+    "tests/test_date_slot_booking_postgres.py::DateSlotMigrationTests::test_028_applies_to_empty_predecessor_and_sets_fk_and_partial_index",
+    "tests/test_date_slot_booking_postgres.py::DateSlotMigrationTests::test_028_retains_manually_linked_010_history_and_prevents_cascading_deletion",
     "tests/test_demo_tools.py::DemoHTTPErrorTests::test_local_only_url_and_timeout_validation",
     "tests/test_demo_tools.py::DemoHTTPErrorTests::test_main_returns_nonzero_on_failure",
     "tests/test_demo_tools.py::DemoHTTPErrorTests::test_malformed_options_stop_before_survey_creation",

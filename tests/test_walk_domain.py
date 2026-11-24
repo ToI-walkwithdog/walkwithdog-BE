@@ -19,6 +19,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import configure_mappers, sessionmaker
 from sqlalchemy.schema import CreateIndex, CreateTable
+from sqlalchemy.sql.ddl import sort_tables
 
 from scripts.migrate_backend import check_version, migrate
 from scripts.prepare_demo_db import PreparationError, ROOT
@@ -48,17 +49,25 @@ class WalkMetadataTests(unittest.TestCase):
             "end_reason", "client_report_id", "acknowledged_at", "acknowledged_by",
             "rating", "comment", "location_source",
             "planned_duration_minutes", "expected_end_at",
+            "size_code", "difficulty_score", "max_walk_minutes", "date_slot_id", "idempotency_key",
+            "request_fingerprint", "creation_receipt",
         }
         post_007_constraints = {n for n in motion["constraints"]} | {
             "ck_walk_last_coordinate_pair", "ck_walk_last_latitude", "ck_walk_last_longitude",
             "ck_walk_last_accuracy", "ck_walk_end_reason", "ck_incident_acknowledgement",
             "ck_walk_review_rating", "ck_location_source", "ck_marker_other_memo",
             "ck_walk_planned_duration", "ck_walk_expected_end_order",
+            "ck_size_code", "ck_walk_difficulty_score", "ck_walk_max_minutes",
+            "fk_walk_requests_date_slot", "ck_walk_request_receipt",
         }
         post_007_indexes = {
             "uq_walk_incidents_reported_client_report_id", "ix_walk_incidents_unacknowledged",
+            "ix_walk_requests_date_slot", "uq_walk_requests_user_idempotency", "uq_walk_requests_occupied_date_slot",
         }
-        for table in Base.metadata.sorted_tables:
+        historical_order = sort_tables(sorted(Base.metadata.tables.values(), key=lambda table: table.key),
+                                       skip_fn=lambda fk: fk.constraint.name in
+                                       {"fk_shelters_region_code", "fk_walk_requests_date_slot"})
+        for table in historical_order:
             if table.name in names:
                 ddl = str(CreateTable(table, if_not_exists=True).compile(dialect=postgresql.dialect())).strip()
                 # Compare the immutable 007 projection, excluding subsequent migration additions.
@@ -100,8 +109,25 @@ class WalkMetadataTests(unittest.TestCase):
         for model in WALK_MODELS:
             table = model.__table__
             snapshot = contract[table.name]
+            if table.name == "dog_walk_settings":
+                snapshot["columns"].extend([
+                    {"name": "size_code", "type": "character varying(10)", "not_null": False, "default": None},
+                    {"name": "difficulty_score", "type": "numeric(2,1)", "not_null": False, "default": None},
+                    {"name": "max_walk_minutes", "type": "integer", "not_null": False, "default": None},
+                ])
+                snapshot["constraints"].update({"ck_size_code": None, "ck_walk_difficulty_score": None,
+                                                "ck_walk_max_minutes": None})
             if table.name == "walk_requests":
-                snapshot["columns"].append({"name": "rejection_reason_code", "type": "character varying(30)", "not_null": False, "default": None})
+                snapshot["columns"].extend([
+                    {"name": "rejection_reason_code", "type": "character varying(30)", "not_null": False, "default": None},
+                    {"name": "date_slot_id", "type": "integer", "not_null": False, "default": None},
+                    {"name": "idempotency_key", "type": "uuid", "not_null": False, "default": None},
+                    {"name": "request_fingerprint", "type": "character varying(64)", "not_null": False, "default": None},
+                    {"name": "creation_receipt", "type": "json", "not_null": False, "default": None},
+                ])
+                snapshot["constraints"].update({"fk_walk_requests_date_slot": None, "ck_walk_request_receipt": None})
+                snapshot["indexes"].update({"ix_walk_requests_date_slot": None, "uq_walk_requests_user_idempotency": None,
+                                            "uq_walk_requests_occupied_date_slot": None})
             if table.name == "walk_reviews":
                 snapshot["columns"].extend([
                     {"name": "rating", "type": "integer", "not_null": False, "default": None},

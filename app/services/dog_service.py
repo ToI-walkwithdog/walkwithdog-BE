@@ -1,12 +1,14 @@
 import os
 import uuid
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
+import logging
+from pathlib import Path
 from fastapi import UploadFile, HTTPException
 from sqlalchemy.orm import Session
 from app.models import DogWalkDateSlot
+from app.walk_date_slots import validate_date_slot
 
-KST = ZoneInfo("Asia/Seoul")
+logger = logging.getLogger(__name__)
 MAX_FILE_SIZE = 5 * 1024 * 1024 # 5MB
 
 def save_dog_image(file: UploadFile) -> str:
@@ -29,57 +31,39 @@ def save_dog_image(file: UploadFile) -> str:
         
     ext = ".jpg" if is_jpg else ".png"
     filename = f"{uuid.uuid4()}{ext}"
-    
-    upload_dir = os.getenv("UPLOAD_DIR", "./uploads/dogs")
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    filepath = os.path.join(upload_dir, filename)
-    with open(filepath, "wb") as f:
-        f.write(file.file.read())
-        
-    return f"/media/dogs/{filename}"
+    image_url = f"/media/dogs/{filename}"
+    filepath = Path(os.getenv("UPLOAD_DIR", "./uploads/dogs")) / filename
+    created = False
+    try:
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        with filepath.open("xb") as stream:
+            created = True
+            stream.write(file.file.read())
+    except OSError as exc:
+        if created:
+            cleanup_dog_image(image_url)
+        logger.error("Dog image upload failed: %s", type(exc).__name__)
+        raise HTTPException(500, "강아지 사진을 저장하지 못했습니다.") from None
+    return image_url
+
+
+def cleanup_dog_image(image_url):
+    """Clean up a file created by this request, without hiding the original error."""
+    filename = image_url.rsplit("/", 1)[-1]
+    try:
+        (Path(os.getenv("UPLOAD_DIR", "./uploads/dogs")) / filename).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.error("Dog image cleanup failed for %s: %s", filename, type(exc).__name__)
+
 
 def validate_and_create_date_slots(db: Session, dog_id: int, slots_data: list):
-    now_kst = datetime.now(KST)
-    today = now_kst.date()
-    max_date = today + timedelta(days=180)
-    
+    """Insert slots under the existing parent lock. Only the caller commits."""
+    now = datetime.now(timezone.utc)
+    created = []
     for slot in slots_data:
-        # 1. 날짜 범위 검증
-        if slot.slot_date < today or slot.slot_date > max_date:
-            raise HTTPException(status_code=400, detail="Date must be today or within 6 months.")
-            
-        # 2. 오늘 날짜의 지난 시간대 검증
-        if slot.slot_date == today and slot.start_time < now_kst.time():
-            raise HTTPException(status_code=400, detail="Cannot register past times for today.")
-            
-        # 3. 소요시간 및 시간 범위 검증
-        start_dt = datetime.combine(slot.slot_date, slot.start_time)
-        end_dt = datetime.combine(slot.slot_date, slot.end_time)
-        if (end_dt - start_dt).total_seconds() < slot.duration_minutes * 60:
-            raise HTTPException(status_code=400, detail="Duration exceeds the time slot range.")
-            
-        if slot.duration_minutes not in [30, 60, 90]:
-            raise HTTPException(status_code=400, detail="Duration must be 30, 60, or 90 minutes.")
-            
-        # 4. 시간대 겹침 검증 (동일 강아지)
-        overlap = db.query(DogWalkDateSlot).filter(
-            DogWalkDateSlot.dog_id == dog_id,
-            DogWalkDateSlot.slot_date == slot.slot_date,
-            DogWalkDateSlot.end_time > slot.start_time,
-            DogWalkDateSlot.start_time < slot.end_time
-        ).first()
-        
-        if overlap:
-            raise HTTPException(status_code=400, detail="Time slot overlaps with an existing slot.")
-            
-        new_slot = DogWalkDateSlot(
-            dog_id=dog_id,
-            slot_date=slot.slot_date,
-            start_time=slot.start_time,
-            end_time=slot.end_time,
-            duration_minutes=slot.duration_minutes
-        )
-        db.add(new_slot)
-    
-    db.commit()
+        validate_date_slot(db, dog_id, slot, now)
+        row = DogWalkDateSlot(dog_id=dog_id, **slot.model_dump())
+        db.add(row)
+        db.flush()
+        created.append(row)
+    return created

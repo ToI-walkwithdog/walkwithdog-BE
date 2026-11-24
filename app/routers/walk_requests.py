@@ -1,23 +1,34 @@
 """Walk application, review, historical shelter inbox, and read-only volunteer profile."""
-from fastapi import APIRouter, Depends, HTTPException, Query
+import logging
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.account_status import require_active_writer
-from app.auth import get_current_user
+from app.account_status import age_review_required, ensure_active, require_active_writer
+from app.api_contract import ContractError, INTERNAL_SERVER_ERROR_MESSAGE, contract_response
+from app.auth import (bearer, contract_unauthorized, get_contract_session, get_contract_user,
+                      get_current_session, get_current_user)
 from app.database import get_db
 from app.dependencies import require_role, require_shelter, require_shelter_access
 from app.models import Shelter, User, UserRole, VolunteerProfile, WalkRequest
 from app.onboarding_common import require_onboarding_for_new_walk
 from app.walk_request_schemas import (
-    RequestStatus, ReservationTab, VolunteerProfileResponse,
+    DateWalkRequestResponse, RequestStatus, ReservationTab, VolunteerProfileResponse,
     WalkRequestAction, WalkRequestCreate, WalkRequestDetailResponse, WalkRequestResponse,
 )
 from app.shelter_volunteer_review_service import get_volunteer_review_summary
-from app.walk_request_service import create_request, get_request_detail, request_list_query, transition_request
+from app.walk_date_slots import slot_unavailable
+from app.walk_request_service import (create_date_request, create_request, date_request_fingerprint, date_request_replay,
+                                     get_request_detail, owns_date_request, request_list_query, transition_request)
 
 router = APIRouter(tags=["walk-requests"])
 require_volunteer = require_role(UserRole.USER)
+logger = logging.getLogger(__name__)
 
 
 def database_error(exc):
@@ -36,9 +47,10 @@ def database_error(exc):
     return HTTPException(500, "산책 신청을 저장하지 못했습니다.")
 
 
-def persist_request(db, operation, actor):
+def persist_request(db, operation, actor, *, cancel_request_id=None):
     try:
-        require_active_writer(db, actor)  # Issue #41: status re-checked on the locked row
+        date_cancel = cancel_request_id is not None and owns_date_request(db, cancel_request_id, actor)
+        require_active_writer(db, actor, for_update=date_cancel, nowait=date_cancel)
         request = operation()
         response = WalkRequestResponse.model_validate(request)
         db.commit()
@@ -51,9 +63,121 @@ def persist_request(db, operation, actor):
         raise database_error(exc) from None
 
 
-@router.post("/walk-requests", response_model=WalkRequestResponse, status_code=201)
-def apply_for_walk(payload: WalkRequestCreate, actor: User = Depends(require_volunteer),
-                   db: Session = Depends(get_db)):
+def invalid_date_request():
+    return ContractError(422, "INVALID_WALK_REQUEST", "산책 신청 내용을 확인해 주세요.")
+
+
+class BookingRoute(APIRoute):
+    """Only the date-slot version of the existing URL uses the booking envelope."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def dispatch(request):
+            is_date_booking = "idempotency-key" in request.headers
+            media_type = request.headers.get("content-type", "application/json").split(";", 1)[0].strip().lower()
+            if media_type == "application/json" or media_type.endswith("+json"):
+                try:
+                    body = await request.json()
+                except (ValueError, RecursionError):
+                    pass
+                else:
+                    if isinstance(body, dict):
+                        is_date_booking = "date_slot_id" in body
+            request.state.date_booking = is_date_booking
+            if not is_date_booking:
+                return await handler(request)
+            try:
+                return await handler(request)
+            except ContractError as exc:
+                return exc.response()
+            except RequestValidationError:
+                return invalid_date_request().response()
+            except StarletteHTTPException as exc:
+                if exc.status_code == 401:
+                    return contract_unauthorized("AUTHENTICATION_REQUIRED").response()
+                if exc.status_code == 403:
+                    return age_review_required().response()
+                if exc.status_code == 400:
+                    return invalid_date_request().response()
+                raise
+            except Exception as exc:
+                logger.error("Date-slot booking failed: %s", type(exc).__name__)
+                return contract_response(500, "INTERNAL_SERVER_ERROR", INTERNAL_SERVER_ERROR_MESSAGE)
+
+        return dispatch
+
+
+def booking_actor(request: Request, credentials=Depends(bearer), db: Session = Depends(get_db)):
+    if not request.state.date_booking:
+        return require_volunteer(get_current_user(get_current_session(credentials, db), db))
+    actor = get_contract_user(get_contract_session(credentials, db), db)
+    if actor.role != UserRole.USER:
+        raise ContractError(403, "WALK_REQUEST_NOT_ALLOWED", "산책을 신청할 권한이 없습니다.")
+    ensure_active(actor)
+    return actor
+
+
+def date_receipt(data):
+    return contract_response(201, "WALK_REQUEST_CREATED", "산책 신청이 접수됐어요.", data)
+
+
+def persist_date_request(db, actor, payload, header):
+    if payload.date_slot_id is None or not header:
+        raise invalid_date_request()
+    try:
+        key = UUID(header)
+    except ValueError:
+        raise invalid_date_request() from None
+    if str(key) != header.lower():
+        raise invalid_date_request()
+    fingerprint = date_request_fingerprint(payload)
+    actor_id = actor.id
+    try:
+        require_active_writer(db, actor, for_update=True, nowait=True)
+        if actor.role != UserRole.USER:
+            raise ContractError(403, "WALK_REQUEST_NOT_ALLOWED", "산책을 신청할 권한이 없습니다.")
+        data = create_date_request(db, actor, payload, key, fingerprint)
+        db.commit()
+        return date_receipt(data)
+    except (HTTPException, ContractError):
+        db.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        original = getattr(exc, "orig", None)
+        code = getattr(original, "pgcode", None)
+        constraint = getattr(getattr(original, "diag", None), "constraint_name", None)
+        if code in ("55P03", "40P01", "40001") or constraint == "uq_walk_requests_user_idempotency":
+            replay = date_request_replay(db, actor_id, key, fingerprint)
+            if replay is not None:
+                return date_receipt(replay)
+            raise ContractError(409, "WALK_REQUEST_RETRYABLE", "같은 내용으로 다시 시도해 주세요.") from None
+        if constraint == "uq_walk_requests_occupied_date_slot":
+            raise slot_unavailable() from None
+        if constraint == "uq_walk_requests_active" or code == "23P01":
+            raise ContractError(409, "WALK_REQUEST_CONFLICT", "기존 산책 신청 또는 예약과 충돌합니다.") from None
+        raise
+
+
+booking_router = APIRouter(route_class=BookingRoute)
+
+
+@booking_router.post("/walk-requests", response_model=WalkRequestResponse | DateWalkRequestResponse, status_code=201,
+    responses={
+        401: {"description": "인증 실패. 날짜 신청은 AUTHENTICATION_REQUIRED, INVALID_ACCESS_TOKEN 또는 SESSION_EXPIRED."},
+        403: {"description": "역할, 계정 상태 또는 온보딩 제한."},
+        404: {"description": "강아지 없음 또는 WALK_DOG_NOT_AVAILABLE."},
+        409: {"description": "날짜 신청은 WALK_SLOT_CHANGED, WALK_SLOT_UNAVAILABLE, WALK_REQUEST_RETRYABLE, "
+                             "WALK_REQUEST_CONFLICT 또는 IDEMPOTENCY_KEY_REUSED."},
+        422: {"description": "기존 요청의 FastAPI 입력 오류 또는 날짜 신청의 INVALID_WALK_REQUEST."},
+        500: {"description": "서버 오류 또는 INTERNAL_SERVER_ERROR."},
+    })
+def apply_for_walk(payload: WalkRequestCreate, request: Request, actor: User = Depends(booking_actor),
+                   db: Session = Depends(get_db), request_key: str | None = Header(None, alias="Idempotency-Key")):
+    if request.state.date_booking:
+        return persist_date_request(db, actor, payload, request_key)
+
     def operation():
         require_onboarding_for_new_walk(db, actor)
         return create_request(db, actor, payload)
@@ -61,10 +185,14 @@ def apply_for_walk(payload: WalkRequestCreate, actor: User = Depends(require_vol
     return persist_request(db, operation, actor)
 
 
+router.include_router(booking_router)
+
+
 @router.patch("/walk-requests/{request_id}", response_model=WalkRequestResponse)
 def review_or_cancel(request_id: int, payload: WalkRequestAction,
                      actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return persist_request(db, lambda: transition_request(db, request_id, actor, payload), actor)
+    return persist_request(db, lambda: transition_request(db, request_id, actor, payload), actor,
+                           cancel_request_id=request_id if payload.action == "CANCEL" else None)
 
 
 @router.get("/walk-requests/my", response_model=list[WalkRequestResponse])
