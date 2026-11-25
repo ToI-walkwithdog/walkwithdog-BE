@@ -1,0 +1,17 @@
+**
+!requirements.txt
+
+!app/
+app/**
+!app/**/*.py
+
+!policies/
+policies/**
+!policies/manifest.json
+!policies/**/*.md
+
+# Keep hidden files, local configuration, and credentials out of the build context.
+**/.*
+**/.*/**
+**/secrets/
+**/secrets/**
