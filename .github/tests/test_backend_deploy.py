@@ -65,7 +65,7 @@ def dispatch_env(**overrides):
     env = {
         "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main", "GITHUB_REPOSITORY": REPO,
         "GITHUB_WORKFLOW_REF": f"{REPO}/{bd.WORKFLOW}@refs/heads/main", "GITHUB_ACTOR": "admin-user",
-        "GITHUB_TRIGGERING_ACTOR": "admin-user", "GITHUB_SHA": MAIN, "GH_TOKEN": SECRET,
+        "GITHUB_TRIGGERING_ACTOR": "admin-user", "GITHUB_SHA": MAIN, "GH_TOKEN": SECRET, "GITHUB_RUN_ATTEMPT": "1",
         "OPERATION": "preflight", "PUBLISH_RUN_ID": str(RUN_ID), "PUBLISH_RUN_ATTEMPT": "1", "IMAGE_DIGEST": DIGEST,
         "AWS_REGION": "ap-northeast-2", "AWS_ACCOUNT_ID": ACCOUNT, "ECR_REPOSITORY": "toi-be",
         "EC2_INSTANCE_ID": INSTANCE, "SSM_DEPLOY_ROLE_ARN": f"arn:aws:iam::{ACCOUNT}:role/{bd.ROLE_NAME}",
@@ -79,7 +79,9 @@ def execute_env(**overrides):
         "OPERATION": "preflight", "IMAGE_DIGEST": DIGEST, "INPUT_IMAGE_DIGEST": DIGEST, "SOURCE_SHA": SOURCE,
         "AWS_REGION": "ap-northeast-2", "AWS_ACCOUNT_ID": ACCOUNT, "ECR_REPOSITORY": "toi-be",
         "EC2_INSTANCE_ID": INSTANCE, "SSM_DEPLOY_ROLE_ARN": f"arn:aws:iam::{ACCOUNT}:role/{bd.ROLE_NAME}",
-        "GITHUB_RUN_ID": "9001", "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_RUN_ID": "9001", "GITHUB_RUN_ATTEMPT": "1", "VALIDATED_ATTEMPT": "1",
+        "GITHUB_ACTOR": "admin-user", "GITHUB_TRIGGERING_ACTOR": "admin-user",
+        "PUBLISH_RUN_ID": str(RUN_ID), "PUBLISH_RUN_ATTEMPT": "1",
         "AWS_SECRET_ACCESS_KEY": SECRET,
     }
     env.update(overrides)
@@ -308,9 +310,24 @@ class ValidateTests(unittest.TestCase):
         self.assertNotIn(SECRET, stdout)
 
     def test_writes_outputs_after_confirmed_evidence(self):
-        code, outputs, _ = self.run_validate(dispatch_env(), fetch=github(), verify_evidence=confirmed_evidence)
+        code, outputs, stdout = self.run_validate(dispatch_env(GITHUB_RUN_ATTEMPT="3"), fetch=github(),
+                                                  verify_evidence=confirmed_evidence)
         self.assertEqual(code, 0)
-        self.assertEqual(outputs, f"image_digest={DIGEST}\nsource_sha={SOURCE}\n")
+        self.assertEqual(outputs, f"image_digest={DIGEST}\nsource_sha={SOURCE}\npublish_run_id={RUN_ID}\n"
+                                  "publish_run_attempt=1\nvalidated_attempt=3\n")
+        self.assertIn(f"publish run {RUN_ID} attempt 1", stdout)
+        self.assertNotIn(SECRET, stdout)
+
+    def test_github_api_errors_are_blocked_without_traceback(self):
+        import urllib.error
+        for error in (urllib.error.HTTPError("https://api.github.com/x", 404, "Not Found", {}, None),
+                      urllib.error.URLError("down"), ValueError("bad json")):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(bd.urllib.request, "urlopen", side_effect=error):
+                    code, outputs, stdout = self.run_validate(dispatch_env(), fetch=bd.api)
+                self.assertEqual((code, outputs), (1, ""))
+                self.assertIn("GitHub API", stdout)
+                self.assertNotIn(SECRET, stdout)
 
     def test_evidence_mismatch_blocks(self):
         def other(**context):
@@ -359,7 +376,8 @@ class ClassifyTests(unittest.TestCase):
                 self.assertIn(bd.classify(text)["kind"], ("busy", "fault"))
 
     def test_malformed_output_blocks(self):
-        for text in ("", "status=ready\n", NOT_DEPLOYED.replace("/opt/toi", "/tmp"),
+        reordered = "\n".join([CHECKSUMS[1], CHECKSUMS[0], CHECKSUMS[2]] + NOT_DEPLOYED.splitlines()[3:]) + "\n"
+        for text in ("", "status=ready\n", NOT_DEPLOYED.replace("/opt/toi", "/tmp"), reordered,
                      status_text("status=ready current=latest previous=- last_result=none"),
                      status_text("status=ready current=- previous=- last_result=none", api="db absent"), None):
             with self.subTest(text=text), self.assertRaises(bd.Blocked):
@@ -384,15 +402,31 @@ class ExecuteTests(unittest.TestCase):
         self.assertEqual(code, 0, stdout)
 
     def test_fault_or_busy_host_blocks_before_deploy(self):
-        for pre in ("deployment=busy\n",
-                    status_text("status=blocked current=- previous=- last_result=failed", api="api absent")):
+        cases = (("deployment=busy\n", "retry after it finishes"),
+                 (status_text("status=blocked current=- previous=- last_result=failed", api="api absent"),
+                  "ROLLBACK.md"))
+        for pre, message in cases:
             for operation in ("preflight", "deploy"):
                 with self.subTest(pre=pre, operation=operation):
                     fake = FakeAws(**deploy_script(pre=pre))
                     code, stdout, summary, _ = run_execute(fake, execute_env(OPERATION=operation))
                     self.assertEqual(code, 1)
                     self.assertEqual(fake.count("send-command:ToI-DeployBackend"), 0)
-                    self.assertIn("ROLLBACK.md", summary)
+                    self.assertIn(message, summary)
+
+    def test_partial_rerun_or_other_rerunner_is_blocked_before_aws(self):
+        for override in ({"GITHUB_RUN_ATTEMPT": "2"}, {"VALIDATED_ATTEMPT": None},
+                         {"GITHUB_TRIGGERING_ACTOR": "write-user"}, {"PUBLISH_RUN_ID": ""}):
+            with self.subTest(override=override):
+                fake = FakeAws()
+                code, stdout, _, _ = run_execute(fake, execute_env(OPERATION="deploy", **override))
+                self.assertEqual((code, fake.calls), (1, []))
+
+    def test_summary_records_publish_run_and_command(self):
+        code, _, summary, _ = run_execute(FakeAws(**deploy_script()), execute_env(OPERATION="deploy"))
+        self.assertEqual(code, 0)
+        for text in (f"publish run {RUN_ID} attempt 1", SOURCE, DIGEST, DEPLOY_CMD, "exit_code=0"):
+            self.assertIn(text, summary)
 
     def test_status_command_failure_blocks(self):
         script = base_script()

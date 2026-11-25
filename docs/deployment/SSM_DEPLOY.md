@@ -22,6 +22,7 @@
 
 - 최상위 권한은 `permissions: {}`다. OIDC 토큰은 `deploy` Job에서만 발급할 수 있다.
 - `concurrency: toi-be-backend-deploy`, `cancel-in-progress: false`로 실행을 직렬화한다. GitHub는 대기 중인 실행을 하나만 유지하므로, 대기 중에 새 실행이 들어오면 이전 대기 실행은 취소된다. 진행 중인 실행은 취소되지 않는다. EC2의 `flock` 잠금(종료 코드 4)도 그대로 적용된다.
+- 재실행은 "Re-run all jobs"만 허용한다. 개별 Job 재실행이나 "Re-run failed jobs"는 이전 시도의 `validate` 결과를 재사용하므로, `deploy`가 실행 시도와 `validate` 시도가 다르거나 재실행자가 원래 실행자와 다르면 AWS 호출 전에 중단한다. 전체 재실행에서는 `validate`가 관리자 권한과 증빙을 다시 확인한다.
 - `deploy` Job의 제한 시간은 25분이다. Workflow가 취소되거나 시간을 넘겨도 이미 보낸 SSM 명령은 취소하지 않는다. 배포 Role에는 `ssm:CancelCommand` 권한이 없다.
 
 ## 3. 입력과 설정
@@ -62,11 +63,13 @@ SSM 문서 버전은 코드에 고정한다. `ToI-DeploymentStatus`는 `1`(#121�
 | --- | --- | --- |
 | 최초 배포 전 미실행 | `status=ready current=- previous=- last_result=none`, `api absent`, DB 컨테이너 `running healthy` | 배포 허용 |
 | 정상 운영 | `status=ready`, `current`에 Digest가 있고 API와 DB가 `running healthy` | 배포 허용 |
-| 작업 중 | `deployment=busy` | 중단 |
+| 작업 중 | `deployment=busy` | 중단, 진행 중인 작업이 끝난 뒤 재실행 |
 | 장애 | `in_progress`, `blocked`, 기록된 `current`가 있는데 API가 없거나 비정상, 기록이 없는데 API나 실패 이력이 있음, 최초 배포 전인데 DB 미준비 | 중단, [롤백과 수동 복구](https://github.com/ToI-walkwithdog/walkwithdog-BE/blob/dev/docs/deployment/ROLLBACK.md) 절차로 확인 |
 | 조회 실패 | 상태 문서의 실패, 0이 아닌 응답 코드, 출력 형식 오류 | 중단 |
 
-상태 출력 형식 검증은 AWS Connection Test(#121)의 규칙을 그대로 따른다. Summary에는 상태 줄의 값, 컨테이너 상태와 헬스, 설치 스크립트 SHA-256만 남긴다.
+상태 출력 형식 검증은 AWS Connection Test(#121)의 규칙을 그대로 따른다. 체크섬 줄은 `deploy`, `rollback`, `deployment_common` 순서여야 한다. Summary에는 상태 줄의 값, 컨테이너 상태와 헬스, 설치 스크립트 SHA-256만 남긴다.
+
+Job Summary에는 실행자, 발행 실행 ID와 시도, Source SHA, Digest, 각 SSM Command ID, 배포 결과와 종료 코드 의미를 기록한다. GitHub API 오류는 HTTP 상태 코드만 표시한다.
 
 ## 6. SendCommand 응답 유실
 

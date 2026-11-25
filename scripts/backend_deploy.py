@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -99,8 +100,15 @@ def api(path, token):
         "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "toi-backend-deploy",
     })
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise Blocked(f"GitHub API request failed (HTTP {error.code})") from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise Blocked("GitHub API is unreachable") from None
+    except ValueError:
+        raise Blocked("GitHub API returned invalid JSON") from None
 
 
 def check_dispatch(env):
@@ -198,8 +206,16 @@ def validate(env, fetch=api, verify_evidence=evidence_contract_pending):
     require(isinstance(evidence, dict) and evidence.get("image_digest") == inputs["digest"]
             and evidence.get("source_sha") == source_sha,
             "Publish evidence does not confirm the requested digest and source commit")
-    write_outputs(env, {"image_digest": inputs["digest"], "source_sha": source_sha})
-    print(f"Validated {inputs['operation']} of {inputs['digest']} from publish run {run_id} attempt {attempt}.")
+    validated_attempt = field(env, "GITHUB_RUN_ATTEMPT", ATTEMPT, "workflow run attempt")
+    write_outputs(env, {"image_digest": inputs["digest"], "source_sha": source_sha,
+                        "publish_run_id": str(run_id), "publish_run_attempt": str(attempt),
+                        "validated_attempt": validated_attempt})
+    lines = [f"- operation: {inputs['operation']}, dispatcher {actor} (admin)",
+             f"- publish run {run_id} attempt {attempt}, source {source_sha}",
+             f"- digest {inputs['digest']} confirmed by publish evidence"]
+    for line in lines:
+        print(line)
+    write_summary(env, "Backend deploy validation", lines)
     return 0
 
 
@@ -267,11 +283,10 @@ def classify(output):
         return {"kind": "busy", "reason": "another deployment operation holds the lock"}
     checksums = {}
     if len(lines) == 6:
-        for line in lines[:3]:
+        for line, script in zip(lines[:3], ("deploy", "rollback", "deployment_common")):
             match = CHECKSUM_LINE.fullmatch(line)
-            require(match, "Status checksum lines had an unexpected format")
-            checksums[match.group(2)] = match.group(1)
-        require(len(checksums) == 3, "Status checksum lines had an unexpected format")
+            require(match and match.group(2) == script, "Status checksum lines had an unexpected format")
+            checksums[script] = match.group(1)
         lines = lines[3:]
     require(len(lines) == 3, "Status output had an unexpected format")
     state = STATE_LINE.fullmatch(lines[0])
@@ -403,7 +418,17 @@ class Runner:
         source_sha = field(self.env, "SOURCE_SHA", SHA, "validated source SHA")
         self.run_id = field(self.env, "GITHUB_RUN_ID", NUMBER, "workflow run ID")
         self.run_attempt = field(self.env, "GITHUB_RUN_ATTEMPT", ATTEMPT, "workflow run attempt")
-        self.note(f"- operation: {operation}, digest {digest}, source {source_sha}")
+        # A partial re-run reuses the earlier validate outputs without checking the
+        # new dispatcher, so only the attempt that ran validate may continue.
+        require(self.env.get("VALIDATED_ATTEMPT") == self.run_attempt,
+                "This attempt did not run validate; re-run all jobs instead of a single job")
+        actor = self.env.get("GITHUB_ACTOR", "")
+        require(LOGIN.fullmatch(actor) and self.env.get("GITHUB_TRIGGERING_ACTOR") == actor,
+                "The dispatcher must be the triggering actor")
+        publish_run = field(self.env, "PUBLISH_RUN_ID", NUMBER, "validated publish run ID")
+        publish_attempt = field(self.env, "PUBLISH_RUN_ATTEMPT", ATTEMPT, "validated publish run attempt")
+        self.note(f"- operation: {operation}, dispatcher {actor}")
+        self.note(f"- publish run {publish_run} attempt {publish_attempt}, source {source_sha}, digest {digest}")
 
         try:
             check_identity(self.aws.call(["sts", "get-caller-identity"]), self.account)
@@ -416,6 +441,8 @@ class Runner:
         self.note("- AWS identity and ECR image verified")
 
         before = self.read_status("pre-status")
+        require(before["kind"] != "busy",
+                "Another deployment operation is running on the host; retry after it finishes")
         require(before["kind"] in ("not_deployed", "healthy"),
                 "Deployment host is not in a deployable state; follow docs/deployment/ROLLBACK.md")
         if operation == "preflight":

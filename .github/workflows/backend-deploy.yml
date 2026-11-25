@@ -44,6 +44,9 @@ jobs:
     outputs:
       image_digest: ${{ steps.validate.outputs.image_digest }}
       source_sha: ${{ steps.validate.outputs.source_sha }}
+      publish_run_id: ${{ steps.validate.outputs.publish_run_id }}
+      publish_run_attempt: ${{ steps.validate.outputs.publish_run_attempt }}
+      validated_attempt: ${{ steps.validate.outputs.validated_attempt }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, existing Release CI pin
         with:
@@ -95,6 +98,9 @@ jobs:
           INPUT_IMAGE_DIGEST: ${{ inputs.image_digest }}
           IMAGE_DIGEST: ${{ needs.validate.outputs.image_digest }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          PUBLISH_RUN_ID: ${{ needs.validate.outputs.publish_run_id }}
+          PUBLISH_RUN_ATTEMPT: ${{ needs.validate.outputs.publish_run_attempt }}
+          VALIDATED_ATTEMPT: ${{ needs.validate.outputs.validated_attempt }}
           AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
