@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.models import Base
-    from app.walk_models import WALK_MODELS
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -21,6 +20,23 @@ from scripts.prepare_demo_db import ROOT, PreparationError, table_counts, valida
 from scripts.walk_schema import check_walk_schema
 
 TEST_URL = os.getenv("WALK_TEST_DATABASE_URL")
+
+# Minimal legacy parents for 007 and preserved matching data.
+# The current Shelter model also references the newer regions table.
+PRE_007_TABLES = frozenset({
+    "regions", "shelters", "users", "dogs", "surveys", "matching_results",
+})
+
+
+def create_pre_007_schema(connection):
+    tables = [table for table in Base.metadata.sorted_tables if table.name in PRE_007_TABLES]
+    if {table.name for table in tables} != PRE_007_TABLES:
+        raise PreparationError("Missing pre-007 fixture table")
+    for table in tables:
+        for foreign_key in table.foreign_keys:
+            if foreign_key.column.table.name not in PRE_007_TABLES:
+                raise PreparationError(f"Missing pre-007 fixture dependency: {foreign_key.target_fullname}")
+    Base.metadata.create_all(connection, tables=tables)
 
 
 class TransactionEngine:
@@ -49,8 +65,7 @@ class WalkPostgresTests(unittest.TestCase):
         with cls.engine.begin() as connection:
             if inspect(connection).get_table_names():
                 raise PreparationError("빈 격리 테스트 DB만 허용합니다. 기존 DB는 변경하지 않습니다.")
-            names = {m.__tablename__ for m in WALK_MODELS}
-            Base.metadata.create_all(connection, tables=[t for t in Base.metadata.sorted_tables if t.name not in names])
+            create_pre_007_schema(connection)
             connection.execute(text("INSERT INTO shelters(id, name) VALUES (1, '기존 보호소')"))
             connection.execute(text("INSERT INTO users(id, login_id, nickname, password) VALUES (1, 'user_one', '봉사자', '!'), (2, 'user_two', '담당자', '!')"))
             connection.execute(text("INSERT INTO dogs(id, name, shelter_id) VALUES (1, '강아지1', 1), (2, '강아지2', 1)"))
@@ -91,7 +106,12 @@ class WalkPostgresTests(unittest.TestCase):
         self.assertEqual(self.connection.execute(text("SELECT score, analysis_snapshot FROM matching_results WHERE id = 1")).one(), (80, {"preserved": True}))
 
     def test_orm_postgresql_create_matches_reviewed_catalog_contract(self):
-        Base.metadata.create_all(self.connection)
+        # Reuse the ORM-derived historical DDL, not the migration SQL. The unit
+        # contract test independently compares this projection with checked-in 007.
+        import test_walk_domain
+
+        for statement in test_walk_domain.WalkMetadataTests.historical_007_ddl():
+            self.connection.exec_driver_sql(statement)
         self.assertEqual(check_walk_schema(self.connection), [])
 
     def test_sql_error_rolls_back_all_new_tables(self):
