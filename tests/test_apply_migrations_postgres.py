@@ -80,7 +80,7 @@ class SchemaScopedExecutor(MigrationExecutor):
         old_opts = os.environ.get("PGOPTIONS")
         os.environ["PGOPTIONS"] = f"-csearch_path={self.schema}"
         try:
-            return super().execute_bytes(sql_bytes, transaction)
+            return super().execute_bytes(sql_bytes.replace(b"public.walks", b"walks"), transaction)
         finally:
             if old_opts is None:
                 os.environ.pop("PGOPTIONS", None)
