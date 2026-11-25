@@ -223,6 +223,19 @@ class DeployModeTests(CheckerTestCase):
                 self.assert_fails(self.deploy(extra_lines=[f"{key}=x"]), key, "SOLAPI is not integrated")
                 self.assert_fails(self.deploy(extra_lines=[f"# {key}="]), key, "SOLAPI is not integrated")
 
+    def test_parser_edge_cases(self):
+        crlf = self.write("crlf.env", render(VALID_API).replace("\n", "\r\n"))
+        self.assertEqual(self.run_checker("deploy", "--api", crlf)[0], 0)
+        self.assertEqual(self.deploy({"DATABASE_URL": f"postgresql://toi_api:{API_PASSWORD}=%23x@db:5432/toi_db"})[0], 0)
+        bom = self.write("bom.env", "\ufeff" + render(VALID_API))
+        self.assert_fails(self.run_checker("deploy", "--api", bom), "file", "UTF-8 BOM")
+        self.assert_fails(self.deploy({"PLEDGE_CURRENT_VERSION": "pledge-v1\t#note"}), "PLEDGE_CURRENT_VERSION",
+                          "inline comment")
+        self.assert_fails(self.deploy({"AUTO_END_AFTER_SECONDS": "9" * 5000}), "AUTO_END_AFTER_SECONDS", "integer")
+        self.assert_fails(self.deploy(extra_lines=[f"# SHELTER_CODE_HMAC_KEY={SHELTER_KEY}"]),
+                          "SHELTER_CODE_HMAC_KEY", "commented line must not keep a value")
+        self.assert_fails(self.deploy(extra_lines=["API_PORT=8000"]), "API_PORT", "set by the deploy script")
+
     def test_the_api_and_db_files_stay_separate(self):
         self.assert_fails(self.deploy(extra_lines=[f"POSTGRES_PASSWORD={DB_PASSWORD}"]), "POSTGRES_PASSWORD",
                           "belongs to the DB preparation file")
@@ -281,6 +294,11 @@ class TemplateModeTests(CheckerTestCase):
         self.assert_fails(self.template(lambda t: re.sub(r"# WALK_OVERDUE_GRACE_MINUTES=0\n?", "", t)),
                           "WALK_OVERDUE_GRACE_MINUTES", "missing from the template")
         self.assert_fails(self.template(lambda t: t + "# SOLAPI_API_KEY=\n"), "SOLAPI_API_KEY", "SOLAPI")
+        self.assert_fails(self.template(lambda t: t.replace("KAKAO_REST_API_KEY=\n", f"# KAKAO_REST_API_KEY={KAKAO}\n")),
+                          "KAKAO_REST_API_KEY", "commented line must not keep a value")
+        self.assert_fails(self.template(lambda t: t.replace("# ACCOUNT_EXIT_RECORD_POLICY=\n",
+                                                            "# ACCOUNT_EXIT_RECORD_POLICY=delete\n")),
+                          "ACCOUNT_EXIT_RECORD_POLICY", "commented line must not keep a value")
         self.assert_fails(self.template(lambda t: t.replace("# ACCOUNT_EXIT_RECORD_POLICY=\n",
                                                             "ACCOUNT_EXIT_RECORD_POLICY=delete\n")),
                           "ACCOUNT_EXIT_RECORD_POLICY", "must stay unset")

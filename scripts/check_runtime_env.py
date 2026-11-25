@@ -19,6 +19,8 @@ spaces or quotes. Output names keys and rules only: values, secrets and line con
 never printed. Exit status: 0 when every check passes, 1 when any fails, 2 for usage errors
 or unreadable files.
 """
+from __future__ import annotations
+
 import argparse
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -28,7 +30,8 @@ import sys
 from urllib.parse import urlsplit
 
 KEY_LINE = re.compile(r"([A-Z][A-Z0-9_]*)=(.*)")
-COMMENTED_KEY = re.compile(r"#\s*([A-Z][A-Z0-9_]*)=")
+COMMENTED_KEY = re.compile(r"#\s*([A-Z][A-Z0-9_]*)=(.*)")
+INLINE_COMMENT = re.compile(r"\s#")
 
 # Mirrors of the application's rules; tests compare them with the app constants.
 MOCK_ENVIRONMENTS = {"local", "development", "test"}
@@ -90,8 +93,11 @@ class EnvFile:
     remembered as documented keys (templates)."""
 
     def __init__(self, path: Path, report: Report):
-        self.values, self.documented = {}, set()
+        self.values, self.documented, self.commented_values = {}, set(), {}
         text = path.read_text(encoding="utf-8")
+        if text.startswith("\ufeff"):
+            report.fail("file", "starts with a UTF-8 BOM; save it as UTF-8 without BOM")
+            text = text[1:]
         for number, raw in enumerate(text.splitlines(), start=1):
             line = raw.rstrip("\r")
             stripped = line.strip()
@@ -101,6 +107,7 @@ class EnvFile:
                 commented = COMMENTED_KEY.match(stripped)
                 if commented:
                     self.documented.add(commented.group(1))
+                    self.commented_values.setdefault(commented.group(1), commented.group(2).strip())
                 continue
             match = KEY_LINE.fullmatch(line)
             if match is None:
@@ -112,7 +119,7 @@ class EnvFile:
                 continue
             if value != value.strip():
                 report.fail(key, "value has surrounding spaces")
-            elif value[:1] in ("'", '"') or " #" in value:
+            elif value[:1] in ("'", '"') or INLINE_COMMENT.search(value):
                 report.fail(key, "quotes or an inline comment are read differently by Compose and dotenv")
             self.values[key] = value
 
@@ -126,6 +133,13 @@ def check_known_keys(env, report, allowed):
             report.fail(key, "SOLAPI is not integrated; remove the key")
         elif key not in allowed:
             report.fail(key, "unknown key")
+
+
+def check_commented_values(env, report):
+    """A commented line must not keep a secret or an account-exit policy value."""
+    for key in sorted((SECRETS | {"ACCOUNT_EXIT_RECORD_POLICY"}) & set(env.commented_values)):
+        if env.commented_values[key]:
+            report.fail(key, "a commented line must not keep a value for this key")
 
 
 def check_formats(values, report):
@@ -189,7 +203,7 @@ def tuning_value_ok(key, raw):
         except InvalidOperation:
             return False
         return number.is_finite() and number >= 0
-    if not re.fullmatch(r"[+-]?[0-9]+", raw):
+    if not re.fullmatch(r"[+-]?[0-9]{1,18}", raw):  # also keeps int() far from its digit limit
         return False
     number = int(raw)
     if key in POSITIVE_OR_DEFAULT or key in POSITIVE:
@@ -222,6 +236,7 @@ def check_template(path: Path, local_compose: bool) -> Report:
     for key in sorted(SECRETS & set(env.values)):
         if env.values[key]:
             report.fail(key, "secret value must be empty in a template")
+    check_commented_values(env, report)
     check_formats(env.values, report)
     return report
 
@@ -233,7 +248,9 @@ def check_deploy(api_path: Path, compose_path: Path | None) -> list[Report]:
         report.fail(key, "remove the commented key from the runtime file")
     check_known_keys(env, report, API_KEYS | LOCAL_COMPOSE_KEYS)
     for key in sorted(set(env.values) & LOCAL_COMPOSE_KEYS):
-        report.fail(key, "belongs to the DB preparation file, not the API runtime file")
+        report.fail(key, "belongs to the DB preparation file, not the API runtime file" if key in DB_PREPARATION_KEYS
+                    else "is set by the deploy script; remove it from the runtime file")
+    check_commented_values(env, report)
     values = env.values
 
     for key in REQUIRED:

@@ -1208,6 +1208,7 @@
     "tests/test_runtime_env.py::DeployModeTests::test_hmac_keys_length_and_separation",
     "tests/test_runtime_env.py::DeployModeTests::test_level_policy_values",
     "tests/test_runtime_env.py::DeployModeTests::test_mock_sms_combination_and_fixed_code_format",
+    "tests/test_runtime_env.py::DeployModeTests::test_parser_edge_cases",
     "tests/test_runtime_env.py::DeployModeTests::test_privacy_consent_lists_follow_the_existing_policy",
     "tests/test_runtime_env.py::DeployModeTests::test_required_values",
     "tests/test_runtime_env.py::DeployModeTests::test_the_api_and_db_files_stay_separate",
