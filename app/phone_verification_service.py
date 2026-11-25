@@ -248,8 +248,8 @@ class DeliverySlot:
 
 class SmsDispatcher:
     """Bounded in-process delivery pool (Issue #110): `workers` threads and at most `queue`
-    waiting jobs. A request takes a slot before anything else, so overload answers the same
-    503 whatever the number is. The job releases its slot when it ends; the request path
+    waiting jobs. A request takes a slot before anything is written (only the settings and the
+    number itself are checked first, #124), so overload answers the same 503 whatever the number is. The job releases its slot when it ends; the request path
     releases it when nothing was queued (idempotent). inline=True runs jobs at once (tests).
     A graceful shutdown runs the queued jobs first; a forced kill loses them."""
 

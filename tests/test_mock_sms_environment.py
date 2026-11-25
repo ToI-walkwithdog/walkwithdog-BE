@@ -177,6 +177,15 @@ class FlowTests(MockEnvironmentTestCase):
             self.assertEqual(len(set(map(repr, answers))), 1)  # the same answer whoever owns the number
         self.nothing_written(rows, outbox)
 
+    def test_the_range_is_checked_before_a_delivery_slot_is_taken(self):
+        full = SmsDispatcher(workers=0, queue=0, inline=True)  # no slot can ever be taken
+        self.app.dependency_overrides[get_sms_dispatcher] = lambda: full
+        for label, send in (("onboarding", self.send), ("profile", self.profile_send)):
+            with self.subTest(api=label):
+                self.assert_error(send(FREE_PHONE), 422, "INVALID_PHONE_NUMBER", {"field": "phone_number"})
+                self.assert_error(send(TEST_FREE), 503, "SMS_DELIVERY_UNAVAILABLE", {})  # the pool is full
+        self.assertEqual(self.counters(), [])
+
 
 class PolicyTests(MockEnvironmentTestCase):
     def test_a_registered_test_number_is_suppressed_and_the_fixed_code_never_verifies_it(self):

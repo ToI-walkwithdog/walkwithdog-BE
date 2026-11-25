@@ -993,6 +993,7 @@
     "tests/test_mock_sms_environment.py::FlowTests::test_numbers_outside_the_range_are_refused_before_anything_is_written",
     "tests/test_mock_sms_environment.py::FlowTests::test_onboarding_send_confirm_and_save_with_the_fixed_code",
     "tests/test_mock_sms_environment.py::FlowTests::test_profile_phone_change_with_the_fixed_code",
+    "tests/test_mock_sms_environment.py::FlowTests::test_the_range_is_checked_before_a_delivery_slot_is_taken",
     "tests/test_mock_sms_environment.py::ModeSwitchTests::test_a_proof_made_before_the_mode_cannot_save_a_number_outside_the_range",
     "tests/test_mock_sms_environment.py::ModeSwitchTests::test_requests_made_in_the_mode_end_with_their_expiry_after_it_is_turned_off",
     "tests/test_mock_sms_environment.py::PolicyTests::test_a_confirm_before_the_delivery_job_fails_and_counts_an_attempt",
