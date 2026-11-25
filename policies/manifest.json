@@ -1,3 +1,20 @@
 {
-  "documents": []
+  "documents": [
+    {
+      "kind": "terms",
+      "document_version": "terms-demo-v1",
+      "title": "Terms (시연용)",
+      "effective_at": "2026-11-25T00:00:00+00:00",
+      "file": "terms/terms-demo-v1.md",
+      "sha256": "282b9458aaadf78bb916a1a02d548e106f975efbb1fcb43347bd96c9bd9af0e0"
+    },
+    {
+      "kind": "privacy",
+      "document_version": "privacy-demo-v1",
+      "title": "Privacy (시연용)",
+      "effective_at": "2026-11-25T00:00:00+00:00",
+      "file": "privacy/privacy-demo-v1.md",
+      "sha256": "3623ceb359f5bf36bf6fa8064eaf66fcc1e226f5a9de110f145cee769e061e72"
+    }
+  ]
 }
