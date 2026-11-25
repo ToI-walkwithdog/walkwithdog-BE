@@ -140,7 +140,8 @@ class SignupPostgresTests(unittest.TestCase):
     def setUp(self):
         use_test_privacy_policy(self)
         pledge_env = patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION,
-                                             "PHONE_VERIFICATION_HMAC_KEY": HMAC_KEY})
+                                             "PHONE_VERIFICATION_HMAC_KEY": HMAC_KEY,
+                                             "SMS_MOCK_FIXED_CODE": ""})  # no fixed code from the shell (#128)
         pledge_env.start()
         self.addCleanup(pledge_env.stop)
         self.schema = "su_" + uuid4().hex

@@ -52,7 +52,7 @@ SMS 정책 변경(확정, 2026-11-25): 최종 배포는 기능 테스트와 시�
 | --- | --- | --- | --- | --- |
 | 16-1 | 전화번호 등록 여부 노출 방지 | 사용자 | #110 | dev 병합 및 PG 추가 검증, Issue 종료 완료 |
 | 16-2 | Mock SMS 테스트 환경 구성(이전: SOLAPI 어댑터) | 사용자 | [#124](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/124) | PR #126 dev 병합 및 Issue 종료 완료 |
-| 16-3 | 배포 환경변수 템플릿, 비밀값 절차, 설정 점검(SOLAPI 제외) | 사용자 | [#128](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/128) | 템플릿과 점검 구현·검증 범위. 실제 서버 적용은 별도 승인 |
+| 16-3 | 배포 환경변수 템플릿, 비밀값 절차, 설정 점검(SOLAPI 제외) | 사용자 | [#128](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/128) | 템플릿과 점검 구현, 검증 범위. 실제 서버 적용은 별도 승인 |
 | 16-4 | 통합 DB 마이그레이션 도구 구현과 검증 | BE 팀원 | [#113](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/113) | 예정 |
 | 16-5 | 실제 개발 DB 읽기 전용 조사 | BE 팀원 | [#114](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/114) | 예정 |
 | 16-6 | 실제 개발 DB 마이그레이션 적용 | BE 팀원 | [#115](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/115) | 예정 |

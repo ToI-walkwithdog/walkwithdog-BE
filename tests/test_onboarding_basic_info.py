@@ -34,7 +34,8 @@ from sqlalchemy.pool import StaticPool
 # Test-only settings. Real values are deployment secrets and undecided versions.
 PLEDGE_VERSION = "pledge-test-v1"
 TEST_ENV = {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION,
-            "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef"}
+            "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef",
+            "SMS_MOCK_FIXED_CODE": ""}  # SMS_MOCK_FIXED_CODE: a shell or root .env value must not reach these tests (#128)
 START = datetime(2026, 11, 23, 1, 0, tzinfo=timezone.utc)  # 10:00 in Asia/Seoul
 PHONE, PHONE_E164 = "010-1234-5678", "+821012345678"
 OTHER_PHONE, OTHER_E164 = "01098765432", "+821098765432"

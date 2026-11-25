@@ -49,7 +49,8 @@ SCHEMA_NAME = re.compile(r"su_[0-9a-f]{32}")
 ROOT = Path(__file__).resolve().parents[1]
 PLEDGE_VERSION = "pledge-test-v1"  # test-only values
 TEST_ENV = {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION,
-            "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef"}
+            "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef",
+            "SMS_MOCK_FIXED_CODE": ""}  # SMS_MOCK_FIXED_CODE: a shell or root .env value must not reach these tests (#128)
 START = datetime(2026, 11, 24, 1, 0, tzinfo=timezone.utc)  # 10:00 in Asia/Seoul
 PASSWORD = "WalkTogether2026!"
 # Base tables of a dev database before 016 come from these files (as in test_signup_postgres).
