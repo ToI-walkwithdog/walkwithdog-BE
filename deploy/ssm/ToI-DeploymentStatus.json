@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "2.2",
+  "description": "Read ToI deployment and container status on Linux without modifying service state.",
+  "mainSteps": [
+    {
+      "action": "aws:runShellScript",
+      "name": "deploymentStatus",
+      "precondition": {
+        "StringEquals": [
+          "platformType",
+          "Linux"
+        ]
+      },
+      "inputs": {
+        "timeoutSeconds": "60",
+        "runCommand": [
+          "exec /opt/toi/scripts/deployment_common.sh status"
+        ]
+      }
+    }
+  ]
+}

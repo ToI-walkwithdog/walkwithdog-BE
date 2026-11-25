@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "2.2",
+  "description": "Deploy an approved ToI backend image by digest on Linux.",
+  "parameters": {
+    "ImageDigest": {
+      "type": "String",
+      "description": "Approved immutable image digest.",
+      "interpolationType": "ENV_VAR",
+      "allowedPattern": "^sha256:[a-f0-9]{64}$"
+    }
+  },
+  "mainSteps": [
+    {
+      "action": "aws:runShellScript",
+      "name": "deployBackend",
+      "precondition": {
+        "StringEquals": [
+          "platformType",
+          "Linux"
+        ]
+      },
+      "inputs": {
+        "timeoutSeconds": "900",
+        "runCommand": [
+          "if [ -z \"${SSM_ImageDigest:-}\" ]; then printf \"%s\\n\" \"ImageDigest environment interpolation is required.\" >&2; exit 2; fi",
+          "exec /opt/toi/scripts/deploy.sh \"$SSM_ImageDigest\""
+        ]
+      }
+    }
+  ]
+}
