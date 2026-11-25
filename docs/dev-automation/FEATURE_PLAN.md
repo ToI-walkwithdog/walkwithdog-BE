@@ -1,5 +1,42 @@
 # 화면별 기능 개발 계획
 
+## 전체 개발 로드맵 (2026-11-25 확정, 20단계)
+
+목표는 FE 기준 필수 BE 기능을 먼저 완성하고, 연동과 배포까지 진행해 실제로 서비스를 사용할 수 있게 하는 것이다. 각 단계는 기존 Issue 전달 절차(착수 승인, 독립 리뷰, CI, 조건부 dev 병합)를 그대로 따른다.
+
+| 단계 | 내용 | Issue | 상태 |
+| --- | --- | --- | --- |
+| 01 | 회원가입, 로그인 및 온보딩 | 여러 Issue를 포함한 통합 단계. 관련 Issue는 아래 "2026-11-24 화면별 조사 이력"과 GitHub의 기존 Issue 및 PR 기록 참조 | 기능 구현 완료 |
+| 02 | 정책 문서 조회 | [#76](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/76) | 기능 구현 완료 |
+| 03 | 필수 정책 동의 저장 | [#78](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/78) | 기능 구현 완료 |
+| 04 | 현재 위치 판별 | [#46](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/46) | 기능 구현 완료 |
+| 05 | 온보딩 접근 게이트 | [#81](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/81) | 기능 구현 완료 |
+| 06 | 날짜별 산책 일정 및 예약 | [#29](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/29) | 기능 구현 완료 |
+| 07 | 예약 목록, 상세 및 취소 | [#84](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/84) | 기능 구현 완료 |
+| 08 | 보호소 코드 인증 및 산책 시작 | [#87](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/87) | 기능 구현 완료 |
+| 09 | GPS, 마커, 안전 신고 및 종료 보완 | [#89](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/89) | 기능 구현 완료 |
+| 10 | 보호소 인계 | [#93](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/93) | 기능 구현 완료 |
+| 11 | 개인 메모 저장 | [#95](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/95) | 기능 구현 완료 |
+| 12 | 자동 레벨업 | [#97](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/97) | 기능 구현 완료 |
+| 13 | 산책 이력 및 통계 | [#99](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/99) | 기능 구현 완료 |
+| 14 | 프로필 수정 및 휴대전화 재인증 | [#103](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/103) | 기능 구현 완료 |
+| 15 | 산책 선호 설정 | [#105](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/105) | 기능 구현 완료 |
+| 16 | 개발 DB 및 외부 서비스 구성 | 미정 | 예정 |
+| 17 | FE와 BE 전체 연동 | 미정 | 예정 |
+| 18 | 서비스 기본 동작 검증 | 미정 | 예정 |
+| 19 | 서비스 배포 및 배포 환경 검증 | 미정 | 예정 |
+| 20 | 세부 기능 보완 및 안정화 | 미정 | 예정 |
+
+- "기능 구현 완료"는 BE 기능이 dev에 병합되었다는 뜻이다. FE 연동, 실제 개발 DB 적용, 배포는 16~19단계에서 진행하며 남은 항목은 `docs/TODO.md`에 있다.
+- 16단계에서 실제 개발 서버와 외부 서비스를 공개하기 전에 전화번호 등록 여부 노출 문제(별도 보안 Issue)를 먼저 해결한다.
+- 기존 기능의 정상 동작을 막지 않는 세부 개선, 성능 최적화, 중복 코드 정리, 리팩토링은 `docs/TODO.md`에 보존하고 20단계에서 진행한다.
+- 보안, 개인정보, 데이터 유실, 안전 신고와 핵심 기능에 영향을 주는 문제는 배포 이후로 미루지 않는다.
+- 이 표는 계획 문서다. 자동화 스크립트와 승인 게이트는 이 문서를 읽지 않으며, 착수는 Issue별 승인으로만 시작한다.
+
+## 2026-11-24 화면별 조사 이력
+
+아래 내용은 2026-11-24 조사 당시의 기준과 순서이며, 이력으로 보존한다.
+
 조사 기준은 2026-11-24 원격 BE `dev` `f0b0069ef95599da613079829ede8c13183ad6e2`와 원격 FE `main` `04e497e056eb078ad584708226202f5bfbd2bb6f`다. Notion의 화면별 구현 데이터베이스와 온보딩 하위 API 및 예약, 진행, 기록, 마이페이지 문서를 실제로 열었고, GitHub의 열린 Issue를 코드와 대조했다. DB의 실환경 적용 상태는 조회하지 않았다. 저장소와 인수인계를 기준으로 023~025를 포함한 통합 SQL의 공유 개발 DB 적용은 별도 작업이다. [화면별 구현](https://app.notion.com/p/41fb7bbac8c780b6bbdcf749466c443f), [온보딩](https://app.notion.com/p/41fb7bbac8c7809b914bcf3e80d9d876), [FE 고정 커밋](https://github.com/ToI-walkwithdog/walkwithdog-FE/tree/04e497e056eb078ad584708226202f5bfbd2bb6f), [BE 고정 커밋](https://github.com/ToI-walkwithdog/walkwithdog-BE/tree/f0b0069ef95599da613079829ede8c13183ad6e2)
 
 Notion의 전체 데이터 소스 조회는 사용 한도에 걸려, 범위 지정 검색과 페이지 직접 열기로 확인했다. 아래 범위는 그 조사에서 찾고 코드와 대조한 기능이다. 검색에 잡히지 않은 문서나 별도 보호소 FE 저장소까지 모두 확인했다고 보지 않는다. 새 화면이나 정책이 발견되면 관련 Issue 승인 전 근거와 순서를 갱신한다.
