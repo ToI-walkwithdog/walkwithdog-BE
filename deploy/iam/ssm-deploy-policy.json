@@ -1,0 +1,35 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SendToiDocumentsToDeployInstance",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": [
+        "arn:aws:ec2:ap-northeast-2:478478097368:instance/REPLACE_WITH_EC2_INSTANCE_ID",
+        "arn:aws:ssm:ap-northeast-2:478478097368:document/ToI-DeployBackend",
+        "arn:aws:ssm:ap-northeast-2:478478097368:document/ToI-DeploymentStatus"
+      ]
+    },
+    {
+      "Sid": "TrackSubmittedCommands",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommands"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-2"
+        }
+      }
+    },
+    {
+      "Sid": "ReadDeployImageByDigest",
+      "Effect": "Allow",
+      "Action": "ecr:DescribeImages",
+      "Resource": "arn:aws:ecr:ap-northeast-2:478478097368:repository/toi-be"
+    }
+  ]
+}

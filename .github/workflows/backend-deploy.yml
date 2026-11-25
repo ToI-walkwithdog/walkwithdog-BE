@@ -1,0 +1,102 @@
+name: Backend Deploy
+
+# Administrator-dispatched deployment of a published ECR image through the
+# existing SSM documents. preflight (default) never changes the server.
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: preflight checks only, or deploy to replace the API on EC2
+        required: true
+        default: preflight
+        type: choice
+        options:
+          - preflight
+          - deploy
+      publish_run_id:
+        description: ECR Image Publish run ID
+        required: true
+        type: string
+      publish_run_attempt:
+        description: ECR Image Publish run attempt
+        required: true
+        type: string
+      image_digest:
+        description: Published image digest (sha256:...)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: toi-be-backend-deploy
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate dispatcher and publish evidence
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected && github.repository_id == '1409697696' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      image_digest: ${{ steps.validate.outputs.image_digest }}
+      source_sha: ${{ steps.validate.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, existing Release CI pin
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Unit test the deploy verifier
+        run: python3 -I -B -m unittest discover -s .github/tests -p test_backend_deploy.py
+      - name: Validate dispatcher, inputs and publish evidence
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation }}
+          PUBLISH_RUN_ID: ${{ inputs.publish_run_id }}
+          PUBLISH_RUN_ATTEMPT: ${{ inputs.publish_run_attempt }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          SSM_DEPLOY_ROLE_ARN: ${{ vars.SSM_DEPLOY_ROLE_ARN }}
+        run: python3 -I -B scripts/backend_deploy.py validate
+
+  deploy:
+    name: SSM ${{ inputs.operation }}
+    needs: validate
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected && github.repository_id == '1409697696' }}
+    runs-on: ubuntu-24.04
+    # Longer than the SSM limits (status 150s twice, deploy 1080s); a cancelled
+    # run never cancels a command already running on the host.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, existing Release CI pin
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.SSM_DEPLOY_ROLE_ARN }}
+          aws-region: ap-northeast-2
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: toi-backend-deploy-${{ github.run_id }}
+      - name: Check image, host status and run the SSM operation
+        env:
+          OPERATION: ${{ inputs.operation }}
+          INPUT_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          IMAGE_DIGEST: ${{ needs.validate.outputs.image_digest }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          SSM_DEPLOY_ROLE_ARN: ${{ vars.SSM_DEPLOY_ROLE_ARN }}
+        run: python3 -I -B scripts/backend_deploy.py execute
