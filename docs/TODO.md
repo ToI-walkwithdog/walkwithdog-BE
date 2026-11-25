@@ -134,6 +134,15 @@
 - [ ] FE에 지역 선택 UI가 생기면 선호 지역 저장과 초기 검색 우선 적용을 별도 Issue로 정한다(Notion 조건부 정책).
 - [ ] `docs/dev-automation/FEATURE_PLAN.md`의 20단계 로드맵 반영은 게이트 보호 경로라 #105에서 분리했다. 사람이 검토하고 병합하는 별도 유지보수 PR로 진행한다.
 
+## 16-4 통합 DB 마이그레이션 도구 (#113)
+
+- [x] `scripts/apply_migrations.py` 신규: 정적 검증 + 증거 기반 계획 계산 + dry-run 출력 (check_migrations import, 보호 경로 미변경)
+- [x] `tests/test_apply_migrations.py` 신규: 상태별 계획 계산, 체크섬 불일치 중단, requires 누락 중단
+- [ ] 전체 테스트 실행 (pytest 미설치로 미확인)
+- [ ] `python -m scripts.dev_gate inventory <report>`로 test-baseline.json 갱신 (pytest 미설치로 미확인)
+- [ ] `docs/migrations/README.md` 사용 문서 보강 (권장)
+- [ ] --apply 경로 구현은 1-B 이후 단계에서
+
 ## 인증번호 발송의 등록 여부 비노출 (#110)
 
 - [ ] 17단계 FE 연동: 발송 200은 서버의 접수일 뿐 문자 수신이 아니다. 문자가 오지 않으면 60초 뒤 다시 요청하게 안내한다. 503 `SMS_DELIVERY_UNAVAILABLE`은 공급자 미설정이나 발송 대기열 포화일 때만 온다. 발송 409 `PHONE_ALREADY_REGISTERED`와 확인 409 `VERIFICATION_NOT_SENT`는 더 이상 오지 않는다. 비동기 발송은 프로세스 종료 시 유실될 수 있고, 재요청으로 복구한다.
