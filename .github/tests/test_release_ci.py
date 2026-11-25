@@ -691,6 +691,13 @@ class IsolationTests(unittest.TestCase):
                 probe.assert_called_once_with("python@" + base, "toi_default")
                 ci.smoke_docker([*prefix, "run", "--rm", "api", "python"])
                 self.assertEqual(calls[-1][-4:], ("run", "--rm", "api", "python"))
+                calls.clear()
+                ci.smoke_docker([*prefix, "start", "--wait", "--wait-timeout", "120"])
+                operations = [call[len(prefix) + 2:] for call in calls if call[:1] == ("compose",)]
+                self.assertEqual(operations[:3], [("start",), (
+                    "up", "--detach", "--wait", "--wait-timeout", "120", "--no-build", "--no-recreate",
+                    "--pull", "never"), ("ps", "-q")])
+                self.assertIn(("inspect", "db1"), calls)
 
     def test_reclaim_failure_and_static_output_are_handled_by_the_verdict(self):
         def static(*args):
@@ -725,10 +732,31 @@ class IsolationTests(unittest.TestCase):
                 ci.drop_database("pg", "toi_walk_test_ci_walk")
 
     def test_runner_compose_is_checked_before_candidate_runs(self):
-        with patch.object(ci, "docker", return_value="Usage: docker compose start [SERVICE...]") as docker:
-            with self.assertRaisesRegex(ci.Blocked, "start --wait"):
+        old = "Usage: docker compose up [SERVICE...]\n      --wait-timeout int   Maximum duration\n      --no-recreate\n"
+        with patch.object(ci, "docker", return_value=old) as docker:
+            with self.assertRaisesRegex(ci.Blocked, "up --wait --no-recreate"):
                 ci.prepare_images({"base_manifest": "sha256:" + "0" * 64})
-        self.assertEqual(docker.call_count, 1)
+        self.assertEqual(docker.call_args.args, ("compose", "up", "--help"))
+        supported = old + "      --wait               Wait for services\n"
+        layers = json.dumps(["sha256:" + "1" * 64])
+        exception = {"base_manifest": "sha256:" + "0" * 64, "base_image": "python:base", "platform": "linux/amd64",
+                     "base_layers": ["sha256:" + "1" * 64]}
+        with patch.object(ci, "docker", side_effect=lambda *a, capture=False: (
+                supported if a[:2] == ("compose", "up") else layers if capture else None)) as docker:
+            ci.prepare_images(exception)
+        self.assertIn(("pull", "--quiet", "--platform", "linux/amd64", ci.POSTGRES_IMAGE),
+                      [call.args for call in docker.call_args_list])
+
+    def test_compose_2_start_wait_keeps_containers_and_timeout(self):
+        self.assertEqual(ci.split_start_wait(["start", "--wait", "--wait-timeout", "120"]), (
+            ["start"], ["up", "--detach", "--wait", "--wait-timeout", "120", "--no-build", "--no-recreate",
+                        "--pull", "never"]))
+        self.assertEqual(ci.split_start_wait(["start", "--wait", "db"])[1][-1], "db")
+        self.assertEqual(ci.split_start_wait(["start", "api"]), (["start", "api"], None))
+        for operation in (["start", "--wait", "--wait-timeout", "1m"], ["start", "--wait", "--wait-timeout"],
+                          ["start", "--wait-timeout", "120"]):
+            with self.subTest(operation=operation), self.assertRaises(ci.Blocked):
+                ci.split_start_wait(operation)
 
     def test_compose_containers_cannot_receive_host_privileges(self):
         safe = {"HostConfig": {"NetworkMode": "toi_default"},

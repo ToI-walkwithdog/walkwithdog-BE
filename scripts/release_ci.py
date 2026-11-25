@@ -649,6 +649,25 @@ def compose_services(operation):
     return services
 
 
+def split_start_wait(operation):
+    """Compose 2.x on hosted runners has no `start --wait`. Start the stopped containers, then
+    wait for health with `up --wait --no-recreate`, which keeps the same containers and timeout."""
+    start, timeout, wait, rest = ["start"], None, False, iter(operation[1:])
+    for arg in rest:
+        if arg == "--wait":
+            wait = True
+        elif arg == "--wait-timeout":
+            timeout = next(rest, "")
+            require(timeout.isdigit(), "Invalid Compose wait timeout")
+        else:
+            start.append(arg)
+    if not wait:
+        require(timeout is None, "Compose wait timeout without --wait")
+        return start, None
+    limit = ["--wait-timeout", timeout] if timeout else []
+    return start, ["up", "--detach", "--wait", *limit, "--no-build", "--no-recreate", "--pull", "never", *start[1:]]
+
+
 def smoke_docker(args):
     """Docker wrapper used by the reviewed verify_container.sh during the smoke test."""
     scratch = Path(os.environ["TOI_SMOKE_SCRATCH"])
@@ -668,8 +687,12 @@ def smoke_docker(args):
             docker(*compose, *operation)
             return
         if operation[0] == "up":
-            operation = ["up", "--pull", "never", *operation[1:]]
-        docker(*compose, *operation)
+            docker(*compose, "up", "--pull", "never", *operation[1:])
+        else:
+            start, wait = split_start_wait(operation)
+            docker(*compose, *start)
+            if wait:
+                docker(*compose, *wait)
         containers = docker(*compose, "ps", "-q", capture=True).split()
         for container in containers:
             runtime_container_check(json.loads(docker("inspect", container, capture=True))[0])
@@ -752,9 +775,11 @@ def smoke(reference, source, scratch, exception):
 
 def prepare_images(exception):
     """Check tooling, then pull and check reviewed base images before any candidate code runs."""
-    # The pinned verify_container.sh uses `compose start --wait`; fail before any candidate run.
-    require("--wait" in docker("compose", "start", "--help", capture=True),
-            "Docker Compose on this runner lacks `start --wait`, which the pinned verify_container.sh uses")
+    # The smoke wrapper serves `start --wait` of the pinned verify_container.sh with
+    # `up --wait --no-recreate`, which Compose 2.x supports; fail before any candidate run.
+    usage = docker("compose", "up", "--help", capture=True)
+    require(all(re.search(rf"(?m)^\s+{option}(?=\s)", usage) for option in ("--wait", "--wait-timeout", "--no-recreate")),
+            "Docker Compose on this runner lacks `up --wait --no-recreate`, which the smoke wrapper uses")
     pinned = "python@" + exception["base_manifest"]
     for image in (pinned, exception["base_image"], POSTGRES_IMAGE):
         docker("pull", "--quiet", "--platform", exception["platform"], image)
