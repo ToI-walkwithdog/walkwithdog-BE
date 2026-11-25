@@ -143,8 +143,10 @@
 
 ## Mock SMS 테스트 환경 (#124)
 
-- [ ] 16-3: 배포 설정에 `APP_ENV=development`, `SMS_PROVIDER=mock`, `SMS_MOCK_FIXED_CODE`, `PHONE_VERIFICATION_HMAC_KEY`를 반영하고 SOLAPI 환경변수를 제거한다. 고정 인증번호와 HMAC 키 값은 저장소와 로그에 남기지 않는다.
-- [ ] 최초 시연 서버 배포 전: Mock SMS 동작, 서버 접근 제한, #110 남은 보안 위험(위 항목)을 검증한다([HANDOFF.md 8절](issues/110/HANDOFF.md#8-sms-정책-변경mock-sms)).
+- [ ] 16-3 (#128): 환경변수 템플릿 3개, 비밀값 관리 절차, 실제 설정 점검 스크립트 및 인증 테스트 환경 분리를 검증하고 dev 병합한다. Mock SMS 설정 4개를 반영하고 SOLAPI 환경변수는 제거한다. 실제 설정값은 기록하지 않는다.
+- [ ] 최초 시연 서버 배포 전: #116~#118의 승인된 설정을 EC2 `.env.api`에 반영하고 `.env`와 분리한 뒤 실제 설정 검증, Mock SMS 동작, 서버 접근 제한, #110 남은 보안 위험(위 항목)을 확인한다([EC2 설치](deployment/EC2_SETUP.md), [HANDOFF.md 8절](issues/110/HANDOFF.md#8-sms-정책-변경mock-sms)). 실제 적용은 별도 승인이다.
+- [ ] 16-10: 역방향 프록시 및 Docker 경계를 지나도 가입, 로그인 요청 제한이 올바른 클라이언트 IP에 적용되는지 검증한다. 신뢰할 프록시 주소와 `FORWARDED_ALLOW_IPS` 설정을 함께 결정하며 임의의 전달 헤더나 전체 주소를 신뢰하지 않는다.
 - [ ] 17단계 FE 연동: 고정 인증번호를 앱 안에서 비교하지 않고 BE 확인 API를 호출한다. 확인을 자동으로 반복하지 않는다.
 - [ ] #116 Seed 데이터의 전화번호는 내부 합성 테스트 번호 9000~9999 대역을 권장한다.
-- [ ] 20단계: 두 발송 라우터의 OpenAPI 503 설명과 `docs/issues/40/HANDOFF.md`의 SOLAPI 503 서술을 현재 동작(고정 인증번호 설정 오류 포함, SOLAPI 설정이 모두 있으면 200 접수 후 `FAILED`)에 맞춘다. 테스트 기반 `TEST_ENV`에서 `SMS_MOCK_FIXED_CODE`를 비워 로컬 설정이 테스트에 새지 않게 한다.
+- [ ] 20단계: 두 발송 라우터의 OpenAPI 503 설명과 `docs/issues/40/HANDOFF.md`의 SOLAPI 503 서술을 현재 동작(고정 인증번호 설정 오류 포함, SOLAPI 설정이 모두 있으면 200 접수 후 `FAILED`)에 맞춘다.
+- [ ] 20단계 테스트 안정성 후보: 기존 `test_037`의 제약조건 조회를 대상 스키마로 한정하는 방안을 별도 승인 후 검토한다. 같은 PostgreSQL DB의 다른 테스트 실행과 겹치면 제약조건 조회가 충돌할 수 있다. #128에서는 이 테스트를 수정하지 않는다.

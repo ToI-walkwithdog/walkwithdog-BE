@@ -14,6 +14,11 @@ bash scripts/verify_container.sh
 
 ```bash
 test -e deploy/.env || cp deploy/.env.example deploy/.env
+```
+
+`deploy/.env`에 합성 로컬 DB 비밀번호와 이에 맞는 `DATABASE_URL`을 입력한 뒤 다음 명령을 실행한다. 빈 템플릿 자체는 실행하지 않는다.
+
+```bash
 docker compose --project-name toi-local --env-file deploy/.env config --quiet
 docker compose --project-name toi-local --env-file deploy/.env build api
 docker compose --project-name toi-local --env-file deploy/.env up -d --wait db
@@ -27,7 +32,13 @@ docker compose --project-name toi-local --env-file deploy/.env ps
 curl --fail http://127.0.0.1:8000/db-test
 ```
 
-파일을 수정할 때는 `deploy/.env`를 사용한다. 포트 충돌 시 `API_PORT`를 바꾸고 curl URL에도 새 포트를 지정한다. Mock SMS 검증에는 합성 `PHONE_VERIFICATION_HMAC_KEY`가 필요하다. Mock 위치 조회는 격리 DB에 활성 지역 코드 `11680`을 준비한 뒤 실행한다. [SMS 환경변수](../../.env.example), [위치 연동 조건](../issues/46/HANDOFF.md)
+파일을 수정할 때는 `deploy/.env`를 사용한다. 포트 충돌 시 `API_PORT`를 바꾸고 curl URL에도 새 포트를 지정한다. Mock SMS 검증에는 합성 `PHONE_VERIFICATION_HMAC_KEY`가 필요하다. 고정 OTP는 격리된 컨테이너에서만 합성 번호로 사용하고 루트 `.env`에는 값을 두지 않는다. Mock 위치 조회는 격리 DB에 활성 지역 코드 `11680`을 준비한 뒤 실행한다. [SMS 환경변수](../../.env.example), [위치 연동 조건](../issues/46/HANDOFF.md)
+
+### 환경변수 점검 (#128)
+
+- `scripts/check_runtime_env.py`의 사용법은 `python scripts/check_runtime_env.py --help`로 확인한다. 템플릿 검증 모드(`template`)로 예제 3개를 각각 검사하고, 배포 설정 검증 모드(`deploy`)로 승인된 EC2 API 파일과 DB 파일을 검사한다. 템플릿 통과는 실제 설정이 채워졌다는 의미가 아니다.
+- Compose 정적 검증은 빈 예제를 바로 사용하지 않고, 격리된 임시 복사본에 합성 `POSTGRES_PASSWORD`, `DATABASE_URL`을 채운 뒤 `API_ENV_FILE`을 그 임시 파일로 지정하고 `docker compose --env-file`에 같은 파일을 넘겨 `config --quiet`로 실행한다. 실제 환경 파일이나 다른 작업의 DB 설정을 변경하지 않는다. 셸의 충돌하는 Compose 관련 변수도 제거한 상태에서 검사하고 검증 후 임시 파일을 삭제한다. 전체 `config` 출력이나 `docker inspect`의 환경변수를 출력하지 않는다.
+- 인증 회귀 테스트에는 실제 고정 OTP 값을 전달하지 않는다. #128의 격리 테스트에는 합성 값을 사용한다. 실 DB, 실제 공급자 또는 배포 서버를 테스트 대상으로 삼지 않는다.
 
 격리 검증 스크립트는 자신이 만든 프로젝트의 새 DB에만 자동 생성을 사용한다. 실제 DB의 초기화, 기존 스키마 갱신, 통합 마이그레이션은 후속 단계에서 별도 검증한다. 빈 DB에 과거 SQL을 일괄 적용하지 않는다. [마이그레이션 절차](../migrations/README.md)
 
@@ -43,7 +54,7 @@ docker compose --project-name toi-local --env-file deploy/.env logs --tail 50 ap
 
 ## ECR 이미지로 실행
 
-승인된 digest가 준비되면 EC2의 `/opt/toi/scripts/deploy.sh` 또는 SSM의 `ToI-DeployBackend`를 실행한다. SSM에는 승인된 `ImageDigest` 값 하나를 넘긴다. 설치, 호환성 근거 및 IAM 전환은 [EC2 설치](EC2_SETUP.md), 실패와 재조정은 [롤백 절차](ROLLBACK.md)를 따른다.
+승인된 digest가 준비되면 EC2의 `/opt/toi/scripts/deploy.sh` 또는 SSM의 `ToI-DeployBackend`를 실행한다. SSM에는 승인된 `ImageDigest` 값 하나를 넘긴다. 설치, 호환성 근거 및 IAM 전환은 [EC2 설치](EC2_SETUP.md), 실패와 재조정은 [롤백 절차](ROLLBACK.md)를 따른다. 최초 시연 배포 전에는 #128의 실제 배포 설정 검증을 통과하고 Mock SMS, 접근 제한, #110의 남은 보안 위험 및 프록시 뒤의 요청 제한을 별도로 검증한다. 설정 점검 스크립트가 배포 자동화에 연결됐다고 가정하지 않는다.
 
 ```bash
 sudo /opt/toi/scripts/deploy.sh "$approved_digest"

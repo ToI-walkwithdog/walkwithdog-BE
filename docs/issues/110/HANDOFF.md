@@ -161,10 +161,10 @@
 **환경 전환 영향**(설정 변경은 컨테이너 재생성으로만 반영)
 - 무작위에서 고정으로: 대역 밖 번호의 기존 증빙은 저장할 수 없다.
 - 고정에서 무작위나 다른 환경으로: 이미 고정 인증번호로 만든 요청(대역 안 번호만 존재)은 만료(300초)까지 확인되고, 인증 후 15분까지 저장될 수 있다. 만료 뒤의 확인은 410 `VERIFICATION_EXPIRED`, 저장 유효 시간이 지난 저장은 409 `PHONE_VERIFICATION_REQUIRED`다.
-- 로컬 `.env`나 셸에 `SMS_MOCK_FIXED_CODE`를 둔 채 저장소 테스트를 실행하면 기존 인증 테스트가 실패한다. 테스트 전에는 이 값을 비운다.
+- 일반 회귀 테스트는 고정 OTP 설정과 분리한다(#128). 루트 `.env`에는 `SMS_MOCK_FIXED_CODE` 값을 두지 않고 격리된 컨테이너에서만 고정 OTP를 사용한다. 테스트 격리의 검증 결과는 #128 PR을 참조한다.
 
 **FE 테스트 방법**은 [HANDOFF-FE.md 5절](HANDOFF-FE.md#5-110과-mock-sms-반영)에 있다.
 
-**16-3에 넘길 환경변수**: 위 표의 `APP_ENV`, `SMS_PROVIDER`, `SMS_MOCK_FIXED_CODE`, `PHONE_VERIFICATION_HMAC_KEY`를 배포 설정에 반영하고 SOLAPI 환경변수를 제거한다. 16-2는 `deploy/` 파일을 바꾸지 않았다.
+**16-3 환경변수 구성 (#128)**: 위 표의 네 환경변수를 반영한 [EC2 API 템플릿](../../../deploy/.env.api.example), 로컬 템플릿 및 [비밀값 관리 절차](../../deployment/EC2_SETUP.md)를 사용한다. SOLAPI 환경변수는 제외한다. 실제 EC2 `.env`와 `.env.api`는 분리하고 승인된 값만 입력한다. `scripts/check_runtime_env.py`의 템플릿 검증과 실제 배포 설정 검증은 별개이며 실제 서버 설정 적용과 배포는 별도 승인이다.
 
-**최초 시연 서버 배포 전 필수 검증**: Mock SMS 동작(대역 안 번호의 발송, 확인, 저장과 대역 밖 번호의 422), 서버 접근 제한, #110의 남은 보안 위험(7절). [HANDOFF-ROADMAP.md 7절](HANDOFF-ROADMAP.md#7-외부-공개-전-필수-검증)
+**최초 시연 서버 배포 전 필수 검증**: 실제 환경 설정 검증, Mock SMS 동작(대역 안 번호의 발송, 확인, 저장과 대역 밖 번호의 422), 서버 접근 제한, #110의 남은 보안 위험(7절), 프록시 뒤의 요청 제한. [HANDOFF-ROADMAP.md 7절](HANDOFF-ROADMAP.md#7-외부-공개-전-필수-검증)

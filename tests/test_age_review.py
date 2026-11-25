@@ -36,7 +36,8 @@ PASSWORD = "CorrectCurrentPassword1!"
 PLEDGE_VERSION = "pledge-test-v1"  # test-only value
 START = datetime(2026, 11, 23, 1, 0, tzinfo=timezone.utc)  # 2026-11-23 10:00 in Asia/Seoul
 BASE_ENV = {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION,
-            "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef"}
+            "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef",
+            "SMS_MOCK_FIXED_CODE": ""}  # SMS_MOCK_FIXED_CODE: a shell or root .env value must not reach these tests (#128)
 # Record deletion is only reachable in local, development and test environments.
 DELETE_RECORDS = {"ACCOUNT_EXIT_RECORD_POLICY": "delete", "APP_ENV": "test"}
 CORRECT, EXIT = "/users/me/age-review/birth-date", "/users/me"
