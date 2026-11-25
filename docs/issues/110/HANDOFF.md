@@ -101,7 +101,12 @@
 ## 6. 실제 DB 미적용과 남은 검증
 
 - 035, 036, 037을 포함해 024 이후 마이그레이션의 개발 DB 적용 여부는 **미확인**이다. 적용은 16-5, 16-6에서 별도 승인 후 진행한다.
-- **#110 남은 검증**(사용자 담당, 인수인계 후 진행): 서로 다른 계정이 같은 번호로 요청해 **일일 한도 초과**로 거절될 때의 롤백을 PostgreSQL에서 검증한다. 현재는 SQLite 테스트로만 검증했다. 검증 후 #110을 종료한다.
+- **#110 추가 검증(완료)**: 서로 다른 계정이 같은 번호로 요청해 **일일 한도 초과**로 거절될 때의 롤백을 PostgreSQL에서 검증했다(`tests/test_phone_verification_privacy_postgres.py`).
+  - `test_the_number_daily_limit_refuses_another_account_after_the_resend_wait_and_rolls_back`: 재발송 간격을 지난 다른 계정의 요청이 번호 일일 한도로 거절되는 경우다.
+  - `test_an_exhausted_number_refuses_concurrent_accounts_without_charging_them`: 한도가 소진된 번호로 두 계정이 동시에 요청하는 경우다.
+  - 두 테스트 모두 미등록 번호와 등록 번호를 확인한다. 고정 시각 기준 429 `PHONE_VERIFICATION_RATE_LIMITED`, 정확한 `retry_after_seconds`와 `Retry-After`를 확인하고, 계정과 번호 카운터(기존 증가분 포함)가 롤백되며 요청 행과 문자가 남지 않음을 확인한다.
+  - 변이 검증 2건(일일 한도 거절 제거, 거절 전 카운터 커밋)에서 두 테스트가 실패하는 것을 확인했다.
+  - 기능 코드는 바꾸지 않았다. 카운터 차감과 재발송 검사의 순서는 기존 동시 요청 테스트가 계속 검증한다.
 - 실제 SMS 발송은 하지 않는다(8절).
 
 ## 7. 보안 위험과 후속 작업
