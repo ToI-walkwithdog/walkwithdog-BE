@@ -393,10 +393,14 @@ export PHONE_VERIFICATION_HMAC_KEY=toi_synthetic_regression_key_2026
 createdb toi_walk_test_ci_signup
 createdb toi_walk_test_ci_regions
 cd /base
-PYTHONPATH=/base python -B /source/scripts/dev_test_report.py --collect-only --out /tmp/main-collection.json
 inventory_status=0
-python -B /checks/release_ci.py inventory /tmp/main-collection.json /source/docs/dev-automation/test-baseline.json \
-    || inventory_status=$?
+if PYTHONPATH=/base python -B /source/scripts/dev_test_report.py --collect-only --out /tmp/main-collection.json; then
+    python -B /checks/release_ci.py inventory /tmp/main-collection.json /source/docs/dev-automation/test-baseline.json \
+        || inventory_status=$?
+else
+    echo "Main test collection did not complete; installation verification is blocked." >&2
+    inventory_status=1
+fi
 cd /source
 PYTHONPATH=/source python -B /source/scripts/dev_test_report.py --out /tmp/regression.json
 python -B /source/scripts/dev_gate.py tests /tmp/regression.json --base /source/docs/dev-automation/test-baseline.json
@@ -505,11 +509,19 @@ def bootstrap(root, event, merge):
                         "--root", str(source), "--check-reservations"], check=True)
         # Only reviewed sources are executed in bootstrap. Base images and
         # package installation are prepared by the trusted runner.
-        docker("pull", "postgres:16.16")
-        smoke(source, scratch / "smoke")
+        failures = []
+        try:
+            docker("pull", "postgres:16.16")
+            smoke(source, scratch / "smoke")
+        except (Blocked, subprocess.CalledProcessError):
+            failures.append("container smoke and layer inspection")
         regression_dir = scratch / "regression"
         regression_dir.mkdir()
-        regression(source, original, regression_dir)
+        try:
+            regression(source, original, regression_dir)
+        except (Blocked, subprocess.CalledProcessError):
+            failures.append("regression or baseline collection")
+        require(not failures, "Bootstrap failed: " + ", ".join(failures))
     print("Trusted bootstrap completed. This is installation evidence only.")
 
 
