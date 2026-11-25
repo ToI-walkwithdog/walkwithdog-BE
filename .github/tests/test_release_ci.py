@@ -933,9 +933,266 @@ class ImageTests(unittest.TestCase):
         self.assertEqual(self.scan(layers, exception_from=0), 2)
 
 
+def saved_image(output, layers, style="blobs", gzipped=False, config=None, images=1, order=None):
+    """Synthetic `docker image save` archive. Returns the config ID that the smoke run saw."""
+    stored = [gzip.compress(layer, mtime=0) if gzipped else layer for layer in layers]
+    info = {"os": "linux", "architecture": "amd64", "config": {"Env": ["PATH=/usr/bin"]},
+            "rootfs": {"type": "layers", "diff_ids": ["sha256:" + ci.sha(layer) for layer in layers]}}
+    info.update(config or {})
+    raw = json.dumps(info).encode()
+    if style == "blobs":
+        config_path = "blobs/sha256/" + ci.sha(raw)
+        paths = ["blobs/sha256/" + ci.sha(blob) for blob in stored]
+    else:
+        config_path = ci.sha(raw) + ".json"
+        paths = [f"{index:02d}/layer.tar" for index in range(len(stored))]
+    listed = [paths[index] for index in (order or range(len(paths)))]
+    manifest = [{"Config": config_path, "RepoTags": None, "Layers": listed}] * images
+    files = {config_path: raw, "manifest.json": json.dumps(manifest).encode(), "repositories": b"{}"}
+    files.update(zip(paths, stored))
+    output.write_bytes(entries(sorted(files.items())))
+    return "sha256:" + ci.sha(raw)
+
+
+LAYERS = [entries([("srv/walkwithdog/app/main.py", b"source")]), entries([("tmp/asset", b"data")])]
+
+
+def consumer_view(path):
+    """Read an exported archive the way the ECR publication check does (PR #137)."""
+    with tarfile.open(path, mode="r:") as archive:
+        members = {item.name: item for item in archive}
+        blobs = {name: archive.extractfile(item).read() for name, item in members.items()}
+    return members, blobs
+
+
+class ArtifactTests(unittest.TestCase):
+    def export(self, folder, expected=None, **options):
+        saved = folder / "image.tar"
+        smoke_id = saved_image(saved, options.pop("layers", LAYERS), **options)
+        target = folder / "image.oci.tar"
+        facts = ci.export_oci(saved, expected or smoke_id, target)
+        return smoke_id, facts, target
+
+    def test_export_is_a_single_image_oci_layout_for_the_consumer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            smoke_id, facts, target = self.export(Path(temp))
+            members, blobs = consumer_view(target)
+        self.assertTrue(all(item.isfile() and item.mtime == 0 and item.uid == 0 for item in members.values()))
+        for name, content in blobs.items():
+            if name.startswith("blobs/sha256/"):
+                self.assertEqual(name[13:], ci.sha(content))
+        self.assertEqual(json.loads(blobs["oci-layout"]), {"imageLayoutVersion": "1.0.0"})
+        index = json.loads(blobs["index.json"])
+        descriptor, = index["manifests"]
+        self.assertEqual((index["schemaVersion"], descriptor["mediaType"], descriptor["platform"]),
+                         (2, ci.OCI_MANIFEST, {"architecture": "amd64", "os": "linux"}))
+        self.assertEqual(descriptor["digest"], facts["manifest_digest"])
+        manifest = json.loads(blobs["blobs/sha256/" + descriptor["digest"][7:]])
+        self.assertEqual((manifest["mediaType"], manifest["config"]["mediaType"], manifest["config"]["digest"]),
+                         (ci.OCI_MANIFEST, ci.OCI_CONFIG, smoke_id))
+        self.assertEqual(facts["config_digest"], smoke_id)
+        config = json.loads(blobs["blobs/sha256/" + smoke_id[7:]])
+        self.assertEqual([layer["mediaType"] for layer in manifest["layers"]], [ci.OCI_LAYER] * 2)
+        self.assertEqual(["sha256:" + ci.sha(blobs["blobs/sha256/" + layer["digest"][7:]])
+                          for layer in manifest["layers"]], config["rootfs"]["diff_ids"])
+        referenced = {"oci-layout", "index.json", "blobs/sha256/" + descriptor["digest"][7:],
+                      "blobs/sha256/" + smoke_id[7:], *("blobs/sha256/" + layer["digest"][7:]
+                                                        for layer in manifest["layers"])}
+        self.assertEqual(set(members), referenced)
+
+    def test_legacy_paths_gzip_layers_and_duplicates_keep_blobs_unchanged(self):
+        duplicate = [LAYERS[0], LAYERS[1], LAYERS[0]]
+        for style in ("blobs", "legacy"):
+            with self.subTest(style=style), tempfile.TemporaryDirectory() as temp:
+                _, facts, target = self.export(Path(temp), layers=duplicate, style=style, gzipped=True)
+                members, blobs = consumer_view(target)
+                index = json.loads(blobs["index.json"])
+                manifest = json.loads(blobs["blobs/sha256/" + index["manifests"][0]["digest"][7:]])
+                self.assertEqual([layer["mediaType"] for layer in manifest["layers"]], [ci.OCI_LAYER_GZIP] * 3)
+                self.assertEqual(manifest["layers"][0]["digest"], manifest["layers"][2]["digest"])
+                self.assertEqual(len(members), 2 + 1 + 1 + 2)
+                stored = blobs["blobs/sha256/" + manifest["layers"][0]["digest"][7:]]
+                self.assertEqual(stored, gzip.compress(LAYERS[0], mtime=0))
+                self.assertEqual(facts["layers"], 3)
+
+    def test_same_input_gives_the_same_archive(self):
+        hashes = set()
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as temp:
+                _, _, target = self.export(Path(temp))
+                hashes.add(ci.file_sha256(target))
+        self.assertEqual(len(hashes), 1)
+
+    def test_mismatched_images_are_blocked(self):
+        cases = (
+            ({"expected": "sha256:" + "0" * 64}, "differs from the smoke image"),
+            ({"order": [1, 0]}, "differs from the config diff ID"),
+            ({"config": {"rootfs": {"type": "layers", "diff_ids": ["sha256:" + "1" * 64]}}}, "Missing image layers"),
+            ({"images": 2}, "exactly one saved image"),
+            ({"config": {"architecture": "arm64"}}, "Invalid image platform"),
+        )
+        for options, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as temp:
+                with self.assertRaisesRegex(ci.Blocked, message):
+                    self.export(Path(temp), **options)
+
+    def smoke_folder(self, folder, images=1, verified=True):
+        smoke = folder / "smoke"
+        smoke.mkdir()
+        smoke_id = saved_image(smoke / "image.tar", LAYERS)
+        ids = [smoke_id] + ["sha256:" + "9" * 64] * (images - 1)
+        (smoke / "tested-images").write_text("\n".join(ids) + "\n")
+        if verified:
+            (smoke / "image-verified").touch()
+        stage = folder / "stage"
+        stage.mkdir()
+        return smoke, stage, smoke_id
+
+    def test_stage_needs_one_inspected_smoke_image(self):
+        for options, message in (({"verified": False}, "No passed smoke image inspection"),
+                                 ({"images": 2}, "exactly one smoke image")):
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as temp:
+                smoke, stage, _ = self.smoke_folder(Path(temp), **options)
+                with self.assertRaisesRegex(ci.Blocked, message):
+                    ci.stage_image(smoke, stage)
+                self.assertEqual(list(stage.iterdir()), [])
+
+    def verify_order(self, smoke_error=None):
+        calls = []
+        smoke = patch.object(ci, "smoke", side_effect=smoke_error or (lambda *args: calls.append("smoke")))
+        with patch.object(ci, "INPUTS", ci.SEMANTIC_INPUTS), \
+                patch.object(ci, "extract", side_effect=lambda root, tree, path: path), \
+                patch.object(ci, "blob", return_value=b"{}"), patch.object(ci, "core_inventory", return_value={}), \
+                patch.object(ci, "historical_inventory"), patch.object(ci, "migration_checks"), \
+                patch.object(ci, "prepare_images"), patch.object(ci, "build_test_image", return_value="image"), \
+                smoke, patch.object(ci, "stage_image", side_effect=lambda *args: calls.append("stage")), \
+                patch.object(ci, "candidate_runs", side_effect=lambda *args: calls.append("candidate") or []), \
+                patch.object(ci, "quiet"), patch.object(ci, "reclaim"), redirect_stdout(io.StringIO()):
+            results = ci.verify(Path("."), TREE, {"files": {}, "historical_main": {},
+                                                  "image_exception": {"base_image": "base"}}, MAIN,
+                                stage=Path("stage"))
+        return calls, results
+
+    def test_image_is_staged_after_the_smoke_check_and_before_candidate_tests(self):
+        calls, results = self.verify_order()
+        self.assertEqual(calls, ["smoke", "stage", "candidate"])
+        self.assertIn(("verified smoke image staged", True, ""), results)
+        calls, results = self.verify_order(smoke_error=ci.Blocked("smoke failed"))
+        self.assertEqual(calls, ["candidate"])
+        self.assertNotIn("verified smoke image staged", [name for name, _, _ in results])
+
+
+class ReleaseArtifactTests(ApprovalTests):
+    """Only a passed official verdict writes the two artifact files."""
+
+    PASSED = ["container smoke and image layers", "verified smoke image staged", "candidate isolation probe",
+              "full regression against the protected baseline",
+              *(f"PostgreSQL group {path}" for path in ci.CORE_GROUPS)]
+
+    def run_release(self, folder, failed=(), final_refs=None, run_id="45649548267", existing=False):
+        repo = {"full_name": ci.REPOSITORY}
+        evidence = {"pr": {"number": 9, "state": "open", "merged": False, "base": {"ref": "main", "repo": repo},
+                           "head": {"sha": HEAD, "repo": repo}},
+                    "approval": self.comment(), "dispatcher": self.permission(), "approver": self.permission()}
+        inputs = folder / "inputs"
+        inputs.mkdir()
+        for name, document in evidence.items():
+            (inputs / f"{name}.json").write_text(json.dumps(document))
+        artifact = folder / "artifact"
+        if existing:
+            artifact.mkdir()
+        smoke = folder / "smoke"
+        smoke.mkdir()
+        self.smoke_id = saved_image(smoke / "image.tar", LAYERS)
+        (smoke / "tested-images").write_text(self.smoke_id + "\n")
+        (smoke / "image-verified").touch()
+
+        def verify(root, tree, doc, base, stage=None):
+            ci.stage_image(smoke, stage)
+            return [(name, name not in failed, "") for name in self.PASSED]
+
+        env = {**self.env(), "PR_NUMBER": "9", "APPROVAL_COMMENT_ID": "77", "GITHUB_SHA": MAIN,
+               "GITHUB_RUN_ID": run_id, "GITHUB_RUN_ATTEMPT": "2"}
+        expected_refs = {"main": MAIN, "head": HEAD}
+        self.verify_calls, self.leftovers = None, []
+        with patch.object(ci, "rev_parse", side_effect=lambda root, ref: MAIN if ref == "HEAD" else HEAD), \
+                patch.object(ci, "git"), patch.object(ci, "ensure_commit"), \
+                patch.object(ci, "remote_refs", side_effect=[expected_refs, final_refs or expected_refs]), \
+                patch.object(ci, "merge_tree", return_value=TREE), \
+                patch.object(ci, "changes", return_value=[("app/main.py", "M")]), \
+                patch.object(ci, "change_digest", return_value=DIGEST), \
+                patch.object(ci, "load_trust", return_value={"files": {}}), \
+                patch.object(ci, "input_findings", return_value=[]), \
+                patch.object(ci, "verify", side_effect=verify) as called, redirect_stdout(io.StringIO()):
+            try:
+                ci.release(Path("."), inputs, env, artifact=artifact)
+            finally:
+                self.verify_calls = called.call_count
+                self.leftovers = [path.name for path in folder.iterdir() if path.name.endswith(".staging")]
+        return artifact
+
+    def test_passed_verdict_writes_the_consumer_contract(self):
+        with tempfile.TemporaryDirectory() as temp:
+            artifact = self.run_release(Path(temp))
+            self.assertEqual(sorted(path.name for path in artifact.iterdir()),
+                             ["image.oci.tar", "release-evidence.json"])
+            evidence = json.loads((artifact / "release-evidence.json").read_text())
+            archive_sha = ci.file_sha256(artifact / "image.oci.tar")
+            _, blobs = consumer_view(artifact / "image.oci.tar")
+        manifest_digest = json.loads(blobs["index.json"])["manifests"][0]["digest"]
+        self.assertEqual(evidence, {
+            "schema_version": 1, "repository": ci.REPOSITORY,
+            "release": {"pr_number": 9, "base_sha": MAIN, "head_sha": HEAD, "merge_tree_sha": TREE},
+            "workflow": {"run_id": 45649548267, "run_attempt": 2, "workflow_sha": MAIN},
+            "verification": {"regression": "passed", "migration": "passed", "postgresql": "passed",
+                             "postgresql_passed": 82, "container_smoke": "passed", "image_security": "passed"},
+            "image": {"platform": "linux/amd64", "archive": "image.oci.tar", "archive_sha256": archive_sha,
+                      "config_digest": self.smoke_id, "manifest_digest": manifest_digest},
+        })
+        self.assertEqual(self.leftovers, [])
+
+    def test_failed_or_unconfirmed_verdict_writes_nothing(self):
+        cases = (({"failed": ("PostgreSQL group tests/test_walk_postgres.py",)}, "Verification failed"),
+                 ({"final_refs": {"main": MAIN, "head": "e" * 40}}, "Base and Head unchanged"),
+                 ({"run_id": "0"}, "Invalid workflow run identity"))
+        for options, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as temp:
+                with self.assertRaisesRegex(ci.Blocked, message):
+                    self.run_release(Path(temp), **options)
+                self.assertFalse((Path(temp) / "artifact").exists())
+                self.assertEqual(self.leftovers, [])
+
+    def test_existing_artifact_folder_stops_before_verification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ci.Blocked, "already exists"):
+                self.run_release(Path(temp), existing=True)
+            self.assertEqual(self.verify_calls, 0)
+
+    def test_claims_need_every_passed_check(self):
+        results = [(name, True, "") for name in self.PASSED]
+        self.assertEqual(ci.verification_claims(results)["postgresql_passed"], 82)
+        for missing in ("verified smoke image staged", "full regression against the protected baseline"):
+            with self.subTest(missing=missing), self.assertRaisesRegex(ci.Blocked, "lacks a passed"):
+                ci.verification_claims([item for item in results if item[0] != missing])
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.text = (ROOT / ci.WORKFLOW).read_text(encoding="utf-8")
+
+    def test_artifact_upload_follows_the_official_verdict_only(self):
+        release_job = self.text.split("\n  release:\n", 1)[1]
+        verdict, upload = release_job.split("- name: Upload the verified image and release evidence", 1)
+        self.assertEqual(self.text.count("upload-artifact"), 1)
+        self.assertIn("release_ci.py release", verdict)
+        self.assertIn('--artifact-out "$RUNNER_TEMP/toi-release-image"', verdict)
+        self.assertRegex(upload, r"uses: actions/upload-artifact@[0-9a-f]{40} # v7\.0\.2\n")
+        self.assertIn("name: release-image-${{ github.run_id }}-${{ github.run_attempt }}\n", upload)
+        self.assertIn("path: ${{ runner.temp }}/toi-release-image/\n", upload)
+        self.assertIn("retention-days: 7\n", upload)
+        self.assertIn("if-no-files-found: error", upload)
+        self.assertNotIn("if:", upload)
+        self.assertNotIn("- name:", upload)
 
     def test_checkouts_do_not_keep_credentials(self):
         self.assertEqual(self.text.count("uses: actions/checkout@"), self.text.count("persist-credentials: false"))

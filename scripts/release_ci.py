@@ -10,6 +10,9 @@ Trust model
   author of the approval comment must be repository administrators. The approval record must
   match the exact Base, Head, merge tree and change list computed here, and cite an independent
   review of the same Head. Dispatch inputs only select the PR and the comment.
+- Only a passed ``release`` verdict writes the release artifact: the scanned smoke image as a
+  single-image OCI archive (config and layer blobs unchanged, never rebuilt) and the evidence
+  read by the ECR publication workflow. It is staged before any candidate test runs.
 - Candidate code runs only in containers: loopback-only or outbound-rejecting networks, a
   non-root user without capabilities, read-only verifier and baseline mounts, no Docker socket
   and no runner environment. Workflow commands are suspended while candidate output streams.
@@ -22,6 +25,7 @@ import ast
 from contextlib import contextmanager
 import gzip
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -538,6 +542,177 @@ def scan_image(archive_path, expected, exception=None):
         if exception:
             require(consumed == 1, "Excepted library was not found exactly once in the reviewed layer")
         return len(layers)
+
+
+# Release image artifact -------------------------------------------------------------------------
+# Contract read by the ECR publication workflow (#136): one ZIP with exactly these two files.
+# The archive reuses the scanned smoke image blobs byte for byte; nothing is rebuilt.
+
+ARTIFACT_ARCHIVE = "image.oci.tar"
+ARTIFACT_EVIDENCE = "release-evidence.json"
+ARTIFACT_LIMIT = 4 * 1024 ** 3
+OCI_INDEX = "application/vnd.oci.image.index.v1+json"
+OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+OCI_CONFIG = "application/vnd.oci.image.config.v1+json"
+OCI_LAYER = "application/vnd.oci.image.layer.v1.tar"
+OCI_LAYER_GZIP = OCI_LAYER + "+gzip"
+RUN_NUMBER = re.compile(r"[1-9][0-9]{0,18}")
+STAGED_IMAGE = "image.json"
+
+
+class HashingReader:
+    """Hash the bytes that are actually copied into the archive."""
+
+    def __init__(self, stream):
+        self.stream, self.digest = stream, hashlib.sha256()
+
+    def read(self, size=-1):
+        data = self.stream.read(size)
+        self.digest.update(data)
+        return data
+
+
+def measure_blob(stream):
+    """Digest of the stored blob and of its uncompressed tar, which is the config diff ID."""
+    signature = stream.read(2)
+    stream.seek(0)
+    stored = HashingReader(stream)
+    gzipped = signature == b"\x1f\x8b"
+    reader = gzip.GzipFile(fileobj=stored) if gzipped else stored
+    uncompressed = hashlib.sha256()
+    while block := reader.read(1024 * 1024):
+        uncompressed.update(block)
+    if gzipped:
+        while stored.read(1024 * 1024):
+            pass
+    return "sha256:" + stored.digest.hexdigest(), "sha256:" + uncompressed.hexdigest(), gzipped
+
+
+def oci_member(name, size):
+    info = tarfile.TarInfo(name)
+    info.size, info.mode, info.mtime, info.uid, info.gid = size, 0o644, 0, 0, 0
+    info.uname = info.gname = ""
+    return info
+
+
+def export_oci(saved, expected, target):
+    """Write the scanned `docker image save` output as a deterministic single-image OCI layout.
+
+    Config and layer blobs are copied unchanged. The config digest must be the smoke image, and
+    the uncompressed layers must match the config diff IDs in order. Only the OCI manifest and
+    index are written here, so the manifest digest is the final value recorded in the evidence.
+    """
+    require(IMAGE_ID.fullmatch(expected), "Expected full tested image ID")
+    with tarfile.open(saved, mode="r:") as image:
+        entries = loads(image.extractfile("manifest.json").read())
+        require(isinstance(entries, list) and len(entries) == 1, "Expected exactly one saved image")
+        entry, = entries
+        config = image.extractfile(entry["Config"]).read()
+        config_id = "sha256:" + sha(config)
+        require(config_id == expected or oci_contains_config(image, expected, config_id),
+                "Saved config differs from the smoke image")
+        data = loads(config)
+        require(data["os"] == "linux" and data["architecture"] == "amd64", "Invalid image platform")
+        diff_ids, paths = data["rootfs"]["diff_ids"], entry["Layers"]
+        require(isinstance(paths, list) and paths and len(paths) == len(diff_ids), "Missing image layers")
+        layers, blobs = [], {}
+        for path, diff_id in zip(paths, diff_ids, strict=True):
+            member = image.getmember(path)
+            require(member.isfile(), "Saved layer is not a regular file")
+            digest, measured, gzipped = measure_blob(image.extractfile(member))
+            require(measured == diff_id, "Saved layer differs from the config diff ID")
+            layers.append({"mediaType": OCI_LAYER_GZIP if gzipped else OCI_LAYER, "digest": digest,
+                           "size": member.size})
+            blobs.setdefault(digest, member)
+        manifest = json.dumps({"schemaVersion": 2, "mediaType": OCI_MANIFEST,
+                               "config": {"mediaType": OCI_CONFIG, "digest": config_id, "size": len(config)},
+                               "layers": layers}, sort_keys=True, separators=(",", ":")).encode()
+        manifest_id = "sha256:" + sha(manifest)
+        index = json.dumps({"schemaVersion": 2, "mediaType": OCI_INDEX, "manifests": [
+            {"mediaType": OCI_MANIFEST, "digest": manifest_id, "size": len(manifest),
+             "platform": {"architecture": "amd64", "os": "linux"}}]},
+            sort_keys=True, separators=(",", ":")).encode()
+        small = {"oci-layout": b'{"imageLayoutVersion":"1.0.0"}', "index.json": index,
+                 "blobs/sha256/" + config_id[7:]: config, "blobs/sha256/" + manifest_id[7:]: manifest}
+        with open(target, "xb") as stream, tarfile.open(fileobj=stream, mode="w",
+                                                        format=tarfile.USTAR_FORMAT) as archive:
+            names = sorted(set(small) | {"blobs/sha256/" + digest[7:] for digest in blobs})
+            for name in names:
+                if name in small:
+                    archive.addfile(oci_member(name, len(small[name])), io.BytesIO(small[name]))
+                    continue
+                member = blobs["sha256:" + name[13:]]
+                copied = HashingReader(image.extractfile(member))
+                archive.addfile(oci_member(name, member.size), copied)
+                require("sha256:" + copied.digest.hexdigest() == "sha256:" + name[13:],
+                        "Layer blob changed while copying")
+    require(os.path.getsize(target) <= ARTIFACT_LIMIT, "Release image archive exceeds the artifact limit")
+    return {"config_digest": config_id, "manifest_digest": manifest_id, "layers": len(layers)}
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def stage_image(smoke_scratch, stage):
+    """Keep the exact scanned smoke image before any candidate test runs."""
+    require((smoke_scratch / "image-verified").is_file(), "No passed smoke image inspection")
+    tested = set((smoke_scratch / "tested-images").read_text(encoding="utf-8").split())
+    require(len(tested) == 1, "Expected exactly one smoke image")
+    image_id, = tested
+    saved = smoke_scratch / "image.tar"
+    require(saved.is_file() and not saved.is_symlink(), "Missing saved smoke image")
+    facts = export_oci(saved, image_id, stage / ARTIFACT_ARCHIVE)
+    facts.update({"smoke_image": image_id, "archive_sha256": file_sha256(stage / ARTIFACT_ARCHIVE)})
+    (stage / STAGED_IMAGE).write_text(json.dumps(facts), encoding="utf-8")
+    print(f"Staged smoke image {image_id}: config {facts['config_digest']}, "
+          f"OCI manifest {facts['manifest_digest']}, {facts['layers']} layers")
+
+
+def verification_claims(results):
+    """Evidence claims come from the verdict; any missing or failed check blocks the artifact."""
+    passed = {name for name, ok, _ in results if ok}
+    names = {"regression": ["full regression against the protected baseline"],
+             "postgresql": [f"PostgreSQL group {path}" for path in CORE_GROUPS],
+             "container_smoke": ["container smoke and image layers"],
+             "image_security": ["container smoke and image layers", "verified smoke image staged"]}
+    for key, required in names.items():
+        require(all(name in passed for name in required), f"Release evidence lacks a passed {key} check")
+    # Migration checks run before any result is recorded and raise on failure.
+    claims = {key: "passed" for key in ("regression", "migration", "postgresql", "container_smoke",
+                                         "image_security")}
+    claims["postgresql_passed"] = sum(count for _, count in CORE_GROUPS.values())
+    return claims
+
+
+def write_artifact(stage, out, release, run, results):
+    """Move the staged archive and write the evidence only after the official verdict passed."""
+    facts = loads((stage / STAGED_IMAGE).read_bytes())
+    archive = stage / ARTIFACT_ARCHIVE
+    require(file_sha256(archive) == facts["archive_sha256"], "Staged release image changed")
+    evidence = {
+        "schema_version": 1,
+        "repository": REPOSITORY,
+        "release": release,
+        "workflow": run,
+        "verification": verification_claims(results),
+        "image": {"platform": "linux/amd64", "archive": ARTIFACT_ARCHIVE,
+                  "archive_sha256": facts["archive_sha256"], "config_digest": facts["config_digest"],
+                  "manifest_digest": facts["manifest_digest"]},
+    }
+    out.mkdir(mode=0o700)
+    os.replace(archive, out / ARTIFACT_ARCHIVE)
+    with open(out / ARTIFACT_EVIDENCE, "x", encoding="utf-8") as stream:
+        json.dump(evidence, stream, indent=2, sort_keys=True)
+    require(sorted(path.name for path in out.iterdir()) == sorted([ARTIFACT_ARCHIVE, ARTIFACT_EVIDENCE])
+            and file_sha256(out / ARTIFACT_ARCHIVE) == facts["archive_sha256"], "Unexpected release artifact")
+    print(f"Release artifact: {ARTIFACT_ARCHIVE} sha256 {facts['archive_sha256']}, "
+          f"config {facts['config_digest']}, manifest {facts['manifest_digest']}")
+    return evidence
 
 
 # Docker helpers -------------------------------------------------------------------------------
@@ -1132,8 +1307,12 @@ def reclaim(scratch):
                     f"{os.geteuid()}:{os.getegid()}", "--", str(resolved)], check=True)
 
 
-def verify(root, candidate, doc, base):
-    """Static checks, then the isolated smoke, regression and PostgreSQL runs of one tree."""
+def verify(root, candidate, doc, base, stage=None):
+    """Static checks, then the isolated smoke, regression and PostgreSQL runs of one tree.
+
+    With ``stage`` (official release only), the scanned smoke image is kept there as an OCI
+    archive right after the smoke check and before any candidate test runs.
+    """
     results = []
     # A cleanup failure must not hide the verdict; it is reported as a failed check instead.
     with tempfile.TemporaryDirectory(prefix="toi-release-", ignore_cleanup_errors=True) as temporary:
@@ -1156,6 +1335,9 @@ def verify(root, candidate, doc, base):
                 try:
                     results.append(run_check("container smoke and image layers",
                                              lambda: smoke(reference, source, scratch / "smoke", exception)))
+                    if stage is not None and results[-1][1]:
+                        results.append(run_check("verified smoke image staged",
+                                                 lambda: stage_image(scratch / "smoke", stage)))
                     results.extend(candidate_runs(root, candidate, reference, scratch, image, groups))
                 finally:
                     quiet("image", "rm", "--force", image)
@@ -1257,8 +1439,13 @@ def installation(root, event):
                     "administrator approval.")
 
 
-def release(root, evidence_dir, env=os.environ):
-    """Official verdict, dispatched by an administrator on protected main."""
+def release(root, evidence_dir, env=os.environ, artifact=None):
+    """Official verdict, dispatched by an administrator on protected main.
+
+    With ``artifact``, the verified image and its evidence are written there only after the
+    verdict passed. The workflow uploads that folder in the next step.
+    """
+    require(artifact is None or not os.path.lexists(artifact), "Release artifact folder already exists")
     evidence = {name: loads((evidence_dir / f"{name}.json").read_bytes())
                 for name in ("pr", "approval", "dispatcher", "approver")}
     actor = dispatcher(env, evidence["dispatcher"])
@@ -1289,11 +1476,27 @@ def release(root, evidence_dir, env=os.environ):
              ("dispatcher", actor), ("approval comment", comment),
              ("approver", evidence["approval"]["user"]["login"]), ("independent review", approval["review"]["record"]),
              ("reference", REFERENCE)]
-    results = verify(root, tree, doc, base)
-    results.append(run_check("Base and Head unchanged during verification", lambda: require(
-        remote_refs(root, number) == {"main": base, "head": head}, "Protected main or PR head changed; rerun")))
-    record("Release CI official verification", facts, results)
-    finish(results, f"Protected-main release verification passed: PR #{number} base {base} head {head} tree {tree}")
+    run = None
+    if artifact is not None:
+        run_id, attempt = env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", "")
+        require(RUN_NUMBER.fullmatch(run_id) and RUN_NUMBER.fullmatch(attempt), "Invalid workflow run identity")
+        run = {"run_id": int(run_id), "run_attempt": int(attempt), "workflow_sha": base}
+    stage = None if artifact is None else artifact.parent / f".{artifact.name}.staging"
+    if stage is not None:
+        stage.mkdir(mode=0o700)
+    try:
+        results = verify(root, tree, doc, base, stage=stage)
+        results.append(run_check("Base and Head unchanged during verification", lambda: require(
+            remote_refs(root, number) == {"main": base, "head": head}, "Protected main or PR head changed; rerun")))
+        record("Release CI official verification", facts, results)
+        finish(results,
+               f"Protected-main release verification passed: PR #{number} base {base} head {head} tree {tree}")
+        if artifact is not None:
+            write_artifact(stage, artifact, {"pr_number": number, "base_sha": base, "head_sha": head,
+                                             "merge_tree_sha": tree}, run, results)
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 def scope(root, number, base, head):
@@ -1321,6 +1524,8 @@ def main(args):
     command = commands.add_parser("release")
     command.add_argument("--repo", required=True, type=Path)
     command.add_argument("--evidence", required=True, type=Path)
+    command.add_argument("--artifact-out", type=Path,
+                         help="New folder for the verified image and evidence, written only on success")
     command = commands.add_parser("scope")
     command.add_argument("--repo", required=True, type=Path)
     command.add_argument("--pr", required=True, type=int)
@@ -1334,7 +1539,7 @@ def main(args):
     elif options.command == "collect":
         collect(options.out)
     elif options.command == "release":
-        release(options.repo, options.evidence)
+        release(options.repo, options.evidence, artifact=options.artifact_out)
     else:
         scope(options.repo, options.pr, options.base, options.head)
 
