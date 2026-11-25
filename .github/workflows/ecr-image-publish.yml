@@ -85,6 +85,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      issues: read
       id-token: write
     env:
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}

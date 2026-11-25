@@ -44,7 +44,7 @@ Artifact 이름: `release-image-{run_id}-{run_attempt}`. ZIP의 루트에는 정
 - `verification`: `regression`, `migration`, `postgresql`, `postgresql_passed`, `container_smoke`, `image_security`
 - `image`: `platform`, `archive`, `archive_sha256`, `config_digest`, `manifest_digest`
 
-위 값 자체는 승인 근거가 아니다. 공식 성공 실행은 trusted `release_ci.py`가 dispatcher와 승인 작성자의 관리자 권한을 검사했다는 근거이며, 이 Workflow는 실행 이벤트/경로/SHA/시도/성공 여부, Artifact ID/출처/ZIP Digest, PR 병합, 변경되지 않은 승인 댓글, 댓글의 실제 승인자/독립 리뷰 및 exact Head를 GitHub API와 대조한다. `TRUSTED_RELEASE_WORKFLOW_SHA`는 검토된 Release CI의 40자리 Workflow SHA만 허용하며 변수 자체는 독립 승인 증명이 아니다. 최신 시도와 현재 protected `main` HEAD를 확인한다. 일반 2-parent Merge Commit만 지원하며 Squash/Rebase는 차단한다. 압축 ZIP/OCI Archive 4GiB 및 전체 레이어 압축 해제 합계 16GiB는 안전 한도다. 이미지나 증빙 만료·누락 시 발행을 보류한다.
+위 값 자체는 승인 근거가 아니다. 공식 성공 실행은 trusted `release_ci.py`가 dispatcher와 승인 작성자의 관리자 권한을 검사했다는 근거다. 이 Workflow는 성공한 verifier job의 로그에서 승인 댓글 ID와 작성자 login을 읽고, 그 ID의 현재 댓글이 수정되지 않았으며 승인 레코드 본문이 일치하는지 확인한다. 댓글 본문 SHA-256도 검증 Bundle에 고정하고 Publish가 AWS 인증 전에 다시 조회·대조한다. 실행 이벤트/경로/SHA/시도, Artifact ID/출처/ZIP Digest, PR 병합, 독립 리뷰 및 exact Head도 GitHub API와 대조한다. `TRUSTED_RELEASE_WORKFLOW_SHA`는 검토된 Release CI의 40자리 Workflow SHA만 허용하며 변수 자체는 독립 승인 증명이 아니다. 최신 시도와 현재 protected `main` HEAD를 확인한다. 일반 2-parent Merge Commit만 지원하며 Squash/Rebase는 차단한다. 압축 ZIP/OCI Archive 4GiB 및 전체 레이어 압축 해제 합계 16GiB는 안전 한도다. 이미지나 증빙 만료·누락 시 발행을 보류한다.
 
 검증된 OCI 이미지와 Release 증빙은 `ecr-verified-image-{publish_run_id}-{publish_run_attempt}` 임시 Artifact로 Validate에서 Publish로 전달한다. Publish는 AWS 인증 전에 다시 압축 아카이브, OCI Manifest, Config, 모든 Layer와 증빙의 관계를 검사한다. 실제 Release Artifact의 이름은 `release-image-{run_id}-{run_attempt}`이며 루트에 `image.oci.tar`와 `release-evidence.json`만 허용한다.
 
@@ -160,8 +160,8 @@ python -m unittest discover -s .github/tests -p test_ecr_image_publish.py -v
 
 1. Release CI Workflow SHA를 검토해 Repository Variable `TRUSTED_RELEASE_WORKFLOW_SHA`에 등록하고, ECR Role/Policy 및 위 Variables를 준비한다.
 2. 보호된 `main`에서 관리자가 `ECR Image Publish`를 수동 실행한다. 입력은 `release_run_id`, `release_run_attempt`, `release_pr_number`다. `release_run_attempt`는 최신 시도와 일치해야 한다. 태그 대상은 현재 `github.sha`다.
-3. Validate는 OIDC 없이 GitHub API의 공식 Release CI 성공 기록, trusted Workflow SHA, 최신 시도, 승인된 관리자 댓글, exact-head 독립 승인, 병합된 PR/Base·Head·Tree, Release Artifact ID/ZIP Digest/출처, OCI Archive와 모든 이미지 Digest를 검증한다. 검증 후 현재 protected `main`과 run attempt를 다시 확인한다.
-4. Validate가 전달한 단일 OCI 이미지와 증빙을 Publish가 AWS 인증 전에 다시 검사한다. Publish Job만 OIDC 권한을 가지며 고정된 계정·Role·리전·`toi-be` 저장소 설정을 확인한다.
+3. Validate는 OIDC 없이 GitHub API의 공식 Release CI 성공 기록과 성공한 verifier job 로그를 확인한다. 로그의 승인 댓글 ID/작성자와 현재 수정되지 않은 관리자 댓글을 결속하고, trusted Workflow SHA, 최신 시도, exact-head 독립 승인, 병합된 PR/Base·Head·Tree, Artifact ID/ZIP Digest/출처, OCI Archive와 모든 이미지 Digest를 검증한다. 검증 후 현재 protected `main`과 run attempt를 다시 확인한다.
+4. Validate가 전달한 단일 OCI 이미지, 증빙 및 승인 본문 SHA-256을 Publish가 GitHub에서 다시 조회·대조해 AWS 인증 전에 검사한다. Publish Job만 OIDC 권한을 가지며 고정된 계정·Role·리전·`toi-be` 저장소 설정을 확인한다.
 5. 기존 SHA 태그가 없다면 Skopeo `copy --preserve-digests`로 검증된 OCI 이미지 그대로 발행한다. 동일 SHA/Digest는 멱등 성공, 다른 Digest는 차단한다. 복사 실패/응답 유실은 제한된 조회로 원격 상태를 재조정하며 맹목적 재전송은 하지 않는다.
 6. ECR의 SHA 태그와 등록 Manifest Digest를 조회해 OCI Manifest와 일치할 때에만 계약 v1 `image-publish-evidence.json`을 생성하고 `image-publish-{run_id}-{run_attempt}` Artifact로 업로드한다. 이후 자동 EC2 배포는 하지 않는다.
 

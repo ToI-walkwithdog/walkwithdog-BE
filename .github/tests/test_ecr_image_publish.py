@@ -305,6 +305,58 @@ class ReleaseContractTests(unittest.TestCase):
                 ci.release_change_digest("a" * 40, "b" * 40)
 
 
+class GitHubJobLogDownloadTests(unittest.TestCase):
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, _limit):
+            return b"trusted job log"
+
+    class Opener:
+        def __init__(self, location):
+            from email.message import Message
+            self.location = location
+            self.api_request = None
+            self.signed_request = None
+            self.headers = Message()
+            self.headers["Location"] = location
+
+        def open(self, request, timeout):
+            from urllib.error import HTTPError
+            if request.full_url.startswith("https://api.github.com/"):
+                self.api_request = request
+                raise HTTPError(request.full_url, 302, "Redirect", self.headers, None)
+            self.signed_request = request
+            return GitHubJobLogDownloadTests.Response()
+
+    def test_signed_log_download_does_not_forward_github_token(self):
+        from unittest.mock import patch
+        location = "https://productionresultssa31.blob.core.windows.net/log?sig=private"
+        opener = self.Opener(location)
+        with patch.object(ci.urllib.request, "build_opener", return_value=opener):
+            api = ci.GitHubAPI("test-token")
+            api._opener = opener
+            self.assertEqual(api.get_job_log(90), b"trusted job log")
+        self.assertEqual(opener.api_request.get_header("Authorization"), "Bearer test-token")
+        self.assertIsNone(opener.signed_request.get_header("Authorization"))
+
+    def test_job_log_redirect_rejects_untrusted_host(self):
+        from unittest.mock import patch
+        opener = self.Opener("https://attacker.example/log")
+        with patch.object(ci.urllib.request, "build_opener", return_value=opener):
+            api = ci.GitHubAPI("test-token")
+            api._opener = opener
+            with self.assertRaisesRegex(ci.Blocked, "Invalid signed"):
+                api.get_job_log(90)
+        self.assertIsNone(opener.signed_request)
+
+
 class GitHubIntegrationTests(unittest.TestCase):
     def setUp(self):
         from unittest.mock import Mock
@@ -340,13 +392,20 @@ class GitHubIntegrationTests(unittest.TestCase):
                         "/actions/runs/123/artifacts?per_page=100&page=1": {"total_count": 1, "artifacts": [f.artifact]},
                         "/actions/runs/123/attempts/2/jobs?per_page=100&page=1": {
                             "total_count": 1, "jobs": [{"id": 90, "name": "Official release verification",
-                                                        "status": "completed", "conclusion": "success"}]},
-                        "/issues/1/comments?per_page=100&page=1": [self.comment],
+                                                        "status": "completed", "conclusion": "success",
+                                                        "run_id": 123, "run_attempt": 2,
+                                                        "head_sha": f.run["head_sha"]}]},
+                        "/issues/comments/77": self.comment,
                         "/pulls/1": f.pr, "/commits/" + f.source: f.commit,
                         "/branches/main": {"name": "main", "protected": True, "commit": {"sha": f.source}},
                         "/pulls/1/reviews?per_page=100&page=1": [self.review]}
         self.api = Mock()
         self.api.get.side_effect = lambda endpoint: self.records[endpoint]
+        self.api.get_job_log.return_value = (
+            b"## Release CI official verification\n"
+            b"| Item | Value |\n| --- | --- |\n"
+            b"| approval comment | `77` |\n"
+            b"| approver | `release-admin` |\n")
 
     def verify(self, **changes):
         from unittest.mock import patch
@@ -377,15 +436,17 @@ class GitHubIntegrationTests(unittest.TestCase):
             {"body": original["body"].replace(self.change_digest, "0" * 64)},
             {"body": original["body"].replace("pullrequestreview-1", "pullrequestreview-2")},
             {"user": {"type": "Bot", "login": "release-admin"}},
+            {"id": 78},
         ):
-            self.records["/issues/1/comments?per_page=100&page=1"] = [{**original, **update}]
+            self.records["/issues/comments/77"] = {**original, **update}
             with self.subTest(update=update), self.assertRaises(ci.Blocked):
                 self.verify()
-        self.records["/issues/1/comments?per_page=100&page=1"] = [
-            original, {**original, "id": original["id"] + 1}]
-        with self.assertRaisesRegex(ci.Blocked, "exactly one"):
+        self.records["/issues/comments/77"] = original
+        log = self.api.get_job_log.return_value
+        self.api.get_job_log.return_value = log.replace(b"release-admin", b"other-admin")
+        with self.assertRaisesRegex(ci.Blocked, "differs from the successful Release CI run"):
             self.verify()
-        self.records["/issues/1/comments?per_page=100&page=1"] = [original]
+        self.api.get_job_log.return_value = log
 
     def test_verified_bundle_contains_only_verified_release_files(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -427,6 +488,12 @@ class GitHubIntegrationTests(unittest.TestCase):
         latest = self.records["/actions/runs/123"]
         latest["run_attempt"] = 3
         with self.assertRaisesRegex(ci.Blocked, "latest successful attempt"):
+            ci.verify_context_current(self.api, context)
+
+    def test_publish_recheck_rejects_replaced_approval(self):
+        context = self.verify()["release_context"]
+        self.records["/issues/comments/77"]["body"] = "Reposted comment\n" + self.records["/issues/comments/77"]["body"]
+        with self.assertRaisesRegex(ci.Blocked, "approval changed"):
             ci.verify_context_current(self.api, context)
 
     def test_zip_tampered_before_parse(self):
@@ -962,6 +1029,8 @@ class WorkflowActivationTests(unittest.TestCase):
         path = MODULE.parents[1] / ".github/workflows/ecr-image-publish.yml"
         workflow = path.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow)
+        self.assertEqual(workflow.count("actions: read"), 2)
+        self.assertEqual(workflow.count("issues: read"), 2)
         self.assertIn("configure-aws-credentials@", workflow)
         self.assertIn("--preserve-digests", MODULE.read_text(encoding="utf-8"))
         self.assertNotIn("if: ${{ false }}", workflow)

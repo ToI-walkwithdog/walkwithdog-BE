@@ -7,6 +7,7 @@ import argparse
 import os
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -44,6 +45,7 @@ LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
 EVIDENCE_FILE = "image-publish-evidence.json"
 VERIFIED_CONTEXT_FILE = "publish-context.json"
 MAX_JSON = 8 * 1024 * 1024
+MAX_JOB_LOG = 32 * 1024 * 1024
 BLOCK = 1024 * 1024
 MAX_ARCHIVE = 4 * 1024**3  # Provisional compressed input limit.
 MAX_UNCOMPRESSED_LAYERS = 16 * 1024**3  # Provisional cumulative layer expansion limit.
@@ -377,6 +379,42 @@ class GitHubAPI:
         except (OSError, ValueError, UnicodeError, RecursionError) as exc:
             raise Blocked("GitHub API request failed or returned invalid JSON") from None
 
+    def get_job_log(self, job_id):
+        """Read a bounded official job log without forwarding the API token to its signed URL."""
+        positive_int({"job_id": job_id}, "job_id")
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{REPOSITORY}/actions/jobs/{job_id}/logs",
+            headers={"Authorization": "Bearer " + self._token,
+                     "Accept": "application/vnd.github+json",
+                     "X-GitHub-Api-Version": "2022-11-28",
+                     "User-Agent": "toi-ecr-publish"}, method="GET")
+        try:
+            with self._opener.open(request, timeout=30):
+                raise Blocked("Expected a signed redirect for the official job log")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 302:
+                raise Blocked(f"GitHub Actions job log request failed (HTTP {exc.code})") from None
+            location = exc.headers.get("Location", "")
+            exc.close()
+        except OSError:
+            raise Blocked("GitHub Actions job log request failed") from None
+        try:
+            target = urllib.parse.urlsplit(location)
+            require(target.scheme == "https" and target.hostname is not None
+                    and target.hostname.endswith(".blob.core.windows.net")
+                    and target.username is None and target.password is None
+                    and target.port in (None, 443),
+                    "Invalid signed GitHub Actions job log URL")
+            download = urllib.request.Request(location, headers={"Accept": "text/plain"}, method="GET")
+            with urllib.request.build_opener(NoRedirect()).open(download, timeout=30) as response:
+                raw = response.read(MAX_JOB_LOG + 1)
+            require(len(raw) <= MAX_JOB_LOG, "GitHub Actions job log exceeds size limit")
+            return raw
+        except urllib.error.HTTPError as exc:
+            raise Blocked(f"GitHub Actions job log download failed (HTTP {exc.code})") from None
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise Blocked("GitHub Actions job log download failed") from None
+
 
 def api_object(api, endpoint):
     value = api.get(endpoint)
@@ -472,36 +510,49 @@ def official_release_job_id(jobs):
     return positive_int(candidates[0], "id")
 
 
-def validate_release_approval(comments, *, pr_number, base_sha, head_sha, tree_sha, change_digest):
-    """Require the unchanged approval record certified by the trusted Release CI run."""
+def release_job_approval(api, jobs, run):
+    """Read the exact approval identity printed by the trusted verifier job."""
+    official_job_id = official_release_job_id(jobs)
+    job = next((job for job in jobs if job.get("id") == official_job_id), None)
+    require(job is not None, "Official Release CI job is missing")
+    require(job.get("run_id") == run.get("id") and job.get("run_attempt") == run.get("run_attempt")
+            and job.get("head_sha") == run.get("head_sha")
+            and job.get("status") == "completed" and job.get("conclusion") == "success",
+            "Official Release CI job does not match the successful run")
+    try:
+        log = api.get_job_log(official_job_id).decode("utf-8-sig")
+    except UnicodeError:
+        raise Blocked("Official Release CI job log is not valid UTF-8") from None
+    comment_values = re.findall(r"\|\s*approval comment\s*\|\s*`([1-9][0-9]{0,18})`\s*\|", log)
+    approver_values = re.findall(
+        r"\|\s*approver\s*\|\s*`([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)`\s*\|", log)
+    require(len(comment_values) == len(approver_values) == 1,
+            "Official Release CI job log must identify exactly one approver and comment")
+    return {"comment_id": int(comment_values[0]), "approver": approver_values[0],
+            "official_job_id": official_job_id}
+
+
+def validate_release_approval(comment, *, pr_number, base_sha, head_sha, tree_sha, change_digest):
+    """Require the unchanged approval record identified by the trusted Release CI run."""
     expected = {"pr": pr_number, "base": base_sha, "head": head_sha,
                 "merge_tree": tree_sha, "changes": change_digest}
-    matches = []
-    for comment in comments:
-        body = comment.get("body")
-        if not isinstance(body, str):
-            continue
-        blocks = APPROVAL_BLOCK.findall(body.replace("\r\n", "\n"))
-        if len(blocks) != 1:
-            continue
-        try:
-            record = parse_json(blocks[0].encode())
-        except Blocked:
-            continue
-        if not isinstance(record, dict) or set(record) != APPROVAL_FIELDS:
-            continue
-        review = record.get("review")
-        if not isinstance(review, dict) or set(review) != {"head", "record", "blocking"}:
-            continue
-        if any(record.get(key) != value for key, value in expected.items()):
-            continue
-        if (review.get("head") != head_sha or type(review.get("blocking")) is not int
-                or review["blocking"] != 0 or not isinstance(review.get("record"), str)
-                or not review["record"].startswith(f"https://github.com/{REPOSITORY}/")):
-            continue
-        matches.append((comment, record))
-    require(len(matches) == 1, "Expected exactly one matching Release CI approval comment")
-    comment, record = matches[0]
+    body = comment.get("body")
+    require(isinstance(body, str), "Release approval comment body is missing")
+    blocks = APPROVAL_BLOCK.findall(body.replace("\r\n", "\n"))
+    require(len(blocks) == 1, "Expected exactly one Release CI approval block")
+    try:
+        record = parse_json(blocks[0].encode())
+    except Blocked:
+        raise Blocked("Invalid Release CI approval record") from None
+    require(isinstance(record, dict) and set(record) == APPROVAL_FIELDS
+            and all(record.get(key) == value for key, value in expected.items()),
+            "Release approval record does not match the verified merge")
+    review = record.get("review")
+    require(isinstance(review, dict) and set(review) == {"head", "record", "blocking"}
+            and review.get("head") == head_sha and type(review.get("blocking")) is int
+            and review["blocking"] == 0 and isinstance(review.get("record"), str)
+            and review["record"].startswith(f"https://github.com/{REPOSITORY}/"),
+            "Release approval does not cite a non-blocking review of the exact Head")
     user = comment.get("user") or {}
     login = user.get("login", "")
     require(comment.get("issue_url") == f"https://api.github.com/repos/{REPOSITORY}/issues/{pr_number}"
@@ -536,12 +587,11 @@ def collect_github_records(api, run_id, attempt, pr_number, source_sha):
     pr = api_object(api, f"/pulls/{pr_number}")
     commit = api_object(api, f"/commits/{source_sha}")
     jobs = api_pages(api, f"/actions/runs/{run_id}/attempts/{attempt}/jobs", key="jobs")
-    comments = api_pages(api, f"/issues/{pr_number}/comments")
     verify_current_main(api, source_sha)
     reviews = api_pages(api, f"/pulls/{pr_number}/reviews")
     # Recheck latest attempt after pagination, before accepting the inventory.
     verify_current_run(api, run)
-    return run, artifacts, pr, commit, reviews, jobs, comments
+    return run, artifacts, pr, commit, reviews, jobs
 
 
 def observe_independent_reviews(pr, reviews, head_sha, run):
@@ -600,7 +650,7 @@ def verify_github_zip(api, zip_path, *, run_id, attempt, pr_number, source_sha,
     if output_directory is not None:
         output = Path(output_directory)
         require(not output.exists() and not output.is_symlink(), "Verified artifact output already exists")
-    run, artifacts, pr, commit, reviews, jobs, comments = collect_github_records(
+    run, artifacts, pr, commit, reviews, jobs = collect_github_records(
         api, run_id, attempt, pr_number, source_sha)
     matches = [a for a in artifacts if a.get("name") == artifact_name(run_id, attempt)]
     require(len(matches) == 1, "Expected exactly one attempt-specific artifact")
@@ -638,10 +688,15 @@ def verify_github_zip(api, zip_path, *, run_id, attempt, pr_number, source_sha,
                 result.update(observe_independent_reviews(pr, reviews, evidence["release"]["head_sha"], run))
                 release = evidence["release"]
                 changes = release_change_digest(release["base_sha"], release["merge_tree_sha"])
+                run_approval = release_job_approval(api, jobs, run)
+                comment = api_object(api, f"/issues/comments/{run_approval['comment_id']}")
                 approval = validate_release_approval(
-                    comments, pr_number=pr_number, base_sha=release["base_sha"],
+                    comment, pr_number=pr_number, base_sha=release["base_sha"],
                     head_sha=release["head_sha"], tree_sha=release["merge_tree_sha"],
                     change_digest=changes)
+                require(approval["comment_id"] == run_approval["comment_id"]
+                        and approval["approver"] == run_approval["approver"],
+                        "Approval comment or author differs from the successful Release CI run")
                 require(approval["review"]["record"] in result["independent_review_records"],
                         "Approval record does not cite the observed independent PR review")
                 actor = object_field(run, "actor")
@@ -662,7 +717,7 @@ def verify_github_zip(api, zip_path, *, run_id, attempt, pr_number, source_sha,
                                 "change_digest": changes},
                     "release_workflow": {
                         "run_id": run_id, "run_attempt": attempt, "workflow_sha": run["head_sha"],
-                        "dispatcher": dispatcher, "official_job_id": official_release_job_id(jobs),
+                        "dispatcher": dispatcher, "official_job_id": run_approval["official_job_id"],
                     },
                     "approval": approval,
                     "verifier": {"files": verifier_file_hashes(source_sha)},
@@ -1058,6 +1113,21 @@ def verify_context_current(api, context):
             and run.get("conclusion") == "success" and run.get("head_sha") == workflow["workflow_sha"]
             and same_repo(run.get("repository")) and same_repo(run.get("head_repository")),
             "Verified Release CI run is no longer the latest successful attempt")
+    jobs = api_pages(api, f"/actions/runs/{workflow['run_id']}/attempts/{workflow['run_attempt']}/jobs",
+                     key="jobs")
+    approval = context["approval"]
+    comment = api_object(api, f"/issues/comments/{approval['comment_id']}")
+    release = context["release"]
+    current_approval = validate_release_approval(
+        comment, pr_number=release["pr_number"], base_sha=release["base_sha"],
+        head_sha=release["head_sha"], tree_sha=release["merge_tree_sha"],
+        change_digest=release["change_digest"])
+    run_approval = release_job_approval(api, jobs, run)
+    require(current_approval == approval and
+            run_approval["comment_id"] == approval["comment_id"]
+            and run_approval["approver"] == approval["approver"]
+            and run_approval["official_job_id"] == workflow["official_job_id"],
+            "Release approval changed or no longer matches the trusted CI run")
     verify_current_run(api, run)
 
 
