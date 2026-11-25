@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.auth import UNUSABLE_PASSWORD, token_digest
     from app.database import Base, get_db
-    from app.location_geocoder import KAKAO_TIMEOUT_SECONDS, KAKAO_REGION_URL, NoRedirect
+    from app.location_geocoder import KAKAO_TIMEOUT_SECONDS, KAKAO_REGION_URL, MAX_RESPONSE_BYTES, NoRedirect
     from app.models import AuthSession, User, UserRole
     from app.region_models import LEVEL_SIDO, LEVEL_SIGUNGU, LEVEL_SPECIAL_SELECTABLE, Region
     from app.routers.regions import router
@@ -253,3 +253,46 @@ def test_unexpected_region_error_uses_safe_contract_500(location_app, monkeypatc
                         Mock(side_effect=RuntimeError(f"{POINT} {KEY}")))
     assert_error(post(client), 500, "INTERNAL_SERVER_ERROR", "일시적인 오류가 발생했습니다.")
     assert [record.message for record in caplog.records] == ["POST /regions/resolve-location failed: RuntimeError"]
+
+
+def test_oversized_provider_response_is_unavailable(location_app, monkeypatch, caplog):
+    client, _, open_request = location_app
+    enable_stubbed_kakao(monkeypatch)
+    open_request.side_effect = None
+    oversized = b'{"documents":[{"region_type":"B","code":"1168010100"}]}' + b" " * (MAX_RESPONSE_BYTES + 1)
+    open_request.return_value = io.BytesIO(oversized)
+    assert_error(post(client), 503, "GEOCODING_UNAVAILABLE", "현재 위치를 확인할 수 없습니다.")
+    assert [record.message for record in caplog.records] == ["Location lookup unavailable: provider_response"]
+
+
+def test_whitespace_kakao_api_key_is_rejected_without_network_call(location_app, monkeypatch, caplog):
+    client, build_opener, _ = location_app
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("LOCATION_GEOCODING_PROVIDER", "kakao")
+    monkeypatch.setenv("LOCATION_EXTERNAL_TRANSFER_ENABLED", "true")
+    monkeypatch.setenv("KAKAO_REST_API_KEY", "   ")
+    assert_error(post(client), 503, "GEOCODING_UNAVAILABLE", "현재 위치를 확인할 수 없습니다.")
+    build_opener.assert_not_called()
+    assert [record.message for record in caplog.records] == ["Location lookup unavailable: provider_configuration"]
+
+
+@pytest.mark.parametrize("failure_kind", ["http_401", "timeout", "url_error"])
+def test_kakao_transport_errors_never_leak_key_or_coordinates(location_app, monkeypatch, caplog, failure_kind):
+    client, _, open_request = location_app
+    enable_stubbed_kakao(monkeypatch)
+    sensitive = f"lat={POINT['latitude']} lon={POINT['longitude']} KakaoAK {KEY}"
+    if failure_kind == "http_401":
+        open_request.side_effect = HTTPError(
+            f"{KAKAO_REGION_URL}?{sensitive}", 401, sensitive, {}, io.BytesIO(sensitive.encode())
+        )
+    elif failure_kind == "timeout":
+        open_request.side_effect = TimeoutError(sensitive)
+    else:
+        open_request.side_effect = URLError(sensitive)
+
+    response = post(client)
+    assert_error(response, 503, "GEOCODING_UNAVAILABLE", "현재 위치를 확인할 수 없습니다.")
+    combined = response.text + caplog.text
+    for value in (KEY, str(POINT["latitude"]), str(POINT["longitude"])):
+        assert value not in combined
+

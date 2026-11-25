@@ -156,3 +156,10 @@
 - [ ] 실제 정책 문서는 법률 승인본으로 교체하고, EC2 `.env.api`의 비밀 설정과 레벨 정책 시작 시각을 별도 승인 후 적용·검증한다. 개발 DB 변경과 서버 배포는 이 작업에 포함하지 않는다.
 - [ ] 20단계: 두 발송 라우터의 OpenAPI 503 설명과 `docs/issues/40/HANDOFF.md`의 SOLAPI 503 서술을 현재 동작(고정 인증번호 설정 오류 포함, SOLAPI 설정이 모두 있으면 200 접수 후 `FAILED`)에 맞춘다.
 - [ ] 20단계 테스트 안정성 후보: 기존 `test_037`의 제약조건 조회를 대상 스키마로 한정하는 방안을 별도 승인 후 검토한다. 같은 PostgreSQL DB의 다른 테스트 실행과 겹치면 제약조건 조회가 충돌할 수 있다. #128에서는 이 테스트를 수정하지 않는다.
+
+## 16-8 Kakao 위치 판별 설정 (#117)
+
+- [x] 시연/개발 환경 Kakao 실제 호출, OS 위치 권한 + 서비스 내 위치정보 이용 고지 후 실시간 변환(제3자 저장 없음), 무료 일일 쿼터 내 사용 정책 확정 및 문서화 (`docs/issues/46/TODO.md`, `docs/handoff/LATEST.md`)
+- [x] 16-3 환경변수 목록 정리: `LOCATION_GEOCODING_PROVIDER`(비비밀), `LOCATION_EXTERNAL_TRANSFER_ENABLED`(비비밀), `KAKAO_REST_API_KEY`(비밀, 배포 호스트 `.env.api` 0600 전용)
+- [x] 테스트 보강 및 기준 목록 갱신: `tests/test_location_resolution.py` 53 passed (64KB 초과 응답, 공백 API 키, 오류 경로 키·좌표 비노출 추가), `docs/dev-automation/test-baseline.json` 1,152건 갱신
+- [ ] `KAKAO_REST_API_KEY` 발급/배치 담당 결정(운영 전) 및 배포 호스트 `.env.api`(0600) 설정 후 사용자 직접 수동 검증
