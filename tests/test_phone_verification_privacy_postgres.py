@@ -1,8 +1,11 @@
 """Issue #110 on a real, isolated PostgreSQL: migration 037, one number requested by several
 accounts at once, no transaction held during the provider call, the users ->
 phone_verifications lock order of the delivery job, and a late provider result racing a
-verification. Synthetic accounts and numbers only."""
+verification, and the daily number limit across accounts with its rollback. Synthetic accounts
+and numbers only."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+import math
 import os
 from pathlib import Path
 from threading import Barrier, Event
@@ -17,12 +20,13 @@ from sqlalchemy.orm import sessionmaker
 import test_onboarding_basic_info as step1_module
 from test_onboarding_basic_info import PLEDGE_VERSION, START
 from test_phone_verification_privacy import FREE_E164, FREE_PHONE, PrivacyTestCase
-from test_user_profile import THIRD_PHONE
+from test_user_profile import THIRD_E164, THIRD_PHONE
 from test_user_profile_postgres import IsolatedSchema
 from app.models import PhoneVerification, PhoneVerificationDailyCount, UserPledgeAcknowledgement
 from app import age_review_service
 from app.api_contract import ContractError
 import app.phone_verification_service as service
+from app.phone_verification_service import hmac_key, phone_subject
 from app.sms_provider import MockSmsProvider, get_sms_provider
 
 TEST_URL = os.getenv("SIGNUP_TEST_DATABASE_URL")
@@ -101,6 +105,86 @@ class PrivacyPostgresTests(IsolatedSchema, PrivacyTestCase):
                 self.assertEqual(len(self.rows(PhoneVerification)), before + 1)
                 self.assertEqual(self.status(winner.json()["data"]["verification_id"]),
                                  "SUPPRESSED" if phone == THIRD_PHONE else "SENT")
+
+    # Daily number limit across accounts (Issue #110 follow-up). The resend wait is already met or
+    # there is no recent request, so only the daily limit can refuse; the refusal must roll back.
+
+    def grant_pledge(self, user_id):
+        with self.Session.begin() as db:
+            db.add(UserPledgeAcknowledgement(user_id=user_id, pledge_version=PLEDGE_VERSION, acknowledged_at=START))
+
+    def kst_day(self):
+        return (self.clock.now + timedelta(hours=9)).date()
+
+    def set_counter(self, scope, subject, count):
+        with self.Session.begin() as db:
+            db.add(PhoneVerificationDailyCount(scope=scope, subject=subject, kst_date=self.kst_day(), send_count=count))
+
+    def counter(self, scope, subject):
+        with self.Session() as db:
+            row = db.query(PhoneVerificationDailyCount).filter_by(scope=scope, subject=subject,
+                                                                  kst_date=self.kst_day()).one_or_none()
+            return None if row is None else row.send_count
+
+    def seconds_to_kst_midnight(self):
+        """Expected Retry-After from the fixed clock, computed here rather than by the service."""
+        local = self.clock.now.astimezone(timezone(timedelta(hours=9)))
+        midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time(), local.tzinfo)
+        return max(1, math.ceil((midnight - self.clock.now).total_seconds()))
+
+    def assert_daily_refusal(self, response):
+        expected = self.seconds_to_kst_midnight()
+        self.assert_error(response, 429, "PHONE_VERIFICATION_RATE_LIMITED", {"retry_after_seconds": expected})
+        self.assertEqual(response.headers["retry-after"], str(expected))
+        self.assertGreater(expected, service.RESEND_WAIT_SECONDS)  # not the resend-wait refusal
+
+    def test_the_number_daily_limit_refuses_another_account_after_the_resend_wait_and_rolls_back(self):
+        self.grant_pledge(3)
+        for phone, e164, accepted_status in ((FREE_PHONE, FREE_E164, "SENT"), (THIRD_PHONE, THIRD_E164, "SUPPRESSED")):
+            with self.subTest(phone=phone):
+                self.clock.advance(seconds=61)
+                self.reset_counters()
+                number = phone_subject(hmac_key(), e164)
+                self.set_counter("PHONE", number, 4)
+                self.set_counter("USER", "3", 2)  # the refused account already sent twice today
+                outbox = len(self.sms.outbox)
+                accepted = self.send(phone, user_id=1)
+                self.assertEqual(accepted.status_code, 200, accepted.text)
+                self.assertEqual(self.status(accepted.json()["data"]["verification_id"]), accepted_status)
+                self.assertEqual(len(self.sms.outbox), outbox + (1 if accepted_status == "SENT" else 0))
+                self.clock.advance(seconds=61)  # both resend waits are met
+                rows, outbox = len(self.rows(PhoneVerification)), len(self.sms.outbox)
+                self.assert_daily_refusal(self.send(phone, user_id=3))
+                self.assertEqual((self.counter("PHONE", number), self.counter("USER", "3"), self.counter("USER", "1")),
+                                 (5, 2, 1))  # the refused account's existing count was not increased
+                self.assertEqual((len(self.rows(PhoneVerification)), len(self.sms.outbox)), (rows, outbox))
+                self.assertEqual(self.dispatcher.available(), self.dispatcher.capacity)
+
+    def test_an_exhausted_number_refuses_concurrent_accounts_without_charging_them(self):
+        self.grant_pledge(3)
+        for phone, e164 in ((FREE_PHONE, FREE_E164), (THIRD_PHONE, THIRD_E164)):
+            with self.subTest(phone=phone):
+                self.clock.advance(seconds=61)  # no recent request of either account or the number
+                self.reset_counters()
+                number = phone_subject(hmac_key(), e164)
+                self.set_counter("PHONE", number, 5)
+                self.set_counter("USER", "1", 1)
+                self.set_counter("USER", "3", 1)
+                rows, outbox = len(self.rows(PhoneVerification)), len(self.sms.outbox)
+                barrier = Barrier(2)
+
+                def send(user_id):
+                    barrier.wait(WAIT)
+                    return self.send(phone, user_id=user_id)
+
+                with ThreadPoolExecutor(2) as pool:
+                    responses = list(pool.map(send, (1, 3)))
+                for response in responses:
+                    self.assert_daily_refusal(response)
+                self.assertEqual((self.counter("PHONE", number), self.counter("USER", "1"), self.counter("USER", "3")),
+                                 (5, 1, 1))
+                self.assertEqual((len(self.rows(PhoneVerification)), len(self.sms.outbox)), (rows, outbox))
+                self.assertEqual(self.dispatcher.available(), self.dispatcher.capacity)
 
     def test_no_transaction_is_held_while_the_provider_is_called(self):
         checked = []
