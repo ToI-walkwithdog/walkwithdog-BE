@@ -1,0 +1,38 @@
+name: Release CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Release CI preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      MERGE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Check trusted release boundary
+        shell: bash
+        run: |
+          if [[ ! -f scripts/release_ci.py ]]; then
+            echo "Initial installation needs independent verification of the exact head."
+            exit 1
+          fi
+          [[ "$(git rev-parse HEAD)" == "$BASE_SHA" ]]
+          git fetch --no-tags --depth=2 origin "$MERGE_SHA"
+          python3 -I scripts/release_ci.py --repo "$GITHUB_WORKSPACE" \
+            --event "$GITHUB_EVENT_PATH" --merge "$MERGE_SHA"

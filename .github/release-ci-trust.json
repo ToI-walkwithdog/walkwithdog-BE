@@ -1,0 +1,19 @@
+{
+  "issue": 125,
+  "base": "744793c95ba1362f7d6bba7f3f75cdd4614f1749",
+  "reference": "855855138f9ab3b7992325c579eb32b586c155cf",
+  "dev_quality_run": 45562511900,
+  "files": {
+    ".dockerignore": "2ff3c9106dc1eae07b7534d8197181d6a98a22247cce1080c061a1369b40f0bc",
+    ".github/requirements-ci.txt": "543a97dbbb696f6cc90304e2b2a3140e70ec7bb2b9545949c612578e789e0b39",
+    "Dockerfile": "75e0fe224a3637293c272c01a1edfa632fefa13ce36cec58bcd056929a8bfa06",
+    "docker-compose.yml": "bf238c4edf673853f4f54ef7eed2455fdc41edcd7c904b2e32bad24a4b00384f",
+    "requirements.txt": "46d184bb953ff077978e8bb4a42f6783289f16487a812886efc26bc647bac173",
+    "docs/dev-automation/test-baseline.json": "0c218afff5475338e8f47d295e51e9f5c8555a96be99c05316cee2e6ccde6f70",
+    "migrations/manifest.json": "65f360d063ea25d77993140063a25153f93537e2b2958d7293cc653ac9b76747",
+    "scripts/check_migrations.py": "a827d055d471028e583f998dbe18292e140a8ac24e78ddd3f2205c30b344d573",
+    "scripts/dev_gate.py": "3c73cfc2776ad3d379632892300a25bbf9c154c4ca352bf4f3f865c8d6e226e1",
+    "scripts/dev_test_report.py": "39f06a3870cb1b98e7ab30ef4aa67bbe3a4f2884f7873c0452b29bdddf42fef2",
+    "scripts/verify_container.sh": "a373b33f19b86e83847dd65cec9a9b32972d5f6fc9dadcc8b627594817465d53"
+  }
+}
