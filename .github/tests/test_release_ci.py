@@ -1,105 +1,517 @@
-"""Unit checks for the Release CI installation tools."""
+"""Unit and blocking tests for the Release CI verifier. Uses synthetic data only."""
+import base64
+from contextlib import redirect_stdout
 import gzip
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import re
+import subprocess
 import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 
-MODULE = Path(__file__).resolve().parents[2] / "scripts" / "release_ci.py"
+ROOT = Path(__file__).resolve().parents[2]
+MODULE = ROOT / "scripts" / "release_ci.py"
 SPEC = importlib.util.spec_from_file_location("release_ci", MODULE)
 ci = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ci)
+
+_ENVIRONMENT = patch.dict(os.environ)
+
+
+def setUpModule():
+    # Synthetic runs must never write a job summary or workflow commands of a real run.
+    _ENVIRONMENT.start()
+    for key in ("GITHUB_STEP_SUMMARY", "GITHUB_ACTIONS", "GITHUB_OUTPUT", "GITHUB_ENV"):
+        os.environ.pop(key, None)
+
+
+def tearDownModule():
+    _ENVIRONMENT.stop()
+
+
+HEAD = "b" * 40
+MAIN = "a" * 40
+TREE = "c" * 40
+DIGEST = "d" * 64
+REVIEW = f"https://github.com/{ci.REPOSITORY}/pull/9#issuecomment-1"
 
 
 def entries(items):
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w") as archive:
-        for name, content in items:
-            item = tarfile.TarInfo(name)
-            item.size = len(content)
-            archive.addfile(item, io.BytesIO(content))
+        for item in items:
+            name, content = item[:2]
+            info = tarfile.TarInfo(name)
+            if len(item) == 3:
+                info.type, info.linkname = item[2]
+                archive.addfile(info)
+                continue
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
     return stream.getvalue()
 
 
-class InstallationTests(unittest.TestCase):
-    head = "b" * 40
-    merge = "c" * 40
+class Repo:
+    """Throwaway Git repository for exact change-list and static inventory checks."""
 
-    def event(self, base=ci.BASE, head=None, branch="chore/release-ci"):
-        repo = {"full_name": ci.REPOSITORY}
-        return {"pull_request": {
-            "base": {"sha": base, "ref": "main", "repo": repo},
-            "head": {"sha": head or self.head, "ref": branch, "repo": repo},
-            "body": "All changes approved",
-        }}
+    def __init__(self, path):
+        self.path = path
+        for args in (["init", "-q", "-b", "main"], ["config", "user.name", "Synthetic"],
+                     ["config", "user.email", "synthetic@example.invalid"], ["config", "core.autocrlf", "false"],
+                     ["config", "commit.gpgsign", "false"]):
+            self.git(*args)
 
-    def git_evidence(self, paths, base=ci.BASE):
-        parents = f"{self.merge} {base} {self.head}".encode()
-        return [parents, b"\0".join(path.encode() for path in paths) + b"\0"]
+    def git(self, *args):
+        return subprocess.check_output(["git", "-C", str(self.path), *args], text=True).strip()
 
-    def test_exact_installation_paths(self):
-        with patch.object(ci, "git", side_effect=self.git_evidence(ci.PATHS)):
-            self.assertEqual(ci.claim(Path("."), self.event(), self.head, self.merge), ci.BASE)
+    def commit(self, files, message="synthetic"):
+        for name, content in files.items():
+            target = self.path / name
+            if content is None:
+                target.unlink()
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content if isinstance(content, bytes) else content.encode())
+        self.git("add", "-A")
+        self.git("commit", "-q", "--allow-empty", "-m", message)
+        return self.git("rev-parse", "HEAD")
 
-    def test_pr_body_cannot_authorize_extra_or_missing_path(self):
-        for paths in (ci.PATHS | {"requirements.txt"}, ci.PATHS - {"scripts/release_ci.py"}):
-            with self.subTest(paths=paths), patch.object(ci, "git", side_effect=self.git_evidence(paths)):
-                with self.assertRaisesRegex(ci.Blocked, "four approved paths"):
-                    ci.claim(Path("."), self.event(), self.head, self.merge)
 
-    def test_candidate_self_approval_does_not_enable_release(self):
-        actual = self.event(branch="feature/unapproved")
-        with patch.object(ci, "git", side_effect=self.git_evidence(ci.PATHS)):
-            with self.assertRaisesRegex(ci.Blocked, "independent execution"):
-                ci.claim(Path("."), actual, self.head, self.merge)
+class RepoTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.repo = Repo(Path(temporary.name))
 
-    def test_wrong_base_commit_or_head(self):
-        with patch.object(ci, "git", side_effect=self.git_evidence(ci.PATHS)):
-            with self.assertRaisesRegex(ci.Blocked, "exact base and head"):
-                ci.claim(Path("."), self.event(base="d" * 40), self.head, self.merge)
-        with self.assertRaisesRegex(ci.Blocked, "Wrong PR head"):
-            ci.claim(Path("."), self.event(head="e" * 40), self.head, self.merge)
 
-    def test_reference_inventory_and_checksum(self):
-        files = {path: ci.sha(path.encode()) for path in ci.INPUTS}
-        expected = {"issue": 125, "base": ci.BASE, "reference": ci.REFERENCE, "files": files}
+class ScopeTests(RepoTest):
+    def test_change_list_covers_modify_delete_and_rename(self):
+        base = self.repo.commit({"a.txt": "one", "b.txt": "two", "c.txt": "three"})
+        head = self.repo.commit({"a.txt": "changed", "b.txt": None, "c.txt": None, "d.txt": "three"})
+        tree = ci.merge_tree(self.repo.path, base, head)
+        pairs = ci.changes(self.repo.path, base, tree)
+        self.assertEqual(pairs, [("a.txt", "M"), ("b.txt", "D"), ("c.txt", "D"), ("d.txt", "A")])
+        digest = ci.change_digest(pairs)
+        self.assertNotEqual(digest, ci.change_digest(pairs[:-1]))
+        self.assertNotEqual(digest, ci.change_digest([*pairs[:-1], ("d.txt", "M")]))
 
-        def git_fixture(_, verb, ref):
-            self.assertEqual(verb, "show")
-            commit, path = ref.split(":", 1)
-            return json.dumps(expected).encode() if commit == self.merge else path.encode()
+    def test_conflicting_candidate_is_blocked(self):
+        base = self.repo.commit({"a.txt": "one\n"})
+        self.repo.git("checkout", "-q", "-b", "candidate")
+        head = self.repo.commit({"a.txt": "candidate\n"})
+        self.repo.git("checkout", "-q", "main")
+        main = self.repo.commit({"a.txt": "main\n"})
+        self.assertNotEqual(base, main)
+        with self.assertRaisesRegex(ci.Blocked, "merge cleanly"):
+            ci.merge_tree(self.repo.path, main, head)
 
-        with patch.object(ci, "git", side_effect=git_fixture):
-            self.assertEqual(ci.pinned_inputs(Path("."), self.merge), expected)
-            files["requirements.txt"] = "0" * 64
-            with self.assertRaisesRegex(ci.Blocked, "checksum mismatch"):
-                ci.pinned_inputs(Path("."), self.merge)
+    def test_pinned_inputs_must_match_byte_for_byte(self):
+        files = {path: f"reviewed {path}\n" for path in ci.INPUTS}
+        commit = self.repo.commit(files)
+        doc = {"files": {path: ci.sha(content.encode()) for path, content in files.items()}}
+        self.assertEqual(ci.input_findings(self.repo.path, commit, doc), [])
+        changed = self.repo.commit({"Dockerfile": "FROM scratch\n", ci.BASELINE: "{}\n",
+                                    "scripts/dev_gate.py": None})
+        findings = ci.input_findings(self.repo.path, changed, doc)
+        self.assertEqual(len(findings), 2)
+        self.assertTrue(any("Dockerfile" in finding for finding in findings))
+        self.assertTrue(any("dev_gate.py" in finding for finding in findings))
 
-    def test_altered_sql_and_manifest_record_are_rejected(self):
+
+class HistoricalTests(RepoTest):
+    SOURCE = (
+        "import unittest\n\n"
+        "def test_top():\n    pass\n\n"
+        "async def test_async():\n    pass\n\n"
+        "def helper():\n    def test_nested():\n        pass\n\n"
+        "class Cases(unittest.TestCase):\n"
+        "    def test_one(self):\n        pass\n\n"
+        "    def setUp(self):\n        pass\n"
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.commit = self.repo.commit({"tests/test_sample.py": self.SOURCE, "tests/helpers.py": "def test_x(): pass\n",
+                                        "tests/sub/test_more.py": "def test_more():\n    pass\n"})
+        self.baseline = {"collected": ["tests/test_sample.py::test_top",
+                                       "tests/test_sample.py::Cases::test_one[case]",
+                                       "tests/sub/test_more.py::test_more",
+                                       "tests/test_new.py::test_replacement"]}
+
+    def record(self, **changes):
+        return {"commit": self.commit, "definitions": 4, "mappings": {
+            "tests/test_sample.py::test_async": {"reason": "Synthetic", "commit": "e" * 40,
+                                                 "tests": ["tests/test_new.py::test_replacement"]}}, **changes}
+
+    def test_static_definitions_without_import(self):
+        self.assertEqual(ci.historical_definitions(self.repo.path, self.commit), {
+            "tests/test_sample.py::test_top", "tests/test_sample.py::test_async",
+            "tests/test_sample.py::Cases::test_one", "tests/sub/test_more.py::test_more"})
+        with redirect_stdout(io.StringIO()):
+            ci.historical_inventory(self.repo.path, self.record(), self.baseline)
+
+    def test_unmapped_stale_or_uncovered_tests_are_blocked(self):
+        cases = (
+            (self.record(definitions=5), "expected 5"),
+            (self.record(mappings={}), "Unmapped"),
+            (self.record(mappings={**self.record()["mappings"],
+                                   "tests/test_sample.py::test_top": {"reason": "x", "commit": "e" * 40,
+                                                                      "tests": ["tests/test_new.py::test_replacement"]}}),
+             "stale"),
+            (self.record(mappings={"tests/test_sample.py::test_async": {
+                "reason": "x", "commit": "e" * 40, "tests": ["tests/test_new.py::test_missing"]}}),
+             "replacement coverage"),
+        )
+        for record, message in cases:
+            with self.subTest(message=message), redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ci.Blocked, message):
+                    ci.historical_inventory(self.repo.path, record, self.baseline)
+
+
+class MigrationTests(RepoTest):
+    def manifest(self, *rows):
+        return json.dumps({"version": 1, "migrations": list(rows), "reservations": []})
+
+    def row(self, name, content):
+        return {"file": name, "sha256": ci.sha(content.encode()), "requires": []}
+
+    def setUp(self):
+        super().setUp()
+        self.sql = "CREATE TABLE sample (id integer);\n"
+        self.reference = self.repo.commit({"migrations/001_sample.sql": self.sql,
+                                           ci.MANIFEST: self.manifest(self.row("001_sample.sql", self.sql))})
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.tools = Path(temporary.name)
+        (self.tools / "scripts").mkdir()
+        (self.tools / "scripts/check_migrations.py").write_text("import sys\nsys.exit(0)\n")
+
+    def check(self, candidate):
+        with patch.object(ci, "REFERENCE", self.reference):
+            ci.migration_checks(self.repo.path, self.tools, self.tools, self.reference, candidate)
+
+    def test_new_migration_is_accepted(self):
+        added = "CREATE TABLE more (id integer);\n"
+        self.check(self.repo.commit({"migrations/002_more.sql": added, ci.MANIFEST: self.manifest(
+            self.row("001_sample.sql", self.sql), self.row("002_more.sql", added))}))
+
+    def test_sql_and_manifest_changed_together_are_blocked(self):
+        altered = "DROP TABLE users;\n"
+        candidate = self.repo.commit({"migrations/001_sample.sql": altered,
+                                      ci.MANIFEST: self.manifest(self.row("001_sample.sql", altered))})
+        with self.assertRaisesRegex(ci.Blocked, "approved migration"):
+            self.check(candidate)
+
+    def test_sql_change_or_removal_is_blocked(self):
+        for files in ({"migrations/001_sample.sql": "DROP TABLE users;\n"}, {"migrations/001_sample.sql": None}):
+            with self.subTest(files=files):
+                self.repo.git("reset", "-q", "--hard", self.reference)
+                with self.assertRaisesRegex(ci.Blocked, "Approved migration SQL"):
+                    self.check(self.repo.commit(files))
+
+    def test_manifest_record_changes_are_blocked(self):
         record = {"file": "015_review.sql", "sha256": "1" * 64, "depends_on": ["014_previous.sql"]}
-        reference = {"migrations": [record]}
         for candidate in ({"migrations": []}, {"migrations": [{**record, "sha256": "2" * 64}]}):
             with self.assertRaisesRegex(ci.Blocked, "approved migration"):
-                ci.protect_migrations(reference, candidate)
+                ci.protect_migrations({"migrations": [record]}, candidate)
 
-    def test_compose_version_check_uses_the_real_client(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(
-            ci.os.environ, {"TOI_SMOKE_SCRATCH": temp}
-        ), patch.object(ci, "docker") as docker:
-            ci.smoke_docker(["compose", "version"])
-            docker.assert_called_once_with("compose", "version")
 
+class TrustTests(unittest.TestCase):
+    def setUp(self):
+        self.document = json.loads((ROOT / ci.TRUST).read_text(encoding="utf-8"))
+        self.files = {path: f"reviewed {path}".encode() for path in ci.INPUTS}
+
+    def blob(self, document):
+        def read(_, treeish, path):
+            if path == ci.TRUST:
+                return json.dumps(document).encode() if isinstance(document, dict) else document
+            self.assertEqual(treeish, ci.REFERENCE)
+            return self.files[path]
+        return read
+
+    def synthetic(self, **changes):
+        doc = json.loads(json.dumps(self.document))
+        doc["files"] = {path: ci.sha(content) for path, content in self.files.items()}
+        doc.update(changes)
+        return doc
+
+    def test_committed_record_keeps_reference_and_adds_exact_exception(self):
+        doc = self.document
+        self.assertEqual((doc["issue"], doc["base"], doc["reference"], doc["dev_quality_run"]),
+                         (125, ci.BASE, ci.REFERENCE, 45602907730))
+        self.assertEqual(ci.REFERENCE, "f8546096672a697e8607d6f12e4766767984d2de")
+        self.assertEqual(set(doc["files"]), ci.INPUTS)
+        ci.check_history_record(doc["historical_main"])
+        ci.check_exception_record(doc["image_exception"])
+        self.assertEqual(doc["historical_main"]["definitions"], 364)
+        self.assertEqual(len(doc["historical_main"]["mappings"]), 2)
+        keys = doc["image_exception"]["keys"]
+        self.assertEqual(len(keys), 6)
+        self.assertIn("DSA PRIVATE KEY", {key["label"] for key in keys})
+
+    def test_reference_pins_are_rechecked(self):
+        with patch.object(ci, "blob", side_effect=self.blob(self.synthetic())):
+            ci.load_trust(Path("."), "f" * 40)
+        tampered = self.synthetic()
+        tampered["files"]["requirements.txt"] = "0" * 64
+        changed_exception = self.synthetic()
+        changed_exception["image_exception"]["layer"] = "sha256:" + "0" * 64
+        weakened = self.synthetic()
+        weakened["image_exception"]["keys"].append(dict(weakened["image_exception"]["keys"][0]))
+        cases = ((tampered, "checksum mismatch"), (self.synthetic(reference="e" * 40), "installation reference"),
+                 (self.synthetic(extra=True), "fields"), (changed_exception, "exception target"),
+                 (weakened, "fingerprints"),
+                 (b'{"issue": 125, "issue": 125}', "Duplicate"))
+        for document, message in cases:
+            with self.subTest(message=message), patch.object(ci, "blob", side_effect=self.blob(document)):
+                with self.assertRaisesRegex(ci.Blocked, message):
+                    ci.load_trust(Path("."), "f" * 40)
+
+
+class ApprovalTests(unittest.TestCase):
+    def record(self, **changes):
+        data = {"pr": 9, "base": MAIN, "head": HEAD, "merge_tree": TREE, "changes": DIGEST,
+                "review": {"head": HEAD, "record": REVIEW, "blocking": 0}}
+        data.update(changes)
+        return data
+
+    def comment(self, record=None, body=None, **changes):
+        body = body if body is not None else "Approved.\n```toi-release-approval\n" + json.dumps(record or self.record()) + "\n```\n"
+        data = {"id": 77, "issue_url": f"https://api.github.com/repos/{ci.REPOSITORY}/issues/9",
+                "user": {"login": "release-admin", "type": "User"}, "created_at": "2026-11-25T10:00:00Z",
+                "updated_at": "2026-11-25T10:00:00Z", "body": body}
+        data.update(changes)
+        return data
+
+    def permission(self, login="release-admin", level="admin"):
+        return {"permission": level, "user": {"login": login}}
+
+    def env(self, **changes):
+        data = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
+                "GITHUB_REPOSITORY": ci.REPOSITORY,
+                "GITHUB_WORKFLOW_REF": f"{ci.REPOSITORY}/{ci.WORKFLOW}@refs/heads/main",
+                "GITHUB_ACTOR": "release-admin", "GITHUB_TRIGGERING_ACTOR": "release-admin"}
+        data.update(changes)
+        return data
+
+    def test_valid_administrator_approval(self):
+        self.assertEqual(ci.approval_record(self.comment(), 9, self.permission()), self.record())
+        self.assertEqual(ci.dispatcher(self.env(), self.permission()), "release-admin")
+
+    def test_dispatch_inputs_alone_are_not_approval(self):
+        with self.assertRaisesRegex(ci.Blocked, "exactly one"):
+            ci.approval_record(self.comment(body="pr_number=9 approval_comment_id=77"), 9, self.permission())
+
+    def test_invalid_approval_comments_are_blocked(self):
+        review = self.record()["review"]
+        cases = (
+            (self.comment(), self.permission(level="write"), "administrator"),
+            (self.comment(), self.permission(login="someone-else"), "administrator"),
+            (self.comment(user={"login": "release-bot", "type": "Bot"}), self.permission("release-bot"), "person"),
+            (self.comment(updated_at="2026-11-25T11:00:00Z"), self.permission(), "Edited"),
+            (self.comment(issue_url=f"https://api.github.com/repos/{ci.REPOSITORY}/issues/8"), self.permission(),
+             "another issue"),
+            (self.comment(body=self.comment()["body"] * 2), self.permission(), "exactly one"),
+            (self.comment(self.record(extra=1)), self.permission(), "fields"),
+            (self.comment(self.record(review={**review, "head": MAIN})), self.permission(), "independent review"),
+            (self.comment(self.record(review={**review, "blocking": 1})), self.permission(), "independent review"),
+            (self.comment(self.record(review={**review, "blocking": False})), self.permission(), "independent review"),
+            (self.comment(self.record(review={**review, "record": "https://example.com/review"})), self.permission(),
+             "independent review"),
+        )
+        for comment, permission, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ci.Blocked, message):
+                ci.approval_record(comment, 9, permission)
+
+    def test_dispatcher_must_be_an_administrator_on_protected_main(self):
+        cases = (
+            (self.env(GITHUB_REF="refs/heads/dev"), self.permission(), "protected main"),
+            (self.env(GITHUB_EVENT_NAME="pull_request"), self.permission(), "protected main"),
+            (self.env(GITHUB_WORKFLOW_REF=f"{ci.REPOSITORY}/{ci.WORKFLOW}@refs/heads/dev"), self.permission(),
+             "protected main"),
+            (self.env(GITHUB_TRIGGERING_ACTOR="other-admin"), self.permission(), "triggering actor"),
+            (self.env(), self.permission(level="maintain"), "administrators"),
+        )
+        for env, permission, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ci.Blocked, message):
+                ci.dispatcher(env, permission)
+
+    def test_pull_request_state_and_origin(self):
+        repo = {"full_name": ci.REPOSITORY}
+        pr = {"number": 9, "state": "open", "merged": False, "base": {"ref": "main", "repo": repo},
+              "head": {"sha": HEAD, "repo": repo}}
+        ci.check_pull_request(pr, 9, HEAD)
+        for changed in ({"state": "closed"}, {"head": {"sha": HEAD, "repo": {"full_name": "fork/repo"}}},
+                        {"head": {"sha": HEAD, "repo": None}}, {"base": {"ref": "dev", "repo": repo}}):
+            with self.subTest(changed=changed), self.assertRaises(ci.Blocked):
+                ci.check_pull_request({**pr, **changed}, 9, HEAD)
+        with self.assertRaises(ci.Blocked):
+            ci.check_pull_request(pr, 9, "e" * 40)
+
+    def test_collect_fetches_permissions_for_validated_logins_only(self):
+        calls = []
+
+        def fetch(path, token):
+            calls.append(path)
+            if "/issues/comments/" in path:
+                return self.comment()
+            return {"permission": "admin", "user": {"login": path.split("/")[-2]}}
+
+        env = {"GH_TOKEN": "synthetic", "PR_NUMBER": "9", "APPROVAL_COMMENT_ID": "77",
+               "GITHUB_TRIGGERING_ACTOR": "release-admin"}
+        with tempfile.TemporaryDirectory() as temp, redirect_stdout(io.StringIO()):
+            ci.collect(Path(temp) / "evidence", env, fetch)
+            self.assertEqual(sorted(p.name for p in (Path(temp) / "evidence").iterdir()),
+                             ["approval.json", "approver.json", "dispatcher.json", "pr.json"])
+        self.assertIn(f"repos/{ci.REPOSITORY}/collaborators/release-admin/permission", calls)
+        for changes in ({"PR_NUMBER": "9; rm -rf /"}, {"APPROVAL_COMMENT_ID": "0"}, {"GH_TOKEN": ""},
+                        {"GITHUB_TRIGGERING_ACTOR": "../admin"}):
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as temp:
+                with self.assertRaises(ci.Blocked):
+                    ci.collect(Path(temp) / "evidence", {**env, **changes}, fetch)
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ci.Blocked, "approval author"):
+                ci.collect(Path(temp) / "evidence", env,
+                           lambda path, token: self.comment(user={"login": "../x", "type": "User"}))
+
+
+class ReleaseFlowTests(ApprovalTests):
+    """The official run stops before any candidate execution when evidence does not match."""
+
+    def run_release(self, record=None, refs=None, pairs=(("app/main.py", "M"),), comment_id="77", final_refs=None):
+        repo = {"full_name": ci.REPOSITORY}
+        evidence = {"pr": {"number": 9, "state": "open", "merged": False, "base": {"ref": "main", "repo": repo},
+                           "head": {"sha": HEAD, "repo": repo}},
+                    "approval": self.comment(record or self.record()), "dispatcher": self.permission(),
+                    "approver": self.permission()}
+        expected_refs = {"main": MAIN, "head": HEAD}
+        ref_answers = [refs or expected_refs, final_refs or expected_refs]
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            for name, document in evidence.items():
+                (folder / f"{name}.json").write_text(json.dumps(document))
+            env = {**self.env(), "PR_NUMBER": "9", "APPROVAL_COMMENT_ID": comment_id, "GITHUB_SHA": MAIN}
+            with patch.object(ci, "rev_parse", side_effect=lambda root, ref: MAIN if ref == "HEAD" else HEAD), \
+                    patch.object(ci, "git"), patch.object(ci, "ensure_commit"), \
+                    patch.object(ci, "remote_refs", side_effect=ref_answers), \
+                    patch.object(ci, "merge_tree", return_value=TREE), \
+                    patch.object(ci, "changes", return_value=list(pairs)), \
+                    patch.object(ci, "change_digest", return_value=DIGEST), \
+                    patch.object(ci, "load_trust", return_value={"files": {}}), \
+                    patch.object(ci, "input_findings", return_value=[]), \
+                    patch.object(ci, "verify", return_value=[("synthetic", True, "")]) as verify, \
+                    redirect_stdout(io.StringIO()):
+                try:
+                    ci.release(Path("."), folder, env)
+                finally:
+                    self.verify_calls = verify.call_count
+
+    def test_matching_approval_runs_verification(self):
+        self.run_release()
+        self.assertEqual(self.verify_calls, 1)
+
+    def test_changed_candidate_is_not_verified(self):
+        cases = (
+            ({"record": self.record(merge_tree="e" * 40)}, "merge_tree"),
+            ({"record": self.record(head="e" * 40, review={"head": "e" * 40, "record": REVIEW, "blocking": 0})},
+             "head"),
+            ({"record": self.record(changes="0" * 64)}, "changes"),
+            ({"record": self.record(base="e" * 40)}, "base"),
+            ({"refs": {"main": "e" * 40, "head": HEAD}}, "changed; rerun"),
+            ({"pairs": (("scripts/release_ci.py", "M"),)}, "maintenance PR"),
+            ({"comment_id": "78"}, "dispatch input"),
+        )
+        for arguments, message in cases:
+            with self.subTest(message=message):
+                self.verify_calls = None
+                with self.assertRaisesRegex(ci.Blocked, message):
+                    self.run_release(**arguments)
+                self.assertIn(self.verify_calls, (None, 0))
+
+    def test_moved_refs_after_verification_fail_the_verdict(self):
+        with self.assertRaisesRegex(ci.Blocked, "Base and Head unchanged"):
+            self.run_release(final_refs={"main": MAIN, "head": "e" * 40})
+
+
+class InstallationTests(unittest.TestCase):
+    def event(self, **head):
+        repo = {"full_name": ci.REPOSITORY}
+        return {"pull_request": {"number": 127, "base": {"sha": ci.BASE, "ref": "main", "repo": repo},
+                                 "head": {"sha": HEAD, "ref": "chore/release-ci", "repo": repo, **head}}}
+
+    def run_installation(self, event=None, installed=False, pairs=None):
+        pairs = pairs if pairs is not None else sorted((path, "A") for path in ci.PATHS)
+        with patch.object(ci, "has_path", return_value=installed), \
+                patch.object(ci, "rev_parse", side_effect=lambda root, ref: TREE if "tree" in ref else "f" * 40), \
+                patch.object(ci, "git", side_effect=lambda root, *args: (
+                    f"{'f' * 40} {ci.BASE} {HEAD}".encode() if args[0] == "rev-list" else b"content")), \
+                patch.object(ci, "merge_tree", return_value=TREE), patch.object(ci, "changes", return_value=pairs), \
+                patch.object(ci, "ensure_commit"), patch.object(ci, "load_trust", return_value={}), \
+                patch.object(ci, "verify", return_value=[("synthetic", True, "")]) as verify, \
+                redirect_stdout(io.StringIO()):
+            ci.installation(Path("."), event or self.event())
+            return verify
+
+    def test_exact_installation_verifies_the_reference_snapshot(self):
+        verify = self.run_installation()
+        self.assertEqual(verify.call_args.args[1], ci.REFERENCE)
+
+    def test_installation_scope_is_exact(self):
+        paths = sorted((path, "A") for path in ci.PATHS)
+        cases = (
+            ({"pairs": [*paths, ("requirements.txt", "M")]}, "four approved paths"),
+            ({"pairs": paths[1:]}, "four approved paths"),
+            ({"pairs": [(paths[0][0], "M"), *paths[1:]]}, "four approved paths"),
+            ({"installed": True}, "already installed"),
+            ({"event": self.event(ref="feature/other")}, "Unexpected installation PR"),
+            ({"event": self.event(repo={"full_name": "fork/repo"})}, "Unexpected installation PR"),
+        )
+        for arguments, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ci.Blocked, message):
+                self.run_installation(**arguments)
+
+
+class PreflightTests(unittest.TestCase):
+    def test_preflight_reads_git_objects_only(self):
+        repo = {"full_name": ci.REPOSITORY}
+        event = {"pull_request": {"number": 9, "base": {"sha": MAIN, "ref": "main", "repo": repo},
+                                  "head": {"sha": HEAD, "repo": repo}}}
+        forbidden = AssertionError("candidate execution in preflight")
+        for pairs, findings in (([("app/main.py", "M")], []), ([(ci.WORKFLOW, "M")], ["maintenance PR"])):
+            with self.subTest(pairs=pairs), \
+                    patch.object(ci, "rev_parse", side_effect=lambda root, ref: MAIN if ref == "HEAD" else HEAD), \
+                    patch.object(ci, "git"), patch.object(ci, "ensure_commit"), \
+                    patch.object(ci, "merge_tree", return_value=TREE), \
+                    patch.object(ci, "changes", return_value=pairs), \
+                    patch.object(ci, "load_trust", return_value={}), \
+                    patch.object(ci, "static_findings", return_value=[]), \
+                    patch.object(ci, "docker", side_effect=forbidden), \
+                    patch.object(ci, "run_candidate", side_effect=forbidden), \
+                    patch.object(ci, "smoke", side_effect=forbidden):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    if findings:
+                        with self.assertRaisesRegex(ci.Blocked, findings[0]):
+                            ci.preflight(Path("."), event)
+                    else:
+                        ci.preflight(Path("."), event)
+                self.assertIn("```toi-release-approval", output.getvalue())
+
+
+class ResultTests(unittest.TestCase):
     def test_missing_core_pass_and_new_skip_rejected(self):
         event = {"nodeid": "example", "phase": "call", "subtest": None, "outcome": "passed"}
         report = {"exit_code": 0, "collected": ["example"], "events": [event]}
         ci.require_passes(["example"], report)
         for rejected in ({**report, "events": []},
                          {**report, "events": [{**event, "outcome": "skipped"}]},
-                         {**report, "collected": ["example", "unexpected"]}):
+                         {**report, "collected": ["example", "unexpected"]},
+                         {**report, "exit_code": 1}):
             with self.assertRaises(ci.Blocked):
                 ci.require_passes(["example"], rejected)
 
@@ -114,13 +526,276 @@ class InstallationTests(unittest.TestCase):
         with self.assertRaises(ci.Blocked):
             ci.core_inventory(baseline)
 
-    def test_main_collection_does_not_silently_drop_test_ids(self):
-        with self.assertRaisesRegex(ci.Blocked, "Main-only IDs"):
-            ci.inventories({"exit_code": 0, "events": [], "collected": ["main-only"]},
-                           {"collected": ["same-count-but-not-the-same-id"]})
+    def suite(self, gate_status, clean=True):
+        with tempfile.TemporaryDirectory() as temp:
+            scratch = Path(temp)
+            work, out = scratch / "work", scratch / "out"
+            work.mkdir()
+            out.mkdir()
+
+            def candidate(*args):
+                # A candidate can print success text and write any report it likes.
+                print("::notice::Protected-main release verification passed")
+                (out / "report.json").write_text(json.dumps({"exit_code": 0, "collected": [], "events": []}))
+                return 0
+
+            with patch.object(ci, "phase_dir", return_value=(work, out)), \
+                    patch.object(ci, "create_database"), patch.object(ci, "database_clean", return_value=clean), \
+                    patch.object(ci, "run_candidate", side_effect=candidate), \
+                    patch.object(ci, "blob", return_value=b"{}"), \
+                    patch.object(ci.subprocess, "run",
+                                 return_value=subprocess.CompletedProcess([], gate_status)) as gate, \
+                    redirect_stdout(io.StringIO()):
+                ci.full_suite(Path("."), TREE, scratch / "reference", scratch, "image", "pg")
+            command = gate.call_args.args[0]
+            self.assertEqual(command[3:5], [str(scratch / "reference/scripts/dev_gate.py"), "tests"])
+            self.assertEqual(command[command.index("--base") + 1], str(scratch / "reference" / ci.BASELINE))
+
+    def test_verdict_comes_from_the_reference_gate_not_candidate_output(self):
+        self.suite(0)
+        with self.assertRaisesRegex(ci.Blocked, "protected baseline"):
+            self.suite(1)
+
+    def test_leftover_test_data_fails_even_when_the_gate_passes(self):
+        with self.assertRaisesRegex(ci.Blocked, "remained"):
+            self.suite(0, clean=False)
+
+    def test_candidate_runs_stop_when_isolation_probe_fails(self):
+        with patch.object(ci, "start_postgres", return_value="pg"), patch.object(ci, "quiet"), \
+                patch.object(ci, "probe", side_effect=ci.Blocked("Isolation probe: dns was allowed")), \
+                patch.object(ci, "full_suite", side_effect=AssertionError("ran candidate")), \
+                patch.object(ci, "core_group", side_effect=AssertionError("ran candidate")), \
+                redirect_stdout(io.StringIO()):
+            results = ci.candidate_runs(Path("."), TREE, Path("."), Path("."), "image", {"tests/x.py": ["n"]})
+        self.assertEqual([(name, ok) for name, ok, _ in results], [("candidate isolation probe", False)])
+
+
+class IsolationTests(unittest.TestCase):
+    def test_candidate_container_settings(self):
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "synthetic", "ACTIONS_RUNTIME_TOKEN": "synthetic"}):
+            args = ci.candidate_command("image", "pg", Path("/w"), Path("/r"), Path("/o"),
+                                        ci.CANDIDATE_ENV, ["python", "-B", "-c", "pass"])
+        text = " ".join(args)
+        for expected in ("--network container:pg", "--user 65534:65534", "--cap-drop ALL",
+                         "--security-opt no-new-privileges", "--pids-limit", "--read-only",
+                         f"source={Path('/r')},target=/reference,readonly"):
+            self.assertIn(expected, text)
+        for forbidden in ("docker.sock", "--privileged", "--network host", "GITHUB_", "ACTIONS_", "TOKEN"):
+            self.assertNotIn(forbidden, text)
+
+    def probe_result(self, **changes):
+        result = {"tcp_external": "blocked", "tcp_public": "blocked", "dns": "blocked",
+                  "write_reference": "blocked", "write_root": "blocked", "superuser": "blocked",
+                  "test_role": "allowed", "write_out": "allowed", "interfaces": ["lo"], "docker_socket": False,
+                  "uid": 65534, "cap_eff": "0000000000000000", "no_new_privs": "1",
+                  "env": sorted([*ci.CANDIDATE_ENV, "HOSTNAME", "GPG_KEY", "PYTHON_VERSION"])}
+        result.update(changes)
+        return result
+
+    def test_isolation_probe_blocks_each_escape(self):
+        ci.evaluate_probe(self.probe_result())
+        cases = ({"tcp_external": "allowed"}, {"dns": "allowed"}, {"interfaces": ["eth0", "lo"]},
+                 {"write_reference": "allowed"}, {"superuser": "allowed"}, {"uid": 0},
+                 {"cap_eff": "00000000a80425fb"}, {"no_new_privs": "0"}, {"docker_socket": True},
+                 {"env": ["GITHUB_TOKEN", "PATH"]}, {"env": ["ACTIONS_ID_TOKEN_REQUEST_URL"]},
+                 {"env": ["AWS_SECRET_ACCESS_KEY"]}, {"test_role": "blocked"})
+        for changes in cases:
+            with self.subTest(changes=changes), self.assertRaises(ci.Blocked):
+                ci.evaluate_probe(self.probe_result(**changes))
+
+    def test_postgres_has_no_network_and_a_non_superuser_test_role(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(ci, "docker", side_effect=lambda *args, **kw: calls.append(args)), \
+                patch.object(ci, "quiet", return_value=subprocess.CompletedProcess([], 0)), \
+                patch.object(ci, "psql", side_effect=lambda c, d, *s: calls.append(s) or "160016"):
+            ci.start_postgres(Path(temp) / "pg")
+            hba = (Path(temp) / "pg/pg_hba.conf").read_text()
+        run = " ".join(calls[0])
+        self.assertIn("--network none", run)
+        self.assertIn("--cap-drop ALL", run)
+        self.assertEqual(hba, "local all postgres trust\nhost all toi_ci 127.0.0.1/32 trust\n")
+        self.assertTrue(any("NOSUPERUSER" in statement for call in calls[1:] for statement in call))
+
+    def test_trusted_queries_resolve_names_from_pg_catalog_only(self):
+        with patch.object(ci, "docker", return_value="0") as docker:
+            ci.psql("pg", "toi_walk_test_ci_signup", "SELECT 1")
+        command = list(docker.call_args.args)
+        self.assertLess(command.index("SET search_path = pg_catalog"), command.index("SELECT 1"))
+        self.assertEqual(command[command.index("SET search_path = pg_catalog") - 1], "-c")
+
+    def reclaim(self, scratch, uid=1001, owner=1001):
+        with patch.object(ci.os, "geteuid", create=True, return_value=uid), \
+                patch.object(ci.os, "getegid", create=True, return_value=uid), \
+                patch.object(ci, "owner", return_value=owner), \
+                patch.object(ci.subprocess, "run") as run:
+            ci.reclaim(scratch)
+        return run
+
+    def test_reclaim_changes_only_the_run_scratch_without_following_links(self):
+        with tempfile.TemporaryDirectory(prefix="toi-release-") as temp:
+            run = self.reclaim(Path(temp))
+            self.assertEqual(run.call_args.args[0], [
+                "sudo", "-n", "chown", "-R", "-P", "--no-dereference", "--preserve-root", "1001:1001", "--",
+                str(Path(temp).resolve())])
+            self.assertEqual(self.reclaim(Path(temp), uid=0, owner=0).call_count, 0)
+            nested = Path(temp) / "toi-release-nested"
+            nested.mkdir()
+            for target, kwargs in ((nested, {}), (Path(temp), {"owner": 0})):
+                with self.subTest(target=target, kwargs=kwargs), self.assertRaisesRegex(ci.Blocked, "outside"):
+                    self.reclaim(target, **kwargs)
+        with tempfile.TemporaryDirectory(prefix="other-") as temp:
+            with self.assertRaisesRegex(ci.Blocked, "outside"):
+                self.reclaim(Path(temp))
+            link = Path(tempfile.gettempdir()) / f"toi-release-link-{os.getpid()}"
+            try:
+                link.symlink_to(temp, target_is_directory=True)
+            except OSError:
+                self.skipTest("Symlinks are unavailable on this platform")
+            try:
+                with self.assertRaisesRegex(ci.Blocked, "real directory"):
+                    self.reclaim(link)
+            finally:
+                link.unlink()
+
+    def test_candidate_containers_wait_for_the_network_check(self):
+        self.assertEqual(ci.compose_services(["up", "-d", "--wait", "--wait-timeout", "120", "db"]), ["db"])
+        self.assertEqual(ci.compose_services(["start", "--wait", "--wait-timeout", "120"]), [])
+        calls = []
+
+        def docker(*args, capture=False):
+            calls.append(args)
+            if not capture:
+                return None
+            if args[-2:] == ("-q", "api"):
+                return ""
+            if "ps" in args:
+                return "db1"
+            if args[:2] == ("inspect", "--format"):
+                return json.dumps({"toi_default": {}})
+            return json.dumps([{"HostConfig": {}, "Mounts": []}])
+
+        prefix = ["compose", "--project-name", "toi", "--file", "docker-compose.yml"]
+        base = "sha256:" + "1" * 64
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / "exception.json").write_text(json.dumps({"base_manifest": base}))
+            env = {"TOI_SMOKE_SCRATCH": temp, "TOI_SMOKE_EXCEPTION": str(Path(temp) / "exception.json")}
+            with patch.dict(os.environ, env), patch.object(ci, "docker", side_effect=docker), \
+                    patch.object(ci, "bridge_probe") as probe:
+                for operation in (["run", "--rm", "api", "python"], ["exec", "-T", "api", "id"],
+                                  ["up", "-d", "--wait", "--no-build"], ["start", "--wait"]):
+                    with self.subTest(operation=operation), self.assertRaisesRegex(ci.Blocked, "network isolation"):
+                        ci.smoke_docker([*prefix, *operation])
+                self.assertEqual(calls, [])
+                ci.smoke_docker([*prefix, "up", "-d", "--wait", "--wait-timeout", "120", "db"])
+                probe.assert_called_once_with("python@" + base, "toi_default")
+                ci.smoke_docker([*prefix, "run", "--rm", "api", "python"])
+                self.assertEqual(calls[-1][-4:], ("run", "--rm", "api", "python"))
+
+    def test_reclaim_failure_and_static_output_are_handled_by_the_verdict(self):
+        def static(*args):
+            print("RESERVED 999_x.sql [reserved; ::error::forged by candidate manifest]")
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), \
+                patch.object(ci, "INPUTS", ci.SEMANTIC_INPUTS), \
+                patch.object(ci, "extract", side_effect=lambda root, tree, path: path), \
+                patch.object(ci, "blob", return_value=b"{}"), patch.object(ci, "core_inventory", return_value={}), \
+                patch.object(ci, "historical_inventory"), patch.object(ci, "migration_checks", side_effect=static), \
+                patch.object(ci, "prepare_images"), patch.object(ci, "build_test_image", return_value="image"), \
+                patch.object(ci, "smoke"), patch.object(ci, "candidate_runs", return_value=[]), \
+                patch.object(ci, "quiet"), \
+                patch.object(ci, "reclaim", side_effect=ci.Blocked("sudo unavailable")), redirect_stdout(output):
+            results = ci.verify(Path("."), TREE, {"files": {}, "historical_main": {},
+                                                  "image_exception": {"base_image": "base"}}, MAIN)
+        self.assertEqual(results[-1][:2], ("candidate files reclaimed for cleanup", False))
+        lines = output.getvalue().splitlines()
+        stop = next(index for index, line in enumerate(lines) if line.startswith("::stop-commands::"))
+        forged = next(index for index, line in enumerate(lines) if "forged by candidate" in line)
+        self.assertLess(stop, forged)
+
+    def test_disposable_core_database_must_be_gone(self):
+        calls = []
+        with patch.object(ci, "docker", side_effect=lambda *args, **kw: calls.append(args)), \
+                patch.object(ci, "psql", return_value="0"):
+            ci.drop_database("pg", "toi_walk_test_ci_walk")
+        self.assertIn("dropdb", calls[0])
+        with patch.object(ci, "docker"), patch.object(ci, "psql", return_value="1"):
+            with self.assertRaisesRegex(ci.Blocked, "not removed"):
+                ci.drop_database("pg", "toi_walk_test_ci_walk")
+
+    def test_runner_compose_is_checked_before_candidate_runs(self):
+        with patch.object(ci, "docker", return_value="Usage: docker compose start [SERVICE...]") as docker:
+            with self.assertRaisesRegex(ci.Blocked, "start --wait"):
+                ci.prepare_images({"base_manifest": "sha256:" + "0" * 64})
+        self.assertEqual(docker.call_count, 1)
+
+    def test_compose_containers_cannot_receive_host_privileges(self):
+        safe = {"HostConfig": {"NetworkMode": "toi_default"},
+                "Mounts": [{"Type": "volume", "Source": "/var/lib/docker/volumes/x", "Destination": "/srv/uploads"}]}
+        ci.runtime_container_check(safe)
+        for changed in ({"HostConfig": {"Privileged": True}}, {"HostConfig": {"NetworkMode": "host"}},
+                        {"HostConfig": {"CapAdd": ["SYS_ADMIN"]}},
+                        {"Mounts": [{"Type": "bind", "Source": "/var/run/docker.sock"}]}):
+            with self.subTest(changed=changed), self.assertRaises(ci.Blocked):
+                ci.runtime_container_check({**safe, **changed})
+
+    def test_reports_are_copied_without_following_links(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            (folder / "report.json").write_text("{}")
+            self.assertEqual(ci.trusted_copy(folder / "report.json", folder / "copy.json").read_text(), "{}")
+            (folder / "directory").mkdir()
+            with self.assertRaises((ci.Blocked, OSError)):
+                ci.trusted_copy(folder / "directory", folder / "copy2.json")
+            try:
+                (folder / "link.json").symlink_to(folder / "report.json")
+            except OSError:
+                self.skipTest("Symlinks are unavailable on this platform")
+            if os.name == "nt":
+                self.skipTest("O_NOFOLLOW is unavailable on Windows")
+            with self.assertRaises(OSError):
+                ci.trusted_copy(folder / "link.json", folder / "copy3.json")
+
+    def test_workflow_commands_are_suspended_during_candidate_output(self):
+        output = io.StringIO()
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), redirect_stdout(output):
+            with ci.command_barrier():
+                print("::error::forged candidate failure")
+            with ci.command_barrier():
+                pass
+        lines = output.getvalue().splitlines()
+        first = re.fullmatch(r"::stop-commands::([0-9a-f]{48})", lines[0])[1]
+        self.assertEqual(lines[1:3], ["::error::forged candidate failure", f"::{first}::"])
+        self.assertNotEqual(first, re.fullmatch(r"::stop-commands::([0-9a-f]{48})", lines[3])[1])
+
+    def test_compose_version_check_uses_the_real_client(self):
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / "exception.json").write_text("{}")
+            with patch.dict(ci.os.environ, {"TOI_SMOKE_SCRATCH": temp,
+                                            "TOI_SMOKE_EXCEPTION": str(Path(temp) / "exception.json")}), \
+                    patch.object(ci, "docker") as docker:
+                ci.smoke_docker(["compose", "version"])
+                docker.assert_called_once_with("compose", "version")
 
 
 class ImageTests(unittest.TestCase):
+    LIB = "usr/lib/x86_64-linux-gnu/libgnutls.so.30.34.3"
+    LABELS = ("PRIVATE KEY", "PRIVATE KEY", "PRIVATE KEY", "EC PRIVATE KEY", "DSA PRIVATE KEY", "RSA PRIVATE KEY")
+
+    def library(self, labels=LABELS, extra=b""):
+        """Synthetic library with random PEM-shaped blocks. No real key material."""
+        blocks = []
+        for index, label in enumerate(labels):
+            body = base64.encodebytes(bytes([index + 1]) * 96).decode().strip()
+            blocks.append(f"\0-----BEGIN {label}-----\n{body}\n-----END {label}-----\n".encode())
+        return b"\x7fELF" + b"\0".join(blocks) + extra
+
+    def exception(self, base_layers, content):
+        return {"base_layers": base_layers, "layer": base_layers[0], "path": self.LIB,
+                "file_sha256": ci.sha(content),
+                "keys": [{"label": label, "sha256": digest} for label, digest in ci.key_fingerprints(content)]}
+
     def image_archive(self, output, layers, config=None):
         archived = [(f"layer-{index}.tar.gz", gzip.compress(layer))
                     for index, layer in enumerate(layers)]
@@ -133,6 +808,19 @@ class ImageTests(unittest.TestCase):
                                     *archived]))
         return "sha256:" + ci.sha(raw)
 
+    def scan(self, layers, exception_from=None, content=None, **changes):
+        content = content or self.library()
+        with tempfile.TemporaryDirectory() as temp:
+            image = Path(temp) / "image.tar"
+            digest = self.image_archive(image, layers)
+            exception = None
+            if exception_from is not None:
+                exception = {**self.exception(["sha256:" + ci.sha(layers[0])], content), **changes}
+            return ci.scan_image(image, digest, exception)
+
+    def base(self, content=None):
+        return entries([("usr/bin/python", b"interpreter"), (self.LIB, content or self.library())])
+
     def test_checks_every_layer_of_exact_image(self):
         with tempfile.TemporaryDirectory() as temp:
             image = Path(temp) / "image.tar"
@@ -143,7 +831,7 @@ class ImageTests(unittest.TestCase):
                 ci.scan_image(image, "sha256:" + "0" * 64)
 
     def test_oci_index_binds_exact_config(self):
-        config_id = "sha256:" + "1"*64
+        config_id = "sha256:" + "1" * 64
         manifest = json.dumps({"config": {"digest": config_id}}).encode()
         manifest_id = "sha256:" + ci.sha(manifest)
         index = json.dumps({"manifests": [{"digest": manifest_id}]}).encode()
@@ -155,16 +843,12 @@ class ImageTests(unittest.TestCase):
             ("blobs/sha256/" + manifest_id[7:], manifest),
         ]))) as archive:
             self.assertTrue(ci.oci_contains_config(archive, index_id, config_id))
-            self.assertFalse(ci.oci_contains_config(archive, index_id, "sha256:" + "2"*64))
+            self.assertFalse(ci.oci_contains_config(archive, index_id, "sha256:" + "2" * 64))
 
     def test_deleted_secret_is_still_scanned(self):
-        with tempfile.TemporaryDirectory() as temp:
-            image = Path(temp) / "image.tar"
-            layers = [entries([("tmp/blob", b"toi-release-ci-secret-canary-ABC")]),
-                      entries([("tmp/.wh.blob", b"")])]
-            digest = self.image_archive(image, layers)
-            with self.assertRaisesRegex(ci.Blocked, "Credential-like"):
-                ci.scan_image(image, digest)
+        layers = [entries([("tmp/blob", b"toi-release-ci-secret-canary-ABC")]), entries([("tmp/.wh.blob", b"")])]
+        with self.assertRaisesRegex(ci.Blocked, "Credential-like"):
+            self.scan(layers)
 
     def test_image_env_and_unnecessary_file_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -176,6 +860,76 @@ class ImageTests(unittest.TestCase):
                                         {"config": {"Env": ["AWS_SECRET_ACCESS_KEY=synthetic"]}})
             with self.assertRaisesRegex(ci.Blocked, "Runtime credential"):
                 ci.scan_image(image, digest)
+
+    def test_dsa_keys_are_detected(self):
+        with self.assertRaisesRegex(ci.Blocked, "Credential-like"):
+            self.scan([entries([(self.LIB, self.library(labels=("DSA PRIVATE KEY",)))])])
+        self.assertEqual(len(ci.SECRET_BYTES.findall(self.library())), 6)
+
+    def test_exact_exception_allows_only_the_reviewed_file(self):
+        app = entries([("srv/walkwithdog/app/main.py", b"source")])
+        self.assertEqual(self.scan([self.base(), app], exception_from=0), 2)
+        with self.assertRaisesRegex(ci.Blocked, "Credential-like"):
+            self.scan([self.base(), app])
+
+    def test_exception_mismatches_are_blocked(self):
+        content = self.library()
+        extra = self.library(extra=b"\0-----BEGIN PRIVATE KEY-----\n" + b"QUJD" * 20 + b"\n-----END PRIVATE KEY-----\n")
+        aws = self.library(extra=b"\0AKIA" + b"Z" * 16 + b"\0")
+        app = entries([("srv/walkwithdog/app/main.py", b"source")])
+        cases = (
+            ({"layers": [self.base(extra), app]}, "differs from the reviewed file"),
+            ({"layers": [self.base(extra), app], "content": extra,
+              "keys": self.exception(["x"], content)["keys"]}, "keys differ"),
+            ({"layers": [self.base(aws), app], "content": aws}, "Unexpected credential-like"),
+            ({"layers": [self.base(), entries([(self.LIB, content)])]}, "later layer"),
+            ({"layers": [self.base(), entries([("usr/lib/x86_64-linux-gnu/.wh.libgnutls.so.30.34.3", b"")])]},
+             "later layer"),
+            ({"layers": [self.base(), entries([("usr/lib/x86_64-linux-gnu/.wh..wh..opq", b"")])]}, "later layer"),
+            ({"layers": [self.base(), entries([("usr/lib", b"", (tarfile.SYMTYPE, "/tmp"))])]}, "later layer"),
+            ({"layers": [self.base(), entries([("opt/copy.so", content)])]}, "Credential-like"),
+            ({"layers": [entries([("usr/bin/python", b"interpreter"),
+                                  ("usr/lib/other/libgnutls.so", content)]), app]}, "Credential-like"),
+            ({"layers": [entries([("usr/bin/python", b"interpreter")]), app]}, "not found exactly once"),
+            ({"layers": [self.base(), app], "base_layers": ["sha256:" + "0" * 64], "layer": "sha256:" + "0" * 64},
+             "reviewed base layers"),
+        )
+        for arguments, message in cases:
+            layers = arguments.pop("layers")
+            with self.subTest(message=message), self.assertRaisesRegex(ci.Blocked, message):
+                self.scan(layers, exception_from=0, **arguments)
+
+    def test_exception_ignores_unrelated_later_directories(self):
+        layers = [self.base(), entries([("usr/lib/x86_64-linux-gnu", b"", (tarfile.DIRTYPE, "")),
+                                        ("usr/lib/x86_64-linux-gnu/.wh.libother.so", b"")])]
+        self.assertEqual(self.scan(layers, exception_from=0), 2)
+
+
+class WorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.text = (ROOT / ci.WORKFLOW).read_text(encoding="utf-8")
+
+    def test_checkouts_do_not_keep_credentials(self):
+        self.assertEqual(self.text.count("uses: actions/checkout@"), self.text.count("persist-credentials: false"))
+        self.assertNotIn(": write", self.text)
+
+    def test_inputs_never_reach_shell_scripts_directly(self):
+        lines = self.text.splitlines()
+        in_run = None
+        for line in lines:
+            indent = len(line) - len(line.lstrip())
+            if in_run is not None and line.strip() and indent <= in_run:
+                in_run = None
+            if in_run is not None or re.match(r"\s*(?:- )?run: (?!\|)", line):
+                self.assertNotIn("${{", line)
+            if re.match(r"\s*(?:- )?run: \|", line):
+                in_run = indent
+
+    def test_token_only_reaches_the_evidence_step(self):
+        self.assertEqual(self.text.count("GH_TOKEN"), 1)
+        before, after = self.text.split("GH_TOKEN", 1)
+        self.assertIn("release_ci.py collect", after.split("- name:", 1)[0])
+        self.assertIn("github.ref == 'refs/heads/main'", self.text)
 
 
 if __name__ == "__main__":

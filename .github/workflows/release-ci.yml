@@ -1,38 +1,94 @@
 name: Release CI
 
+# pull_request runs use this file from the PR merge commit and never approve a release.
+# The official verdict is the administrator-dispatched run on protected main.
 on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open release PR number to verify
+        required: true
+        type: string
+      approval_comment_id:
+        description: ID of the administrator approval comment on that PR
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-ci-${{ github.event.pull_request.number }}
+  group: release-ci-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
   preflight:
-    name: Release CI preflight
+    if: github.event_name == 'pull_request'
+    name: Release CI preflight (advisory)
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      MERGE_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
           persist-credentials: false
-      - name: Check trusted release boundary
+      - name: Check the merge candidate with the protected base verifier
         shell: bash
         run: |
-          if [[ ! -f scripts/release_ci.py ]]; then
-            echo "Initial installation needs independent verification of the exact head."
-            exit 1
-          fi
           [[ "$(git rev-parse HEAD)" == "$BASE_SHA" ]]
-          git fetch --no-tags --depth=2 origin "$MERGE_SHA"
-          python3 -I scripts/release_ci.py --repo "$GITHUB_WORKSPACE" \
-            --event "$GITHUB_EVENT_PATH" --merge "$MERGE_SHA"
+          if [[ ! -f scripts/release_ci.py ]]; then
+            echo "Protected main has no verifier yet. The installation uses independent review and administrator approval."
+            exit 0
+          fi
+          python3 -I -B scripts/release_ci.py preflight --repo "$GITHUB_WORKSPACE" --event "$GITHUB_EVENT_PATH"
+
+  installation:
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.ref == 'chore/release-ci'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    name: Release CI installation evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Unit test the submitted verifier
+        run: python3 -I -B -m unittest discover -s .github/tests -p test_release_ci.py
+      - name: Verify the approved dev snapshot in isolation
+        run: python3 -I -B scripts/release_ci.py installation --repo "$GITHUB_WORKSPACE" --event "$GITHUB_EVENT_PATH"
+
+  release:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    name: Release CI official verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    env:
+      PR_NUMBER: ${{ inputs.pr_number }}
+      APPROVAL_COMMENT_ID: ${{ inputs.approval_comment_id }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Collect dispatcher, PR and approval evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/release_ci.py collect --out "$RUNNER_TEMP/toi-release-evidence"
+      - name: Unit test the protected verifier
+        run: python3 -I -B -m unittest discover -s .github/tests -p test_release_ci.py
+      - name: Verify the approved merge candidate in isolation
+        run: python3 -I -B scripts/release_ci.py release --repo "$GITHUB_WORKSPACE" --evidence "$RUNNER_TEMP/toi-release-evidence"

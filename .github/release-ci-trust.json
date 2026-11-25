@@ -1,19 +1,74 @@
 {
   "issue": 125,
   "base": "744793c95ba1362f7d6bba7f3f75cdd4614f1749",
-  "reference": "855855138f9ab3b7992325c579eb32b586c155cf",
-  "dev_quality_run": 45562511900,
+  "reference": "f8546096672a697e8607d6f12e4766767984d2de",
+  "dev_quality_run": 45602907730,
   "files": {
     ".dockerignore": "2ff3c9106dc1eae07b7534d8197181d6a98a22247cce1080c061a1369b40f0bc",
     ".github/requirements-ci.txt": "543a97dbbb696f6cc90304e2b2a3140e70ec7bb2b9545949c612578e789e0b39",
     "Dockerfile": "75e0fe224a3637293c272c01a1edfa632fefa13ce36cec58bcd056929a8bfa06",
     "docker-compose.yml": "bf238c4edf673853f4f54ef7eed2455fdc41edcd7c904b2e32bad24a4b00384f",
     "requirements.txt": "46d184bb953ff077978e8bb4a42f6783289f16487a812886efc26bc647bac173",
-    "docs/dev-automation/test-baseline.json": "0c218afff5475338e8f47d295e51e9f5c8555a96be99c05316cee2e6ccde6f70",
+    "docs/dev-automation/test-baseline.json": "3ac240e0d66dcfcb13eb790ea2dd33545395f8bd266c502db02a6f5dc077cd2b",
     "migrations/manifest.json": "65f360d063ea25d77993140063a25153f93537e2b2958d7293cc653ac9b76747",
     "scripts/check_migrations.py": "a827d055d471028e583f998dbe18292e140a8ac24e78ddd3f2205c30b344d573",
     "scripts/dev_gate.py": "3c73cfc2776ad3d379632892300a25bbf9c154c4ca352bf4f3f865c8d6e226e1",
     "scripts/dev_test_report.py": "39f06a3870cb1b98e7ab30ef4aa67bbe3a4f2884f7873c0452b29bdddf42fef2",
     "scripts/verify_container.sh": "a373b33f19b86e83847dd65cec9a9b32972d5f6fc9dadcc8b627594817465d53"
+  },
+  "historical_main": {
+    "commit": "744793c95ba1362f7d6bba7f3f75cdd4614f1749",
+    "definitions": 364,
+    "mappings": {
+      "tests/test_auth.py::AuthTests::test_duplicate_email_and_invalid_registration": {
+        "reason": "Registration moved from email to login ID. Duplicate and invalid IDs are rejected, and email is no longer collected.",
+        "commit": "9b2358102fc91fabfdf862febaf65784d4501fb4",
+        "tests": [
+          "tests/test_auth.py::AuthTests::test_duplicate_login_id_and_invalid_registration",
+          "tests/test_signup.py::SignupTests::test_email_is_not_collected_and_a_leftover_email_field_is_ignored"
+        ]
+      },
+      "tests/test_auth.py::AuthTests::test_registration_hashes_password_and_normalizes_email": {
+        "reason": "Email normalization was replaced by login ID registration. Password hashing and login are still verified.",
+        "commit": "9b2358102fc91fabfdf862febaf65784d4501fb4",
+        "tests": [
+          "tests/test_auth.py::AuthTests::test_registration_without_email_hashes_password_and_logs_in_by_id"
+        ]
+      }
+    }
+  },
+  "image_exception": {
+    "reason": "Public GnuTLS 3.7.9 self-test keys from lib/crypto-selftests-pk.c in the inherited Debian libgnutls30 library",
+    "platform": "linux/amd64",
+    "base_image": "python:3.12.10-slim-bookworm",
+    "base_manifest": "sha256:97983fa8cc88343512862c62307159a82261c3528dc025f79e5a3f7af43e50b4",
+    "base_layers": [
+      "sha256:ace34d1d784c01e3f9d156687089e8f58f786e23ccd097bdbbf337d6d28b3783",
+      "sha256:edf2e8d9a6f19eeb93e6adb712ccda0d8e687effd6a79400f258d957f40321a1",
+      "sha256:4a0992abe543a127be2561cc40cd50315516bfbf9d6169f06f3f8d30166fa6ab",
+      "sha256:de0b11a690a6e81271e41db48dea18fc39104f7ba2034e2ecf6971586f66021b"
+    ],
+    "layer": "sha256:ace34d1d784c01e3f9d156687089e8f58f786e23ccd097bdbbf337d6d28b3783",
+    "path": "usr/lib/x86_64-linux-gnu/libgnutls.so.30.34.3",
+    "file_sha256": "d6013ca9a682ae21201132d78452beebfe0e4fa6ff503b4ba77ccf0f691a9ece",
+    "keys": [
+      {"label": "EC PRIVATE KEY", "sha256": "24a2416c5abbb67327599619c25906553b849d79cbc413e2a061f12de6718838"},
+      {"label": "PRIVATE KEY", "sha256": "6d03bbf47115fad00d6f990593a6465ca693d0f6d797721cfc94b0190349b50d"},
+      {"label": "DSA PRIVATE KEY", "sha256": "9ab6db67523ba6071fdb948b3ce38349ec08fb726f359abbbca33a3a84238ba2"},
+      {"label": "PRIVATE KEY", "sha256": "bf552d2ff30b20f0b0ee2bcc357a5ab68dbe899ae09a0071b097bee2d2434332"},
+      {"label": "PRIVATE KEY", "sha256": "cadf1e62661d5d21a7fce2c80b3319022ee366137e4b302a7ea78b7f17d6f599"},
+      {"label": "RSA PRIVATE KEY", "sha256": "f287c70b1db074fe73f73bfb1f09a8b0231e0d951d5bfd30a742bcb9de9195ab"}
+    ],
+    "package": {
+      "name": "libgnutls30",
+      "version": "3.7.9-2+deb12u4",
+      "url": "https://snapshot.debian.org/file/50dad85633df48bac7bce28e50e3331623587fbd",
+      "sha256": "1c113d2a3eb06d66fc3a6f30d00e8c38b102e3b1d9f8911272bd0e45c22ed36b"
+    },
+    "source": {
+      "url": "https://deb.debian.org/debian/pool/main/g/gnutls28/gnutls28_3.7.9.orig.tar.xz",
+      "sha256": "aaa03416cdbd54eb155187b359e3ec3ed52ec73df4df35a0edd49429ff64d844",
+      "file": "gnutls-3.7.9/lib/crypto-selftests-pk.c"
+    }
   }
 }
