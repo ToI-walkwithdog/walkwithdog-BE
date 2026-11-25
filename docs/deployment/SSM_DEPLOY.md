@@ -4,7 +4,7 @@
 
 `Backend Deploy` Workflow는 보호된 `main`에서 관리자가 수동 실행한다. ECR 발행 증빙과 Image Digest를 확인한 뒤 기존 SSM 문서로 EC2의 `deploy.sh`(#109)를 호출한다.
 
-**현재는 실행해도 Validate Job에서 항상 차단된다.** ECR Publish와 SSM Deploy 사이의 인터페이스 계약 v1(#136 작업 B)에 따라 발행 증빙을 검증한다. 다만 리뷰와 관리자 승인을 거친 ECR 발행기 파일 해시(`TRUSTED_PUBLISHERS`)가 아직 비어 있어 증빙 확인 첫 단계에서 실행을 막는다. 해시 목록은 PR #137의 최종 구현과 리뷰 이후 별도 변경으로 등록한다.
+ECR Publish와 SSM Deploy 사이의 인터페이스 계약 v1(#136 작업 B)에 따라 발행 증빙을 검증한다. `TRUSTED_PUBLISHERS`에는 PR #137에서 리뷰된 발행 Workflow와 스크립트의 SHA-256이 등록되어 있다. 해당 등록본과 바이트 단위로 일치하지 않는 발행기는 차단하며, 새 발행기 버전의 해시는 별도 리뷰와 관리자 승인 후 등록해야 한다.
 
 이 Workflow는 다음을 하지 않는다.
 
@@ -51,7 +51,7 @@ SSM 문서 버전은 코드에 고정한다. `ToI-DeploymentStatus`는 `1`(#121�
 
 1. `validate`는 `workflow_dispatch`, `refs/heads/main`, 보호 브랜치, 저장소 ID, Workflow 경로, 실행자와 재실행자의 일치를 확인한다. 실행자의 저장소 권한이 `admin`이어야 한다.
 2. 발행 실행은 같은 저장소(ID `1409697696`) `main`의 `ECR Image Publish`(`.github/workflows/ecr-image-publish.yml`)가 `workflow_dispatch`로 실행되어 성공한 최신 시도여야 한다. 실행자와 재실행자가 같고 실행자가 `admin`이어야 하며, 그 시도의 `Publish image` Job이 성공해야 한다. 실행의 `head_sha`를 Source SHA로 쓰고, 현재 `main`에 포함된 커밋인지 compare API로 확인한다.
-3. 6장의 기준으로 발행 증빙을 검증한 뒤에만 `image_digest`, `source_sha`, `digest_uri`를 다음 Job으로 넘긴다. 현재는 발행기 신뢰 해시가 없어 이 단계에서 차단된다.
+3. 6장의 기준으로 발행 증빙을 검증한 뒤에만 `image_digest`, `source_sha`, `digest_uri`를 다음 Job으로 넘긴다. 등록된 발행기 해시와 일치하지 않으면 이 단계에서 차단된다.
 4. `deploy`는 `digest_uri`가 승인된 저장소와 Digest로 구성됐는지 확인한 뒤 `configure-aws-credentials`로 배포 전용 Role을 사용한다. `sts get-caller-identity`의 계정과 Role 이름을 확인하고, 배포 직전 ECR에서 Digest로 이미지 한 개를 조회해 저장소, 실제 `imageDigest`, Source SHA 태그를 확인한다. `latest`나 SHA 태그는 배포 대상으로 쓰지 않는다.
 5. `ToI-DeploymentStatus`로 배포 전 상태를 읽고 아래 기준으로 구분한다. 최초 배포 전 미실행, 최초 배포 재시도, 정상 운영에서만 다음 단계로 진행한다.
 6. `preflight`는 여기서 성공으로 끝나며 서버를 변경하지 않는다.
@@ -80,7 +80,7 @@ Job Summary에는 실행자, 발행 실행 ID와 시도, Source SHA, Digest, 각
 
 | 단계 | 확인 내용 |
 | --- | --- |
-| 발행기 신뢰 | Publish Run의 실행 Commit에서 `.github/workflows/ecr-image-publish.yml`, `scripts/ecr_image_publish.py`의 바이트 SHA-256을 계산해 `TRUSTED_PUBLISHERS`의 리뷰된 항목과 대조한다. 목록이 비어 있으면 차단한다. 현재 `main`과 같다는 이유로 자동 갱신하지 않고, 증빙 JSON의 값을 신뢰 기준으로 쓰지 않는다. 증빙의 `verifier.files`는 Release CI 보호 파일 4개의 해시이며 발행기 해시가 아니다. 등록된 버전마다 자기 파일만 대조하므로, 다른 버전에만 있는 파일이 없어도 해당 버전의 정상 발행본은 차단되지 않는다. |
+| 발행기 신뢰 | Publish Run의 실행 Commit에서 `.github/workflows/ecr-image-publish.yml`, `scripts/ecr_image_publish.py`의 바이트 SHA-256을 계산해 `TRUSTED_PUBLISHERS`의 리뷰된 항목과 대조한다. 등록 항목은 Workflow `827c21ba2a1a44017b6a2935ef8cef137c1524cd9510952057c3449e8e13fc61`, 스크립트 `264f6a496884347064dd9c50c2674f6daa0ffcb267d75df44d87689d9ed74f81`이다. 목록이 비어 있거나 파일 해시가 등록본과 다르면 차단한다. 현재 `main`과 같다는 이유로 자동 갱신하지 않고, 증빙 JSON의 값을 신뢰 기준으로 쓰지 않는다. 증빙의 `verifier.files`는 Release CI 보호 파일 4개의 해시이며 발행기 해시가 아니다. 등록된 버전마다 자기 파일만 대조하므로, 다른 버전에만 있는 파일이 없어도 해당 버전의 정상 발행본은 차단되지 않는다. |
 | Artifact | 해당 실행의 정확한 이름 1개, 미만료, `workflow_run`의 실행 ID, 저장소 ID, `head_sha`, `main` 일치. API의 `digest`와 다운로드한 ZIP의 SHA-256 일치. 다운로드는 API의 `/zip` 요청에만 토큰을 쓰고, 리다이렉트된 HTTPS 저장소 URL은 토큰 없이 받는다. |
 | ZIP과 JSON | 파일 1개와 정확한 파일명, 중첩 경로와 중복 파일 차단, 크기는 기존 증빙 소비자(`scripts/ecr_image_publish.py`)와 같은 8 MiB 제한. UTF-8 JSON에서 중복 키, `NaN`, `Infinity`를 거부한다. 객체마다 정해진 필드만 허용하고 문자열, 정수, Boolean을 엄격히 구분한다. |
 | 운영용 표시 | `schema_version` 1, `record_type` `production`, `simulation` false, `publication_authorized` true, `deployable` true, `ecr.remote_verified` true, `outcome` `published`, `already_present`, `reconciled` 중 하나, 검사 5개 `passed`, `postgresql_passed` 82, `image.platform` `linux/amd64`. 모의 증빙은 차단한다. |
@@ -173,7 +173,7 @@ Role 생성, 정책 연결, `SSM_DEPLOY_ROLE_ARN` 등록은 별도 승인 후 �
 
 실제 `preflight` 성공에는 다음이 필요하다. `deploy`는 별도 승인으로 실행한다.
 
-- PR #137 최종 구현과 리뷰 이후 ECR 발행기 파일 해시를 `TRUSTED_PUBLISHERS`에 등록하는 별도 변경(독립 리뷰와 관리자 승인). 등록할 때 최종 Workflow가 실행하는 다른 코드(현재 #137은 `.github/tests/test_ecr_image_publish.py`도 실행)와 추가 모듈이 있는지 확인하고, 실행에 영향을 주는 파일은 항목에 포함한다.
+- `TRUSTED_PUBLISHERS`에 등록된 PR #137 발행기 버전과 일치하는 Publish 실행. 새 발행기 버전을 허용할 때는 최종 Workflow가 실행하는 코드와 추가 모듈을 확인하고, 실행에 영향을 주는 파일의 해시를 별도 리뷰와 관리자 승인 후 등록한다.
 - 계약 v1의 운영용 증빙을 만드는 실제 ECR 발행 실행
 - 배포 전용 Role 생성과 `SSM_DEPLOY_ROLE_ARN` 등록
 - EC2의 배포 스크립트 설치와 `ToI-DeployBackend` 등록([EC2 설치](https://github.com/ToI-walkwithdog/walkwithdog-BE/blob/dev/docs/deployment/EC2_SETUP.md))

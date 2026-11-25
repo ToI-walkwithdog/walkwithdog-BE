@@ -36,8 +36,11 @@ MAX_JSON = 8 * 1024 * 1024
 MAX_SOURCE_FILE = 8 * 1024 * 1024
 CONFIRMED_SLACK = timedelta(seconds=60)
 # Reviewed and administrator-approved ECR publisher versions: {path: sha256 of the bytes}.
-# Every entry must cover PUBLISHER_FILES. Empty until PR #137 is final, which blocks deployment.
-TRUSTED_PUBLISHERS = ()
+# Every entry must cover PUBLISHER_FILES.
+TRUSTED_PUBLISHERS = ({
+    PUBLISH_WORKFLOW: "827c21ba2a1a44017b6a2935ef8cef137c1524cd9510952057c3449e8e13fc61",
+    "scripts/ecr_image_publish.py": "264f6a496884347064dd9c50c2674f6daa0ffcb267d75df44d87689d9ed74f81",
+},)
 PUBLISHER_FILES = frozenset({PUBLISH_WORKFLOW, "scripts/ecr_image_publish.py"})
 RELEASE_VERIFIER_FILES = frozenset({
     ".github/workflows/release-ci.yml", ".github/release-ci-trust.json",

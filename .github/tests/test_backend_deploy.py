@@ -328,13 +328,16 @@ class ValidateTests(unittest.TestCase):
                 code = bd.run_validate(env, **kwargs)
             return code, output.read_text(encoding="utf-8"), stdout.getvalue()
 
-    def test_blocks_until_reviewed_publisher_hashes_are_registered(self):
-        self.assertEqual(bd.TRUSTED_PUBLISHERS, ())
-        code, outputs, stdout = self.run_validate(dispatch_env(), fetch=github())
-        self.assertEqual(code, 1)
-        self.assertEqual(outputs, "")
-        self.assertIn("No reviewed ECR publisher hashes", stdout)
-        self.assertNotIn(SECRET, stdout)
+    def test_registered_publisher_hashes_match_checked_in_files_and_reject_tampering(self):
+        files = {path: Path(path).read_bytes() for path in bd.PUBLISHER_FILES}
+        read_file = lambda path, _ref: files[path]
+        bd.check_publisher(read_file, SOURCE, bd.TRUSTED_PUBLISHERS)
+
+        tampered = dict(files)
+        tampered["scripts/ecr_image_publish.py"] += b"\n"
+        read_tampered_file = lambda path, _ref: tampered[path]
+        with self.assertRaisesRegex(bd.Blocked, "do not match a reviewed version"):
+            bd.check_publisher(read_tampered_file, SOURCE, bd.TRUSTED_PUBLISHERS)
 
     def test_writes_outputs_after_confirmed_evidence(self):
         code, outputs, stdout = self.run_validate(dispatch_env(GITHUB_RUN_ATTEMPT="3"), fetch=github(),
