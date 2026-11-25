@@ -1,14 +1,15 @@
 """Accounts in AGE_REVIEW_REQUIRED (Issue #41): birth date correction and sign-up exit.
 
 Both run in one transaction that first locks the users row FOR UPDATE and re-checks
-the status, the same lock as the Step 1 status change and conflicting with the
-pledge's and Step 1 save's FOR SHARE (app.account_status). So a correction and an
+the status, the same lock as the Step 1 status change and save (FOR UPDATE since #103)
+and conflicting with the pledge's FOR SHARE (app.account_status). So a correction and an
 exit for the same account never both succeed: the second sees the new state.
 
 Sign-up exit deletes explicitly in foreign key order (every FK to users is NO
 ACTION; no CASCADE is added):
   auth_sessions, session_tokens, phone_verifications, the account's USER daily
-  counter row, volunteer_experience_challenges, volunteer_onboarding_experiences
+  counter row, volunteer_walk_preferences (my page, Issue #105), the Step 3 routine
+  rows, volunteer_experience_challenges, volunteer_onboarding_experiences
   (Step 2, Issue #42), volunteer_onboarding_basics, user_pledge_acknowledgements,
   user_consents, then users.
 It refuses with 409 ACCOUNT_HAS_RETAINED_ACTIVITY and deletes nothing when
@@ -38,7 +39,7 @@ from app.auth import contract_unauthorized, verify_password
 from app.models import (AuthSession, ChatSession, MatchingResult, PhoneVerification, PhoneVerificationDailyCount,
                         SessionToken, Survey, User, UserConsent, UserPledgeAcknowledgement, VolunteerExperienceChallenge,
                         VolunteerOnboardingBasic, VolunteerOnboardingExperience, VolunteerOnboardingRoutine,
-                        VolunteerRoutineRegion, VolunteerRoutineTimeSlot)
+                        VolunteerRoutineRegion, VolunteerRoutineTimeSlot, VolunteerWalkPreference)
 from app.onboarding_common import age_years, first_incomplete_step, kst_date, step1_completed
 from app.walk_models import VolunteerProfile, WalkIncident, WalkRequest
 
@@ -149,6 +150,8 @@ def delete_account(db: Session, user_id: int) -> None:
             (PhoneVerification, PhoneVerification.user_id == user_id),
             (PhoneVerificationDailyCount, (PhoneVerificationDailyCount.scope == "USER")
              & (PhoneVerificationDailyCount.subject == str(user_id))),
+            # My page preferences (Issue #105): a settings row, not an activity record.
+            (VolunteerWalkPreference, VolunteerWalkPreference.user_id == user_id),
             # Step 3 children before the main row (FK to volunteer_onboarding_routines).
             (VolunteerRoutineRegion, VolunteerRoutineRegion.user_id == user_id),
             (VolunteerRoutineTimeSlot, VolunteerRoutineTimeSlot.user_id == user_id),

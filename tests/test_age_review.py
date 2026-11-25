@@ -16,7 +16,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
                             PhoneVerificationDailyCount, SessionToken, Shelter, Survey, User, UserConsent,
                             UserPledgeAcknowledgement, UserRole, VolunteerExperienceChallenge, VolunteerOnboardingBasic,
                             VolunteerOnboardingExperience, VolunteerOnboardingRoutine, VolunteerRoutineRegion,
-                            VolunteerRoutineTimeSlot)
+                            VolunteerRoutineTimeSlot, VolunteerWalkPreference)
     from app.onboarding_common import get_clock
     from app.region_models import LEVEL_SIDO, LEVEL_SIGUNGU, Region
     from app.rate_limit import FailureLimiter
@@ -325,6 +325,36 @@ class ExitTests(AgeReviewTestCase):
         self.assertEqual(self.step3_rows(), (0, 0, 0))
         self.assertIsNone(self.user(1))
         self.assertEqual(self.count(Region), 2)  # the shared region master stays
+
+    def add_walk_preferences(self):
+        """Issue #105: saved on my page before Step 1 turned the account into AGE_REVIEW_REQUIRED."""
+        with self.Session.begin() as db:
+            db.add(VolunteerWalkPreference(user_id=1, duration_code="OVER_60_MIN", size_code="LARGE", version=2,
+                                           updated_at=START - timedelta(hours=2)))
+
+    def test_walk_preferences_are_removed_before_the_user_and_kept_when_the_exit_is_refused(self):
+        self.add_walk_preferences()
+        with patch.dict(os.environ, {"ACCOUNT_EXIT_RECORD_POLICY": "delete", "APP_ENV": "production"}):
+            self.assert_error(self.exit(), 409, "ACCOUNT_HAS_RETAINED_ACTIVITY")  # policy: production keeps everything
+        with self.Session.begin() as db:
+            survey = Survey(user_id=1)
+            db.add(survey)
+        with patch.dict(os.environ, DELETE_RECORDS):
+            self.assert_error(self.exit(), 409, "ACCOUNT_HAS_RETAINED_ACTIVITY")  # an activity record
+        self.assertEqual((self.count(VolunteerWalkPreference), self.count(User, id=1)), (1, 1))
+        with self.Session.begin() as db:
+            db.query(Survey).filter_by(user_id=1).delete()
+        with patch.dict(os.environ, DELETE_RECORDS):
+            self.assertEqual(self.exit().status_code, 200)  # the users FK no longer blocks it (foreign_keys=ON)
+        self.assertEqual(self.count(VolunteerWalkPreference), 0)
+        self.assertIsNone(self.user(1))
+
+    def test_a_failed_exit_rolls_back_and_keeps_the_walk_preferences(self):
+        self.add_walk_preferences()
+        with patch.dict(os.environ, DELETE_RECORDS),                 patch.object(Session, "commit", side_effect=OperationalError("COMMIT", {}, Exception("down"))),                 self.assertLogs("app.api_contract", "ERROR"):
+            self.assert_error(self.exit(), 500, "INTERNAL_SERVER_ERROR")
+        self.assertEqual((self.count(User, id=1), self.count(VolunteerWalkPreference, user_id=1),
+                          self.count(AuthSession, user_id=1)), (1, 1, 1))
 
     def test_consent_and_pledge_records_are_kept_until_the_retention_policy_is_decided(self):
         settings = [{}, {"ACCOUNT_EXIT_RECORD_POLICY": "delete"},

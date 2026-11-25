@@ -1,5 +1,15 @@
 # 작업 인수인계
 
+## 산책 선호 설정 (#105)
+
+- `GET /users/me/walk-preferences`, `PATCH /users/me/walk-preferences`를 추가했습니다. ACTIVE 일반 사용자만 사용할 수 있고, 서약과 온보딩 완료는 요구하지 않습니다. 보호소와 관리자는 403 `PREFERENCE_NOT_ALLOWED`, 나이 확인 대기 계정은 403 `AGE_REVIEW_REQUIRED`입니다. 응답은 `Cache-Control: private, no-store`입니다.
+- GET은 `configured`, `version`, `preferences`(저장값 `duration_code`, `size_code`, `updated_at`), `effective_preferences`, `sources`를 반환합니다. 적용값은 필드별로 저장값, 완료된 Step 3 값, `null` 순이며 출처는 `PREFERENCE`, `ONBOARDING`, `NONE`입니다. 미설정이면 `configured=false`, `version=0`, `preferences=null`이고 조회는 아무것도 쓰지 않습니다.
+- PATCH는 `expected_version`(엄격한 정수)과 `duration_code`, `size_code` 중 하나 이상을 받습니다. 보내지 않은 필드는 그대로 두고, `null`과 추가 필드(`region_code` 포함)는 422 `INVALID_PREFERENCE_PAYLOAD`, 알 수 없는 코드는 422 `INVALID_DURATION`, `INVALID_DOG_SIZE`입니다. 첫 저장은 `expected_version=0`에서 `version=1`이 됩니다. 값이 같으면 200(`changed_fields: []`, 버전과 수정 시각 유지)이고, 버전이 다르면 값이 같아도 409 `PREFERENCE_VERSION_MISMATCH`입니다.
+- 저장은 `users` 행을 FOR UPDATE로 잠근 한 트랜잭션입니다. DB 잠금 시간 초과, 교착, 직렬화 실패를 포함한 DB 오류는 전체 롤백 후 500 `INTERNAL_SERVER_ERROR`입니다(별도 잠금 충돌 코드 없음).
+- 온보딩 Step 3 원본, 온보딩 상태, `profile_version`, 예약 자격, 산책 가능 목록 API는 바꾸지 않습니다. 지역은 다루지 않습니다.
+- 나이 확인 대기 계정의 가입 종료는 `volunteer_walk_preferences`를 `users`보다 먼저 삭제합니다. 종료가 거절되면 선호도 보존됩니다.
+- 마이그레이션 `036_walk_preferences.sql`(새 테이블만 추가, 재실행 가능)이 필요합니다. 실제 의존성은 기본 `users(id)`뿐이라 manifest 선행 파일은 비어 있습니다(`002_auth_sessions.sql`과 같은 방식). 개발 DB 적용은 16단계에서 별도 승인 후 진행합니다.
+
 ## 내 정보 수정과 휴대폰 재인증 (#103)
 
 - 대상은 ACTIVE 일반 사용자입니다. 서약과 온보딩 완료는 요구하지 않습니다. 보호소와 관리자는 403 `PROFILE_UPDATE_NOT_ALLOWED`, 나이 확인 대기 계정은 403 `AGE_REVIEW_REQUIRED`입니다. 모든 응답은 `Cache-Control: private, no-store`입니다.

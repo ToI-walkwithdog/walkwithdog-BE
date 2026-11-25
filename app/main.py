@@ -14,6 +14,7 @@ from app.routers import walks, walk_maps, walk_reviews, walk_guides, shelter_vol
 from app.routers import policies, regions
 from app.routers import onboarding_basic, onboarding_experience, onboarding_routine, age_review
 from app.routers import profile
+from app.routers import walk_preferences
 from app.volunteer_level_service import POLL_SECONDS, get_level_policy, run_pending_evaluations
 from app.walk_service import close_stale_walks
 
@@ -88,6 +89,7 @@ app.include_router(onboarding_basic.router)
 app.include_router(profile.router)
 app.include_router(onboarding_experience.router)
 app.include_router(onboarding_routine.router)
+app.include_router(walk_preferences.router)  # Issue #105
 app.include_router(age_review.router)
 app.include_router(shelter_incidents.router)
 app.include_router(shelter_live_walks.router)
