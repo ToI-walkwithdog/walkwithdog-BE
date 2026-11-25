@@ -94,7 +94,7 @@ FROM python:3.12.10-slim-bookworm
 ARG VARIANT
 LABEL toi.test.variant=$VARIANT
 ENV FIXTURE_VARIANT=$VARIANT
-COPY server.py /server.py
+COPY --chmod=0444 server.py /server.py
 USER 10001:10001
 CMD ["python", "/server.py"]
 DOCKERFILE
@@ -214,6 +214,8 @@ expect() {
     if [[ $status != "$expected" ]]; then
         cat "$evidence/last.out" >&2
         printf 'Expected exit %s, got %s\n' "$expected" "$status" >&2
+        d ps -a --format '{{.Names}} {{.Image}} {{.Status}}' >&2
+        if [[ -n $(api_id) ]]; then d logs --tail 12 "$(api_id)" >&2 || true; fi
         return 1
     fi
 }
@@ -365,6 +367,7 @@ expect 5 "$deploy" "$first"
 assert_state blocked "$first" - failed none
 expect 5 "$deploy" "$first"
 reconcile "$first" -
+d pull --platform linux/amd64 "$registry/toi-be@$second" >/dev/null
 c "$second" up -d --no-deps --no-build --pull never --force-recreate --wait api
 wrong=$(api_id)
 expect 5 "$deploy" "$first"

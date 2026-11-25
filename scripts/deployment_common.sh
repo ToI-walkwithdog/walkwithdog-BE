@@ -444,7 +444,7 @@ ensure_volume() {
 
 assert_db() {
     [[ $(service_id db) == "$db_container" ]] &&
-        [[ $(docker_run 12 inspect --format '{{.Config.Image}} {{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}} {{len .HostConfig.PortBindings}} {{range $key, $_ := .NetworkSettings.Networks}}{{$key}} {{end}}' "$db_container" 2>/dev/null) == 'postgres:16.16 true healthy 0 toi-be_default ' ]] &&
+        [[ $(docker_run 12 inspect --format '{{.Config.Image}} {{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}} {{len .HostConfig.PortBindings}} {{len .NetworkSettings.Networks}} {{if index .NetworkSettings.Networks "toi-be_default"}}true{{end}}' "$db_container" 2>/dev/null) == 'postgres:16.16 true healthy 0 1 true' ]] &&
         [[ $(docker_run 12 inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Type}} {{.Name}}{{end}}{{end}}' "$db_container" 2>/dev/null) == "volume $DB_VOLUME" ]]
 }
 
