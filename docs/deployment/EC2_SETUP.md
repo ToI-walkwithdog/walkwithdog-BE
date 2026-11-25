@@ -21,7 +21,47 @@
 | `/opt/toi/deploy/schema-record.json`, `/opt/toi/deploy/approvals/<digest-hex>.json` | root:root, 0600 | 별도 승인 절차에서 발급한 실제 DB 적용 기록과 이미지별 호환성 근거다. |
 | `/opt/toi/deployment/deploy.lock` | root:root, 0600 | 설치 시 한 번 생성한 일반 파일이다. 실행 중이거나 다시 배포할 때 교체하지 않는다. |
 
-`.env`에는 기존 DB의 `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`를 넣는다. DB 이름은 영문자, 숫자, 밑줄로 구성한다. `.env.api`의 `DATABASE_URL`은 같은 DB 이름과 `db:5432`를 쓰며 API 전용 계정으로 접속한다. URL의 자격 증명은 퍼센트 인코딩 규칙에 맞춘다. 실제 SMS와 위치 공급자 정보를 배포 설정에 넣을 때는 별도 승인과 자격 증명 관리 절차를 적용한다.
+## 환경변수와 비밀값 (#128, 16-3)
+
+실제 EC2 설정과 DB 변경은 별도 승인 작업이다. 아래는 시연 서버용 준비 절차이며 실제 값이나 적용 증빙이 아니다.
+
+- 로컬 uvicorn은 저장소 루트의 [`.env.example`](../../.env.example), 로컬 Compose는 [`deploy/.env.example`](../../deploy/.env.example)를 참고한다. EC2 API는 신규 [`deploy/.env.api.example`](../../deploy/.env.api.example)를 사용한다. 예제는 비밀값을 채우지 않으므로 그대로 기동하지 않는다.
+- EC2 `.env`에는 기존 DB의 `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`만 기록한다. DB 이름은 영문자, 숫자, 밑줄로 구성한다. 기존 볼륨의 비밀번호를 env 파일 편집만으로 변경할 수 없다.
+- EC2 `.env.api`의 `DATABASE_URL`은 같은 DB 이름과 `db:5432`를 사용하며 API 전용 계정으로 접속한다. URL의 자격 증명은 퍼센트 인코딩 규칙에 맞춘다. `POSTGRES_*`는 API 파일에 넣지 않는다. Compose가 `AUTO_CREATE_SCHEMA=false`, `UPLOAD_DIR=/srv/uploads/dogs`를 고정한다.
+- `APP_ENV=development`, `SMS_PROVIDER=mock`, `SMS_MOCK_FIXED_CODE`(ASCII 숫자 6자리), `PHONE_VERIFICATION_HMAC_KEY`를 설정한다. 실제 SMS 공급자는 연동하지 않는다. 고정 OTP 값은 승인된 팀원에게 별도 비공개 채널로 전달한다. 합성 전화번호와 실제 사용자 데이터가 없는 시연 DB를 사용한다.
+- #116은 공개 데이터 수집 키와 매칭 정책, #117은 위치 공급자 및 고지·동의와 외부 전송 승인, #118은 보호소 HMAC 키, 서약·개인정보·약관 문서 및 레벨 정책을 확정한다. `PRIVACY_REQUIRED_CONSENTS`의 빈 값은 필수 동의 없음이라는 의미이므로 미결정 상태에서 가입을 열지 않는다. `ACCOUNT_EXIT_RECORD_POLICY`는 미설정, `MATCHING_INCLUDE_DEMO=false`, Gemini는 미설정을 기본으로 한다.
+
+### 비밀값 생성과 저장
+
+- 승인된 EC2에서 root로 작업하고 `set +x`, `umask 077`을 적용한다. 실제 값은 세션 명령 인자, 화면, Session Manager 로그, 저장소, Issue, PR, 채팅에 남기지 않는다. 외부 API Key는 승인된 비공개 전달 경로로 받는다. Parameter Store 등 신규 인프라는 이 단계에서 구성하지 않는다.
+- 실제 파일은 `/opt/toi/deploy/.env`와 `.env.api`를 root:root 0600, 상위 디렉터리를 root:root 0700으로 유지한다. 새 환경의 키를 준비할 때만 승인된 API 템플릿을 같은 디렉터리의 root 전용 0600 임시 파일 `.env.api.new`로 준비하고 두 HMAC 키의 빈 줄을 각각 독립적으로 채운다. 기존 활성 파일을 덮어쓰거나 중복 키를 추가하지 않는다.
+- 다음 예시는 **새로 준비한 빈 키가 있는 임시 파일**에만 적용한다. 활성 파일에는 실행하지 않는다. 출력되는 비밀값은 없다.
+
+```bash
+set +x
+umask 077
+python3 - <<'PY'
+from pathlib import Path
+import secrets
+import stat
+
+path = Path('/opt/toi/deploy/.env.api.new')
+info = path.lstat()
+if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
+    raise SystemExit('unsafe staging file')
+text = path.read_text(encoding='utf-8')
+lines = text.splitlines()
+for key in ('PHONE_VERIFICATION_HMAC_KEY', 'SHELTER_CODE_HMAC_KEY'):
+    matches = [i for i, line in enumerate(lines) if line.startswith(key + '=')]
+    if len(matches) != 1 or lines[matches[0]] != key + '=':
+        raise SystemExit('missing, duplicate or nonempty key: ' + key)
+    lines[matches[0]] = key + '=' + secrets.token_urlsafe(48)
+path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+PY
+```
+
+- 두 HMAC 키는 각각 32자 이상이며 서로 달라야 한다. 환경마다 새 값을 생성한다. 준비 파일과 DB 파일은 16-10의 `scripts/check_runtime_env.py` 실제 배포 설정 검증 및 별도 운영 승인 후 설치한다. 설정 파일 검증은 DB 접속, 정책 문서 내용, 공급자 실제 호출 또는 서버 접근 제한을 대신하지 않는다. 임시 파일은 승인된 설치 또는 실패 정리 절차에서 처리한다.
+- 전화번호 HMAC 키 교체는 기존 인증번호 digest 확인을 무효화하고 새 번호 HMAC을 사용하므로 기존 번호별 일일 카운터를 더 이상 참조하지 않는다(기존 행은 삭제되지 않음). 보호소 HMAC 키를 교체하면 기존 발급 코드의 digest 확인이 실패한다. 이미 확인된 증빙과 진행 중 예약까지 자동으로 모두 무효화한다고 가정하지 않는다. 실제 교체는 기존 요청 및 증빙의 만료·영향을 확인하고 별도 승인으로 진행한다.
 
 스크립트는 `/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`으로 고정한 `PATH`와 로컬 Docker 소켓을 사용한다. Compose 프로젝트, 파일, env 파일, API 이미지와 루프백 포트는 스크립트에서 지정한다. 외부 Docker Context, Compose, 프록시, AWS 관련 환경변수는 실행 명령에 전달되지 않는다. EC2 IAM Role 자격 증명을 사용하며 AWS 프로필과 공유 자격 증명 파일은 읽지 않는다. 전용 임시 Docker 설정에 `--password-stdin`으로 로그인하고 Pull 직후 정리한다. 로그인이나 Pull에서 오류가 나면 종료 시에도 정리를 시도한다. 강제 종료 후 남은 `.docker-auth.*`는 배포 잠금을 획득하고 잔여 작업이 없는 상태에서 디렉터리의 소유자, 모드, 이름, 내용을 확인한 후 해당 디렉터리만 정리한다. Docker 인증 설정에 저장된 토큰은 출력하지 않는다.
 
