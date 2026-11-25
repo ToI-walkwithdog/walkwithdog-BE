@@ -71,26 +71,92 @@ jobs:
 
       - name: Test SSM Run Command
         run: |
-          COMMAND_ID=$(aws ssm send-command \
+          if ! COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters '{"commands":["echo ToI GitHub Actions connection successful","whoami","docker --version","docker compose version"]}' \
+            --document-name "ToI-DeploymentStatus" \
+            --document-version "1" \
             --query "Command.CommandId" \
-            --output text)
+            --output text 2>/dev/null); then
+            echo "SSM status command could not be submitted." >&2
+            exit 1
+          fi
 
-          echo "Command ID: $COMMAND_ID"
+          if [[ ! $COMMAND_ID =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "SSM did not return a valid command ID." >&2
+            exit 1
+          fi
 
           WAIT_STATUS=0
-
           aws ssm wait command-executed \
             --command-id "$COMMAND_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
+            --instance-id "$EC2_INSTANCE_ID" >/dev/null 2>&1 \
             || WAIT_STATUS=$?
 
-          aws ssm get-command-invocation \
+          if ! INVOCATION=$(aws ssm get-command-invocation \
             --command-id "$COMMAND_ID" \
             --instance-id "$EC2_INSTANCE_ID" \
-            --query '{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}' \
-            --output json
+            --query '{Status:Status,ResponseCode:ResponseCode,Output:StandardOutputContent}' \
+            --output json 2>/dev/null); then
+            echo "SSM invocation result could not be retrieved." >&2
+            exit 1
+          fi
 
-          exit "$WAIT_STATUS"
+          printf '%s\n' "$INVOCATION" | python3 -c '
+          import json
+          import re
+          import sys
+
+          try:
+              result = json.load(sys.stdin)
+          except (ValueError, UnicodeError):
+              sys.exit("SSM invocation result was not valid JSON.")
+          if not isinstance(result, dict):
+              sys.exit("SSM invocation result was not an object.")
+
+          status = result.get("Status")
+          code = result.get("ResponseCode")
+          if status != "Success" or type(code) is not int or code != 0:
+              known_statuses = (
+                  "Pending", "InProgress", "Delayed", "Success",
+                  "Cancelled", "TimedOut", "Failed", "Cancelling",
+              )
+              safe_status = status if status in known_statuses else "Unknown"
+              safe_code = str(code) if type(code) is int else "Unknown"
+              sys.exit(f"SSM invocation failed (status={safe_status}, response_code={safe_code}).")
+          if sys.argv[1] != "0":
+              sys.exit("SSM did not complete successfully within the wait.")
+
+          output = result.get("Output")
+          if not isinstance(output, str):
+              sys.exit("SSM status output was missing.")
+          lines = output.splitlines()
+          if lines == ["deployment=busy"]:
+              sys.exit("SSM deployment status is busy.")
+
+          # The status command can precede its report with three script checksums.
+          if len(lines) == 6:
+              scripts = ("deploy", "rollback", "deployment_common")
+              for line, script in zip(lines[:3], scripts):
+                  if not re.fullmatch(rf"[0-9a-f]{{64}}  /opt/toi/scripts/{script}\.sh", line):
+                      sys.exit("SSM status checksum lines had an unexpected format.")
+              lines = lines[3:]
+
+          digest = r"(?:-|sha256:[0-9a-f]{64})"
+          state_pattern = (
+              rf"status=(?:ready|in_progress|blocked) current={digest} previous={digest} "
+              r"last_result=(?:none|running|success|unchanged|failed)"
+          )
+          if len(lines) != 3 or not re.fullmatch(state_pattern, lines[0]):
+              sys.exit("SSM deployment status line had an unexpected format.")
+
+          container = (
+              r"[0-9a-f]{64} sha256:[0-9a-f]{64} "
+              r"(?:created|restarting|running|removing|paused|exited|dead) "
+              r"(?:starting|healthy|unhealthy|none)"
+          )
+          for service, line in zip(("api", "db"), lines[1:]):
+              if not re.fullmatch(rf"{service} (?:absent|{container})", line):
+                  sys.exit(f"SSM {service} status line had an unexpected format.")
+
+          print("SSM deployment status verified (status=Success, response_code=0).")
+          ' "$WAIT_STATUS"
