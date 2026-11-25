@@ -55,7 +55,8 @@ def database_error(exc, *, cancelling=False):
 def persist_request(db, operation, actor, *, cancel_request_id=None, response_model=WalkRequestResponse):
     try:
         date_cancel = cancel_request_id is not None and owns_date_request(db, cancel_request_id, actor)
-        require_active_writer(db, actor, for_update=date_cancel, nowait=date_cancel)
+        # Fail fast on account-row contention, just as for the business-row locks.
+        require_active_writer(db, actor, for_update=date_cancel, nowait=True)
         request = operation()
         can_cancel = can_cancel_request(request, actor, walk_request_service.utc_now())
         response = response_model.model_validate(request, context={"can_cancel": can_cancel})

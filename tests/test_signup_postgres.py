@@ -1291,6 +1291,27 @@ class SignupPostgresTests(unittest.TestCase):
         thread.join(10)
         return results["response"]
 
+    def change_status_while_nowait(self, request, *, conflict_detail, expected_counts):
+        """Issue #130: reject contention before commit, then reject the inactive account on retry."""
+        models = (WalkRequest, VolunteerProfile, Walk)
+        # The transaction exits (releasing its lock) before the executor joins on failure.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with self.engine.begin() as connection:
+                connection.execute(text("SELECT id FROM users WHERE id = 1 FOR UPDATE"))
+                connection.execute(text("UPDATE users SET account_status = 'AGE_REVIEW_REQUIRED',"
+                                        " age_review_required_at = now() WHERE id = 1"))
+                response = pool.submit(request).result(timeout=10)
+                self.assertEqual((response.status_code, response.json()),
+                                 (409, {"detail": conflict_detail}))
+                self.assertEqual(self.account_status(1), "ACTIVE")
+                self.assertEqual(tuple(self.table_count(model) for model in models), expected_counts)
+        self.assertEqual(self.account_status(1), "AGE_REVIEW_REQUIRED")
+        response = request()
+        self.assertEqual((response.status_code, response.json()),
+                         (403, {"detail": "연령 확인 정보를 먼저 수정해 주세요."}))
+        self.assertEqual(tuple(self.table_count(model) for model in models), expected_counts)
+        return response
+
     def table_count(self, model):
         with self.Session() as db:
             return db.query(model).count()
@@ -1327,7 +1348,10 @@ class SignupPostgresTests(unittest.TestCase):
         headers = self.start_walk_api()
         body = {"dog_id": 1, "requested_start_at": self.walk_start.isoformat(),
                 "requested_end_at": (self.walk_start + timedelta(hours=1)).isoformat()}
-        response = self.change_status_while(lambda: self.client.post("/walk-requests", json=body, headers=headers))
+        response = self.change_status_while_nowait(
+            lambda: self.client.post("/walk-requests", json=body, headers=headers),
+            conflict_detail="다른 작업과 충돌했습니다. 다시 조회한 뒤 재시도하세요.",
+            expected_counts=(0, 0, 0))
         self.assertEqual((response.status_code, response.json()),
                          (403, {"detail": "연령 확인 정보를 먼저 수정해 주세요."}))
         self.assertEqual((self.table_count(WalkRequest), self.table_count(VolunteerProfile)), (0, 0))
@@ -1339,8 +1363,11 @@ class SignupPostgresTests(unittest.TestCase):
                                requested_end_at=self.walk_start + timedelta(hours=1), status="APPROVED",
                                reviewed_by=3, reviewed_at=self.walk_start - timedelta(days=1)))
             db.add(VolunteerProfile(user_id=1))
-        response = self.change_status_while(lambda: self.client.post("/walks", json={"walk_request_id": 1},
-                                                                     headers=headers))
+        response = self.change_status_while_nowait(
+            lambda: self.client.post("/walks", json={"walk_request_id": 1}, headers=headers),
+            conflict_detail={"code": "WALK_START_RETRYABLE",
+                             "message": "다른 작업과 충돌했습니다. 진행 중 산책을 확인한 뒤 다시 시도하세요."},
+            expected_counts=(1, 1, 0))
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(self.table_count(Walk), 0)
         # The shelter's own actions are not blocked by the volunteer's status.
