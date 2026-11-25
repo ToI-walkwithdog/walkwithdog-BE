@@ -4,7 +4,7 @@ from datetime import timedelta
 import logging
 from unittest.mock import patch
 
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session as OrmSession
 
 from test_onboarding_basic_info import START, Step1TestCase
@@ -205,6 +205,12 @@ class PreferencePatchTests(PreferenceTestCase):
         self.assertEqual(self.data(self.patch_preferences({"expected_version": 0, "size_code": "SMALL"}))["version"], 1)
 
     def test_a_primary_key_collision_on_first_save_is_a_version_conflict(self):
+        # Any other integrity error (no row behind it) is not hidden as 409.
+        other = IntegrityError("INSERT", {}, Exception("synthetic check violation"))
+        with patch.object(OrmSession, "flush", side_effect=other), self.assertLogs("app.api_contract", "ERROR"):
+            self.assert_error(self.patch_preferences({"expected_version": 0, "size_code": "SMALL"}),
+                              500, "INTERNAL_SERVER_ERROR")
+        self.assertEqual(self.preference_rows(), 0)
         self.data(self.patch_preferences({"expected_version": 0, "size_code": "SMALL"}))
         # As if another first save committed right after this request read "no row".
         with patch.object(walk_preference_service, "current_preference", return_value=None):

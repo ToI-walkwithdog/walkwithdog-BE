@@ -351,7 +351,9 @@ class ExitTests(AgeReviewTestCase):
 
     def test_a_failed_exit_rolls_back_and_keeps_the_walk_preferences(self):
         self.add_walk_preferences()
-        with patch.dict(os.environ, DELETE_RECORDS),                 patch.object(Session, "commit", side_effect=OperationalError("COMMIT", {}, Exception("down"))),                 self.assertLogs("app.api_contract", "ERROR"):
+        with patch.dict(os.environ, DELETE_RECORDS), \
+                patch.object(Session, "commit", side_effect=OperationalError("COMMIT", {}, Exception("down"))), \
+                self.assertLogs("app.api_contract", "ERROR"):
             self.assert_error(self.exit(), 500, "INTERNAL_SERVER_ERROR")
         self.assertEqual((self.count(User, id=1), self.count(VolunteerWalkPreference, user_id=1),
                           self.count(AuthSession, user_id=1)), (1, 1, 1))

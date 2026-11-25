@@ -154,9 +154,11 @@ def update_preferences(db: Session, user_id: int, body, now: datetime) -> dict:
         return result
     except IntegrityError:
         db.rollback()
-        # Only the user_id primary key can collide (values are validated above): another first
-        # save won. The users lock makes this unreachable; the key is the last guard.
-        raise version_mismatch() from None
+        # Another first save won the user_id primary key (the users lock makes this unreachable;
+        # the key is the last guard). Any other violation stays a 500 instead of hiding as 409.
+        if db.query(VolunteerWalkPreference.user_id).filter(VolunteerWalkPreference.user_id == user_id).first():
+            raise version_mismatch() from None
+        raise
     except Exception:
         db.rollback()
         raise
