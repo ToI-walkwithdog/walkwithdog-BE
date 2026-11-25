@@ -146,15 +146,21 @@
 - 본인 산책 요약에 `level_evaluation_status`와 nullable `level_up_event`를 제공한다. 먼저 `PENDING` 또는 `FAILED`인지 확인하고, `COMPLETED`에서 이벤트가 null이면 평가 완료 후 미승급이다. 미인계와 인계 문제로 보류된 산책은 기존 `handover_status`에서 구분한다. 현재 레벨은 기존 `GET /volunteers/me.level`을 사용한다.
 - `034_volunteer_level_up.sql`은 033 다음에 적용한다. `VOLUNTEER_LEVEL_POLICY_VERSION`과 `VOLUNTEER_LEVEL_POLICY_START_AT`을 함께 설정해야 평가가 활성화된다. 시작 시각은 UTC ISO 8601 형식이며, 두 설정이 모두 비어 있으면 백그라운드 평가를 실행하지 않는다. 개발 DB 적용, 실제 활성화와 FE 연동은 별도 작업이다.
 
-## 16-4 통합 DB 마이그레이션 도구 (#113)
+## 16-4 통합 DB 마이그레이션 도구 (#113) — 1-C / 1-D / 1-E 완료
 
-- 새 도구 `scripts/apply_migrations.py`를 신규 생성했다. 기존 도구(`check_migrations.py`, `migrate_backend.py`, `prepare_demo_db.py`)는 수정하지 않았다.
-- `check_migrations`의 `read_json`, `checksum`, `validate_inventory`, `validate_order`, `evidence_plan` 함수를 import만 하고 재구현하지 않았다.
-- 기본 모드는 dry-run이며, DB 연결이나 변경은 수행하지 않는다. `--evidence` JSON으로 실행 대상과 순서를 결정한다.
-- 적용 대상 선정: `absent`만 실행 후보(`MANUAL_PRECHECK_REQUIRED`). `applied`는 건너뛰기(`SKIP_RECORDED`). `schema-match`/`partial`/`unknown`, 체크섬 불일치(`RECONCILE_CHECKSUM`), 선행 미충족(`BLOCKED_PREREQUISITES`)은 차단한다.
-- `--apply`, `--dry-run`, `--check-only`, `--migration` 옵션은 만들지 않았다. 정적 검증은 `check_migrations.py`가 담당한다.
-- DB 접속 정보는 인자로 받지 않으며, 비밀 값은 출력과 기록에 남기지 않는다.
-- 테스트 실행 명령: `python -m pytest -q tests/test_apply_migrations.py tests/test_check_migrations.py`
-- 테스트 결과: 29 passed in 0.86s (test_apply_migrations.py 10건, test_check_migrations.py 19건)
-- 확인하지 못한 것: `python -m scripts.dev_test_report --out %TEMP%\report.json` 실행 실패(SIGNUP_TEST_DATABASE_URL/REGION_TEST_DATABASE_URL용 실제 PostgreSQL 없음) → report.json 미생성으로 `python -m scripts.dev_gate inventory report.json`을 통한 test-baseline.json 갱신 불가, 격리 PostgreSQL 테스트, `docs/migrations/README.md` 사용 문서 보강, `--apply` 경로 구현(1-C 단계).
+- [apply_migrations.py](file:///d:/workspace/Toi%20Prj/walkwithdog-BE-16-4/scripts/apply_migrations.py)에 1-C `--apply` 안전 가드/실행 경로와 1-D `pg16-public-v1` 카탈로그 지문·`schema-record.json`·모델 초기화 증빙 구분·카탈로그 동등성 비교를 구현했습니다. 기존 보호 도구(`check_migrations.py` 등)는 수정하지 않았습니다.
+- 1-D / 1-E 구현 및 문서 요약:
+  - `Pg16PublicV1SnapshotProvider`: `scripts/deployment_common.sh`의 `catalog_snapshot()` SQL(대상 스키마 파라미터 지원) 및 `schema_evidence()` 정규화/정렬/SHA-256 알고리즘으로 `pg16-public-v1` 지문을 계산합니다.
+  - `build_schema_record()` 및 `--schema-record-out <path>`: `EC2_SETUP.md` 규격의 `db_identity`, `algorithm`, `fingerprint`, `migrations` 배열(적용 순서대로 `file`, `sha256`)을 출력합니다.
+  - `create_model_init_evidence()`: 빈 DB 모델 초기화 증빙(`"type": "model-init-evidence"`, `init-*.json`)을 생성해 SQL 실행 이력(`"type": "sql-apply-run"`, `apply-*.json`)과 구분합니다.
+  - `compare_catalog_snapshots()`: 두 카탈로그 스냅샷의 동등성 및 차이 객체 목록을 반환합니다.
+  - [README.md](file:///d:/workspace/Toi%20Prj/walkwithdog-BE-16-4/docs/migrations/README.md): `scripts/apply_migrations.py`의 dry-run/종료 코드(0/1/2/3), `--apply` 필수 인자와 사전 가드(`pg_control_system()` 권한·백업 검증·저장소 외부 기록 디렉터리), `apply-*.json` vs `init-*.json` 구분 및 실패 복구/재개 절차를 보강했습니다.
+  - `tests/test_apply_migrations_postgres.py`: `SIGNUP_TEST_DATABASE_URL`과 `IsolatedSchema` 패턴으로 (1) 전체 적용+`schema-record.json`, (2) 재실행 건너뛰기, (3) 중간 실패/부분 적용 중단, (4) 모델 초기화 vs SQL 적용 카탈로그 동등성, (5) 앱 부팅 및 `/db-test` 스모크 테스트를 작성했습니다.
+  - `docs/dev-automation/test-baseline.json`: `dev_test_report --collect-only` + `dev_gate inventory`로 1,146개 테스트 기준 목록을 갱신했습니다.
+- 테스트 실행 명령 및 결과:
+  - `.venv\Scripts\python.exe -m pytest -q tests/test_apply_migrations.py tests/test_check_migrations.py tests/test_apply_migrations_postgres.py` → `55 passed, 3 skipped in 2.63s`
+  - `.venv\Scripts\python.exe -m pytest -q` → `915 passed, 231 skipped, 47 warnings, 1490 subtests passed in 258.21s (0:04:18)`
+- 확인하지 못한 것:
+  - 로컬 환경에 PostgreSQL(`127.0.0.1:5432`) 및 `psql` 바이너리가 미구동/미설치 상태여서 `tests/test_apply_migrations_postgres.py` 3건을 포함한 PostgreSQL 통합 테스트(총 231 skipped)는 실행하지 못함
+  - 실제 개발 DB 계정의 `pg_control_system()` 실행 권한 여부(superuser/`pg_monitor`/명시적 `EXECUTE` 부여 여부는 실제 DB 미접속으로 확인하지 못함)
 

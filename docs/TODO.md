@@ -136,12 +136,14 @@
 
 ## 16-4 통합 DB 마이그레이션 도구 (#113)
 
-- [x] `scripts/apply_migrations.py` 신규: 정적 검증 + 증거 기반 계획 계산 + dry-run 출력 (check_migrations import, 보호 경로 미변경)
-- [x] `tests/test_apply_migrations.py` 신규: 상태별 계획 계산, 체크섬 불일치 중단, requires 누락 중단
-- [ ] 전체 테스트 실행 (pytest 미설치로 미확인)
-- [ ] `python -m scripts.dev_gate inventory <report>`로 test-baseline.json 갱신 (pytest 미설치로 미확인)
-- [ ] `docs/migrations/README.md` 사용 문서 보강 (권장)
-- [ ] --apply 경로 구현은 1-B 이후 단계에서
+- [x] `scripts/apply_migrations.py` 신규: 정적 검증 + 증거 기반 계획 계산 + dry-run 출력 (1-B, check_migrations import, 보호 경로 미변경)
+- [x] `tests/test_apply_migrations.py` 신규: 상태별 계획 계산, 체크섬 불일치 중단, requires 누락 중단 (1-B)
+- [x] `--apply` 경로 구현 (1-C): 대상 DB 식별(`current_database()`, `pg_control_system()`), `pg_restore --list` 헤더 `dbname` 대조 기반 백업 검증, 메타 명령(`\i` 등) 차단, 가드 통과 후 `apply-<UTC>-<pid>.json` 배타 생성 및 파일별 `started`/`applied`/`failed` 기록, `VERBOSITY=sqlstate` 추출(원문 미기록), 트랜잭션 방식별 실행, 재개/손상 기록 중단, 체크섬 재대조, `psql` 없을 때 종료 코드 3
+- [x] 1-D 구현: `Pg16PublicV1SnapshotProvider`(`deployment_common.sh` 동등 `pg16-public-v1` 지문), `build_schema_record()` 및 `--schema-record-out`, `model-init-evidence`(`init-*.json`) 구분, 카탈로그 동등성 비교 유틸리티, `tests/test_apply_migrations_postgres.py` (`IsolatedSchema` 기반 5개 시나리오 작성)
+- [x] 전체 테스트 스위트 실행: `.venv\Scripts\python.exe -m pytest -q` → `915 passed, 231 skipped, 47 warnings, 1490 subtests passed in 258.21s (0:04:18)`
+- [x] `dev_test_report --collect-only` + `dev_gate inventory`로 `docs/dev-automation/test-baseline.json` 갱신 (1146 tests collected)
+- [x] `docs/migrations/README.md` 사용 문서 보강 (`scripts/apply_migrations.py` dry-run, `--apply` 필수 인자 및 가드, 종료 코드 0/1/2/3, `apply-*.json` vs `init-*.json` 기록 구분, 복구/재개 절차)
+- [ ] 로컬/CI 격리 PostgreSQL(`SIGNUP_TEST_DATABASE_URL`, `psql`) 환경에서 `tests/test_apply_migrations_postgres.py` 실실행 및 실제 개발 DB 계정의 `pg_control_system()` 실행 권한 확인 (16-5/16-6 단계)
 
 ## 인증번호 발송의 등록 여부 비노출 (#110)
 
