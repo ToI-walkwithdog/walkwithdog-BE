@@ -132,3 +132,4 @@
 - [ ] 17단계: `/7-2` 초기 크기 필터는 목록에서 직접 고른 값, `effective_preferences.size_code`, 전체 순서로 정한다. 목록 API는 요청받은 `size_code`만 적용한다. 초기 지역은 온보딩 Step 3의 지역 1~3개를 쓴다.
 - [ ] 16단계: 별도 승인 후 035 적용을 확인하고 `036_walk_preferences.sql`을 적용한다(새 테이블만 추가).
 - [ ] FE에 지역 선택 UI가 생기면 선호 지역 저장과 초기 검색 우선 적용을 별도 Issue로 정한다(Notion 조건부 정책).
+- [ ] `docs/dev-automation/FEATURE_PLAN.md`의 20단계 로드맵 반영은 게이트 보호 경로라 #105에서 분리했다. 사람이 검토하고 병합하는 별도 유지보수 PR로 진행한다.
