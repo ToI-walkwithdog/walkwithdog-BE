@@ -10,6 +10,8 @@ Raw SSM output, AWS error text and credentials are never printed. A
 SendCommand call whose response is lost is never repeated; the submitted
 command is looked up by its unique comment instead.
 """
+import hashlib
+import io
 import json
 import os
 import re
@@ -17,12 +19,31 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 REPOSITORY = "ToI-walkwithdog/walkwithdog-BE"
+REPOSITORY_ID = 1409697696
 WORKFLOW = ".github/workflows/backend-deploy.yml"
 PUBLISH_WORKFLOW = ".github/workflows/ecr-image-publish.yml"
+PUBLISH_WORKFLOW_NAME = "ECR Image Publish"
+PUBLISH_JOB_NAME = "Publish image"
+EVIDENCE_FILE = "image-publish-evidence.json"
+# Same JSON limit as the existing evidence consumer in scripts/ecr_image_publish.py.
+MAX_JSON = 8 * 1024 * 1024
+MAX_SOURCE_FILE = 8 * 1024 * 1024
+CONFIRMED_SLACK = timedelta(seconds=60)
+# Reviewed and administrator-approved ECR publisher versions: {path: sha256 of the bytes}.
+# Every entry must cover PUBLISHER_FILES. Empty until PR #137 is final, which blocks deployment.
+TRUSTED_PUBLISHERS = ()
+PUBLISHER_FILES = frozenset({PUBLISH_WORKFLOW, "scripts/ecr_image_publish.py"})
+RELEASE_VERIFIER_FILES = frozenset({
+    ".github/workflows/release-ci.yml", ".github/release-ci-trust.json",
+    "scripts/release_ci.py", ".github/tests/test_release_ci.py",
+})
+AWS_ACCOUNT = "478478097368"
 REGION = "ap-northeast-2"
 ECR_REPOSITORY = "toi-be"
 ROLE_NAME = "toi-github-ssm-deploy"
@@ -34,6 +55,8 @@ COMMENT_PREFIX = "toi-backend-deploy"
 
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 SHA = re.compile(r"[0-9a-f]{40}")
+HEX64 = re.compile(r"[0-9a-f]{64}")
+UTC_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z")
 NUMBER = re.compile(r"[1-9][0-9]{0,18}")
 ATTEMPT = re.compile(r"[1-9][0-9]{0,8}")
 ACCOUNT = re.compile(r"[0-9]{12}")
@@ -95,20 +118,58 @@ def field(env, name, pattern, label):
 
 # ---------------------------------------------------------------- GitHub side
 
-def api(path, token):
-    request = urllib.request.Request("https://api.github.com/" + path, headers={
-        "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+def _request(path, token, accept):
+    return urllib.request.Request("https://api.github.com/" + path, headers={
+        "Authorization": f"Bearer {token}", "Accept": accept,
         "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "toi-backend-deploy",
     })
+
+
+def _read(opener, request, limit):
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read())
+        with opener(request, timeout=60) as response:
+            data = response.read(limit + 1)
     except urllib.error.HTTPError as error:
         raise Blocked(f"GitHub API request failed (HTTP {error.code})") from None
-    except (urllib.error.URLError, TimeoutError, OSError):
-        raise Blocked("GitHub API is unreachable") from None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        raise Blocked("GitHub API is unreachable or returned an invalid response") from None
+    require(len(data) <= limit, "GitHub API response exceeds the size limit")
+    return data
+
+
+def api(path, token):
+    data = _read(urllib.request.urlopen, _request(path, token, "application/vnd.github+json"), MAX_JSON)
+    try:
+        return json.loads(data)
     except ValueError:
         raise Blocked("GitHub API returned invalid JSON") from None
+
+
+def api_raw(path, token):
+    """File bytes at a commit through the contents API."""
+    return _read(urllib.request.urlopen, _request(path, token, "application/vnd.github.raw+json"), MAX_SOURCE_FILE)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def download_artifact(artifact_id, token):
+    """Download an artifact ZIP; the signed storage URL is fetched without the API token."""
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        opener.open(_request(f"repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip", token,
+                             "application/vnd.github+json"), timeout=30).close()
+        raise Blocked("Artifact download did not redirect to storage")
+    except urllib.error.HTTPError as error:
+        location = error.headers.get("Location") if error.code in (301, 302, 303, 307, 308) else None
+        require(location, f"GitHub API artifact download failed (HTTP {error.code})")
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        raise Blocked("GitHub API is unreachable or returned an invalid response") from None
+    require(urllib.parse.urlsplit(location).scheme == "https", "Artifact storage URL is not HTTPS")
+    request = urllib.request.Request(location, headers={"User-Agent": "toi-backend-deploy"})
+    return _read(urllib.request.urlopen, request, MAX_JSON)
 
 
 def check_dispatch(env):
@@ -144,6 +205,7 @@ def check_settings(env):
     require(env.get("AWS_REGION") == REGION, f"AWS_REGION must be {REGION}")
     require(env.get("ECR_REPOSITORY") == ECR_REPOSITORY, f"ECR_REPOSITORY must be {ECR_REPOSITORY}")
     account = field(env, "AWS_ACCOUNT_ID", ACCOUNT, "AWS_ACCOUNT_ID")
+    require(account == AWS_ACCOUNT, f"AWS_ACCOUNT_ID must be {AWS_ACCOUNT}")
     instance = field(env, "EC2_INSTANCE_ID", INSTANCE, "EC2_INSTANCE_ID")
     require(env.get("SSM_DEPLOY_ROLE_ARN") == f"arn:aws:iam::{account}:role/{ROLE_NAME}",
             f"SSM_DEPLOY_ROLE_ARN must name the dedicated {ROLE_NAME} role")
@@ -153,13 +215,18 @@ def check_settings(env):
 def check_publish_run(run, latest, run_id, run_attempt):
     for item in (run, latest):
         require(isinstance(item, dict), "Publish run metadata is missing")
+        repository = item.get("repository") or {}
         require(item.get("id") == run_id
-                and (item.get("repository") or {}).get("full_name") == REPOSITORY
+                and repository.get("full_name") == REPOSITORY and repository.get("id") == REPOSITORY_ID
                 and (item.get("head_repository") or {}).get("full_name") == REPOSITORY,
                 "Publish run belongs to another run or repository")
-        require(item.get("path") == PUBLISH_WORKFLOW and item.get("event") == "workflow_dispatch"
-                and item.get("head_branch") == "main",
+        require(item.get("path") == PUBLISH_WORKFLOW and item.get("name") == PUBLISH_WORKFLOW_NAME
+                and item.get("event") == "workflow_dispatch" and item.get("head_branch") == "main",
                 "Publish run is not an ECR Image Publish dispatch on main")
+    actor = (run.get("actor") or {}).get("login")
+    require(isinstance(actor, str) and LOGIN.fullmatch(actor)
+            and (run.get("triggering_actor") or {}).get("login") == actor,
+            "Publish run actor and triggering actor differ")
     require(run.get("run_attempt") == run_attempt and latest.get("run_attempt") == run_attempt,
             "Only the latest attempt of the publish run is accepted")
     require(run.get("status") == "completed" and run.get("conclusion") == "success",
@@ -175,10 +242,259 @@ def check_source_on_main(compare):
             "Published source commit is not contained in protected main")
 
 
-def evidence_contract_pending(**_context):
-    """Placeholder until #136 settles the operational image-publish-evidence.json contract."""
-    raise Blocked("The operational ECR publish evidence contract (#136) is not integrated yet; "
-                  "deployment stays blocked")
+# ------------------------------------------- ECR publish evidence (contract v1)
+
+def parse_time(value, label):
+    require(isinstance(value, str) and UTC_TIME.fullmatch(value), f"Invalid {label}")
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def check_publish_job(jobs, run_id, run_attempt, head_sha):
+    items = jobs.get("jobs") if isinstance(jobs, dict) else None
+    require(isinstance(items, list), "Publish run jobs are missing")
+    matches = [job for job in items if isinstance(job, dict) and job.get("name") == PUBLISH_JOB_NAME]
+    require(len(matches) == 1, f"Expected exactly one '{PUBLISH_JOB_NAME}' job in the publish attempt")
+    job = matches[0]
+    require(job.get("run_id") == run_id and job.get("run_attempt") == run_attempt
+            and job.get("head_sha") == head_sha and job.get("status") == "completed"
+            and job.get("conclusion") == "success",
+            f"The '{PUBLISH_JOB_NAME}' job of this attempt did not succeed")
+    parse_time(job.get("started_at"), "publish job start time")
+    parse_time(job.get("completed_at"), "publish job completion time")
+    return job
+
+
+def artifact_name(run_id, run_attempt):
+    return f"image-publish-{run_id}-{run_attempt}"
+
+
+def check_artifact(listing, run_id, run_attempt, head_sha):
+    items = listing.get("artifacts") if isinstance(listing, dict) else None
+    require(isinstance(items, list), "Publish run artifacts are missing")
+    name = artifact_name(run_id, run_attempt)
+    matches = [item for item in items if isinstance(item, dict) and item.get("name") == name]
+    require(len(matches) == 1, f"Expected exactly one artifact named {name}")
+    artifact = matches[0]
+    origin = artifact.get("workflow_run") or {}
+    require(artifact.get("expired") is False, "Publish evidence artifact has expired")
+    require(origin.get("id") == run_id and origin.get("repository_id") == REPOSITORY_ID
+            and origin.get("head_repository_id") == REPOSITORY_ID
+            and origin.get("head_sha") == head_sha and origin.get("head_branch") == "main",
+            "Publish evidence artifact comes from another run or repository")
+    require(type(artifact.get("id")) is int and artifact["id"] > 0, "Invalid publish evidence artifact ID")
+    require(isinstance(artifact.get("digest"), str) and DIGEST.fullmatch(artifact["digest"]),
+            "Publish evidence artifact has no SHA-256 digest")
+    size = artifact.get("size_in_bytes")
+    require(type(size) is int and 0 < size <= MAX_JSON, "Publish evidence artifact size is out of range")
+    return artifact
+
+
+def read_evidence_zip(data, expected_digest):
+    require(isinstance(data, bytes) and len(data) <= MAX_JSON, "Publish evidence ZIP is too large")
+    require("sha256:" + hashlib.sha256(data).hexdigest() == expected_digest,
+            "Publish evidence ZIP does not match the artifact digest")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            infos = archive.infolist()
+            require(len(infos) == 1 and infos[0].filename == EVIDENCE_FILE and not infos[0].is_dir()
+                    and not infos[0].flag_bits & 0x1,
+                    f"Publish evidence ZIP must contain only {EVIDENCE_FILE} at its root")
+            require(infos[0].file_size <= MAX_JSON, "Publish evidence JSON is too large")
+            with archive.open(infos[0]) as handle:
+                content = handle.read(MAX_JSON + 1)
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError, ValueError, EOFError, OSError):
+        raise Blocked("Publish evidence ZIP is corrupt") from None
+    require(len(content) == infos[0].file_size, "Publish evidence JSON size does not match the ZIP entry")
+    return content
+
+
+def strict_json(data):
+    def pairs(items):
+        keys = [key for key, _ in items]
+        require(len(keys) == len(set(keys)), "Publish evidence has a duplicate JSON key")
+        return dict(items)
+
+    def constant(_name):
+        raise Blocked("Publish evidence has a non-finite number")
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise Blocked("Publish evidence is not valid UTF-8 JSON") from None
+
+
+def section(value, keys, label):
+    require(isinstance(value, dict) and set(value) == set(keys), f"Evidence {label} has unexpected fields")
+    return value
+
+
+def text(value, pattern, label):
+    require(isinstance(value, str) and pattern.fullmatch(value), f"Evidence {label} has an invalid value")
+    return value
+
+
+def positive(value, label):
+    require(type(value) is int and value > 0, f"Evidence {label} must be a positive integer")
+    return value
+
+
+def exactly(value, expected, label):
+    require(type(value) is type(expected) and value == expected, f"Evidence {label} must be {expected!r}")
+
+
+def check_evidence_document(doc):
+    """Schema v1 shape and production markers. Values are compared with GitHub and ECR separately."""
+    section(doc, ("schema_version", "record_type", "simulation", "publication_authorized", "deployable",
+                  "repository", "source", "release", "release_workflow", "approval", "verifier",
+                  "release_artifact", "verification", "image", "ecr", "publish_workflow", "outcome",
+                  "confirmed_at"), "document")
+    exactly(doc["schema_version"], 1, "schema_version")
+    exactly(doc["record_type"], "production", "record_type")
+    exactly(doc["simulation"], False, "simulation")
+    exactly(doc["publication_authorized"], True, "publication_authorized")
+    exactly(doc["deployable"], True, "deployable")
+    exactly(doc["repository"], REPOSITORY, "repository")
+    source = section(doc["source"], ("sha", "tree"), "source")
+    text(source["sha"], SHA, "source.sha")
+    text(source["tree"], SHA, "source.tree")
+    release = section(doc["release"], ("pr_number", "base_sha", "head_sha", "merge_tree_sha", "change_digest"),
+                      "release")
+    positive(release["pr_number"], "release.pr_number")
+    for key in ("base_sha", "head_sha", "merge_tree_sha"):
+        text(release[key], SHA, f"release.{key}")
+    text(release["change_digest"], HEX64, "release.change_digest")
+    release_run = section(doc["release_workflow"], ("run_id", "run_attempt", "workflow_sha", "dispatcher",
+                                                    "official_job_id"), "release_workflow")
+    for key in ("run_id", "run_attempt", "official_job_id"):
+        positive(release_run[key], f"release_workflow.{key}")
+    text(release_run["workflow_sha"], SHA, "release_workflow.workflow_sha")
+    text(release_run["dispatcher"], LOGIN, "release_workflow.dispatcher")
+    approval = section(doc["approval"], ("comment_id", "approver", "record_sha256", "review"), "approval")
+    positive(approval["comment_id"], "approval.comment_id")
+    text(approval["approver"], LOGIN, "approval.approver")
+    text(approval["record_sha256"], HEX64, "approval.record_sha256")
+    review = section(approval["review"], ("head", "record", "blocking"), "approval.review")
+    text(review["head"], SHA, "approval.review.head")
+    require(isinstance(review["record"], str) and review["record"].startswith(f"https://github.com/{REPOSITORY}/"),
+            "Evidence approval.review.record must cite this repository")
+    exactly(review["blocking"], 0, "approval.review.blocking")
+    files = section(section(doc["verifier"], ("files",), "verifier")["files"], RELEASE_VERIFIER_FILES,
+                    "verifier.files")
+    for path, digest in files.items():
+        text(digest, HEX64, f"verifier.files[{path}]")
+    release_artifact = section(doc["release_artifact"], ("id", "digest", "name"), "release_artifact")
+    positive(release_artifact["id"], "release_artifact.id")
+    text(release_artifact["digest"], DIGEST, "release_artifact.digest")
+    verification = section(doc["verification"], ("regression", "migration", "postgresql", "container_smoke",
+                                                  "image_security", "postgresql_passed"), "verification")
+    for key in ("regression", "migration", "postgresql", "container_smoke", "image_security"):
+        exactly(verification[key], "passed", f"verification.{key}")
+    exactly(verification["postgresql_passed"], 82, "verification.postgresql_passed")
+    image = section(doc["image"], ("platform", "archive_sha256", "config_digest", "manifest_digest"), "image")
+    exactly(image["platform"], "linux/amd64", "image.platform")
+    text(image["archive_sha256"], HEX64, "image.archive_sha256")
+    text(image["config_digest"], DIGEST, "image.config_digest")
+    text(image["manifest_digest"], DIGEST, "image.manifest_digest")
+    ecr = section(doc["ecr"], ("account_id", "region", "repository_uri", "tag", "digest", "digest_uri",
+                               "remote_verified"), "ecr")
+    exactly(ecr["account_id"], AWS_ACCOUNT, "ecr.account_id")
+    exactly(ecr["region"], REGION, "ecr.region")
+    exactly(ecr["repository_uri"], repository_uri(), "ecr.repository_uri")
+    text(ecr["tag"], SHA, "ecr.tag")
+    text(ecr["digest"], DIGEST, "ecr.digest")
+    exactly(ecr["remote_verified"], True, "ecr.remote_verified")
+    publish = section(doc["publish_workflow"], ("run_id", "run_attempt", "workflow_sha", "dispatcher"),
+                      "publish_workflow")
+    positive(publish["run_id"], "publish_workflow.run_id")
+    positive(publish["run_attempt"], "publish_workflow.run_attempt")
+    text(publish["workflow_sha"], SHA, "publish_workflow.workflow_sha")
+    text(publish["dispatcher"], LOGIN, "publish_workflow.dispatcher")
+    require(doc["outcome"] in ("published", "already_present", "reconciled"), "Evidence outcome is not accepted")
+    parse_time(doc["confirmed_at"], "confirmed_at")
+
+
+def repository_uri():
+    return f"{AWS_ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/{ECR_REPOSITORY}"
+
+
+def check_evidence_relations(doc, *, run_id, run_attempt, run, job, digest):
+    source, release, ecr, publish = doc["source"], doc["release"], doc["ecr"], doc["publish_workflow"]
+    release_run = doc["release_workflow"]
+    relations = (
+        (source["sha"] == ecr["tag"], "source.sha must equal ecr.tag"),
+        (source["tree"] == release["merge_tree_sha"], "source.tree must equal release.merge_tree_sha"),
+        (publish["workflow_sha"] == source["sha"], "publish_workflow.workflow_sha must equal source.sha"),
+        (publish["workflow_sha"] == run.get("head_sha"), "publish_workflow.workflow_sha must equal the run head"),
+        (publish["run_id"] == run_id, "publish_workflow.run_id must equal the requested run"),
+        (publish["run_attempt"] == run_attempt, "publish_workflow.run_attempt must equal the requested attempt"),
+        (publish["dispatcher"] == (run.get("actor") or {}).get("login"),
+         "publish_workflow.dispatcher must equal the run actor"),
+        (release_run["workflow_sha"] == release["base_sha"], "release_workflow.workflow_sha must equal release.base_sha"),
+        (doc["approval"]["review"]["head"] == release["head_sha"], "approval.review.head must equal release.head_sha"),
+        (doc["image"]["manifest_digest"] == ecr["digest"], "image.manifest_digest must equal ecr.digest"),
+        (ecr["digest_uri"] == f"{ecr['repository_uri']}@{ecr['digest']}", "ecr.digest_uri must use ecr.digest"),
+        (ecr["digest"] == digest, "ecr.digest must equal the requested image digest"),
+        (doc["release_artifact"]["name"] == f"release-image-{release_run['run_id']}-{release_run['run_attempt']}",
+         "release_artifact.name must match release_workflow"),
+    )
+    for holds, message in relations:
+        require(holds, "Evidence mismatch: " + message)
+    confirmed = parse_time(doc["confirmed_at"], "confirmed_at")
+    started = parse_time(job["started_at"], "publish job start time")
+    completed = parse_time(job["completed_at"], "publish job completion time")
+    require(started - CONFIRMED_SLACK <= confirmed <= completed + CONFIRMED_SLACK,
+            "Evidence confirmed_at is outside the publish job execution window")
+
+
+def check_release_merge(doc, commit, pr):
+    source, release = doc["source"], doc["release"]
+    parents = [(parent or {}).get("sha") for parent in (commit.get("parents") or [])] \
+        if isinstance(commit, dict) else []
+    require(isinstance(commit, dict) and commit.get("sha") == source["sha"]
+            and (commit.get("tree") or {}).get("sha") == source["tree"],
+            "Source commit tree does not match the evidence")
+    require(parents == [release["base_sha"], release["head_sha"]],
+            "Source commit parents must be the approved release base and head")
+    require(isinstance(pr, dict) and pr.get("number") == release["pr_number"] and pr.get("merged") is True
+            and pr.get("merge_commit_sha") == source["sha"]
+            and (pr.get("base") or {}).get("ref") == "main"
+            and ((pr.get("base") or {}).get("repo") or {}).get("full_name") == REPOSITORY
+            and (pr.get("head") or {}).get("sha") == release["head_sha"],
+            "Release PR is not merged into main as the evidence source commit")
+
+
+def check_publisher(read_file, head_sha, trusted):
+    """Compare the publisher files at the publish commit with reviewed byte hashes."""
+    require(trusted, "No reviewed ECR publisher hashes are registered; deployment stays blocked")
+    for entry in trusted:
+        require(isinstance(entry, dict) and PUBLISHER_FILES <= set(entry)
+                and all(isinstance(value, str) and HEX64.fullmatch(value) for value in entry.values()),
+                "Invalid reviewed ECR publisher entry")
+    paths = sorted(set().union(*(set(entry) for entry in trusted)))
+    actual = {path: hashlib.sha256(read_file(path, head_sha)).hexdigest() for path in paths}
+    require(any(all(actual[path] == value for path, value in entry.items()) for entry in trusted),
+            "ECR publisher files at the publish commit do not match a reviewed version")
+
+
+def verify_evidence(*, fetch, token, run, job, run_id, run_attempt, digest, account,
+                    read_file=None, download=None, trusted=None):
+    """Verify the ECR publish evidence artifact of the requested run against GitHub records."""
+    trusted = TRUSTED_PUBLISHERS if trusted is None else trusted
+    download = download or (lambda artifact_id: download_artifact(artifact_id, token))
+    read_file = read_file or (lambda path, ref: api_raw(
+        f"repos/{REPOSITORY}/contents/{urllib.parse.quote(path)}?ref={ref}", token))
+    require(account == AWS_ACCOUNT, "Unexpected AWS account")
+    head_sha = run["head_sha"]
+    check_publisher(read_file, head_sha, trusted)
+    listing = fetch(f"repos/{REPOSITORY}/actions/runs/{run_id}/artifacts"
+                    f"?name={artifact_name(run_id, run_attempt)}&per_page=100", token)
+    artifact = check_artifact(listing, run_id, run_attempt, head_sha)
+    doc = strict_json(read_evidence_zip(download(artifact["id"]), artifact["digest"]))
+    check_evidence_document(doc)
+    check_evidence_relations(doc, run_id=run_id, run_attempt=run_attempt, run=run, job=job, digest=digest)
+    check_release_merge(doc, fetch(f"repos/{REPOSITORY}/git/commits/{head_sha}", token),
+                        fetch(f"repos/{REPOSITORY}/pulls/{doc['release']['pr_number']}", token))
+    return {"image_digest": doc["ecr"]["digest"], "source_sha": doc["source"]["sha"],
+            "digest_uri": doc["ecr"]["digest_uri"]}
 
 
 def write_outputs(env, values):
@@ -189,7 +505,7 @@ def write_outputs(env, values):
             handle.write(f"{key}={value}\n")
 
 
-def validate(env, fetch=api, verify_evidence=evidence_contract_pending):
+def validate(env, fetch=api, verify_evidence=verify_evidence):
     actor = check_dispatch(env)
     inputs = check_inputs(env)
     settings = check_settings(env)
@@ -200,14 +516,19 @@ def validate(env, fetch=api, verify_evidence=evidence_contract_pending):
     run = fetch(f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}", token)
     latest = fetch(f"repos/{REPOSITORY}/actions/runs/{run_id}", token)
     source_sha = check_publish_run(run, latest, run_id, attempt)
+    publisher = run["actor"]["login"]
+    check_admin(fetch(f"repos/{REPOSITORY}/collaborators/{publisher}/permission", token), publisher)
+    job = check_publish_job(fetch(f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs"
+                                  "?per_page=100", token), run_id, attempt, source_sha)
     check_source_on_main(fetch(f"repos/{REPOSITORY}/compare/{source_sha}...{env['GITHUB_SHA']}", token))
-    evidence = verify_evidence(fetch=fetch, token=token, run=run, source_sha=source_sha,
+    evidence = verify_evidence(fetch=fetch, token=token, run=run, job=job, run_id=run_id, run_attempt=attempt,
                                digest=inputs["digest"], account=settings["account"])
+    digest_uri = f"{repository_uri()}@{inputs['digest']}"
     require(isinstance(evidence, dict) and evidence.get("image_digest") == inputs["digest"]
-            and evidence.get("source_sha") == source_sha,
+            and evidence.get("source_sha") == source_sha and evidence.get("digest_uri") == digest_uri,
             "Publish evidence does not confirm the requested digest and source commit")
     validated_attempt = field(env, "GITHUB_RUN_ATTEMPT", ATTEMPT, "workflow run attempt")
-    write_outputs(env, {"image_digest": inputs["digest"], "source_sha": source_sha,
+    write_outputs(env, {"image_digest": inputs["digest"], "source_sha": source_sha, "digest_uri": digest_uri,
                         "publish_run_id": str(run_id), "publish_run_attempt": str(attempt),
                         "validated_attempt": validated_attempt})
     lines = [f"- operation: {inputs['operation']}, dispatcher {actor} (admin)",
@@ -421,6 +742,9 @@ class Runner:
         digest = field(self.env, "IMAGE_DIGEST", DIGEST, "validated image digest")
         require(self.env.get("INPUT_IMAGE_DIGEST") == digest, "Validated digest differs from the dispatch input")
         source_sha = field(self.env, "SOURCE_SHA", SHA, "validated source SHA")
+        # The deploy target is always the digest URI; tags are only checked, never deployed.
+        require(self.env.get("DIGEST_URI") == f"{repository_uri()}@{digest}",
+                "Validated digest URI does not match the approved repository and digest")
         self.run_id = field(self.env, "GITHUB_RUN_ID", NUMBER, "workflow run ID")
         self.run_attempt = field(self.env, "GITHUB_RUN_ATTEMPT", ATTEMPT, "workflow run attempt")
         # A partial re-run reuses the earlier validate outputs without checking the

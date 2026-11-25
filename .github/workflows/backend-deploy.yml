@@ -41,9 +41,11 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       image_digest: ${{ steps.validate.outputs.image_digest }}
       source_sha: ${{ steps.validate.outputs.source_sha }}
+      digest_uri: ${{ steps.validate.outputs.digest_uri }}
       publish_run_id: ${{ steps.validate.outputs.publish_run_id }}
       publish_run_attempt: ${{ steps.validate.outputs.publish_run_attempt }}
       validated_attempt: ${{ steps.validate.outputs.validated_attempt }}
@@ -98,6 +100,7 @@ jobs:
           INPUT_IMAGE_DIGEST: ${{ inputs.image_digest }}
           IMAGE_DIGEST: ${{ needs.validate.outputs.image_digest }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          DIGEST_URI: ${{ needs.validate.outputs.digest_uri }}
           PUBLISH_RUN_ID: ${{ needs.validate.outputs.publish_run_id }}
           PUBLISH_RUN_ATTEMPT: ${{ needs.validate.outputs.publish_run_attempt }}
           VALIDATED_ATTEMPT: ${{ needs.validate.outputs.validated_attempt }}

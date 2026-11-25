@@ -4,7 +4,10 @@ No test reaches GitHub, AWS or a server: the GitHub API is a dict lookup and
 the AWS CLI is replaced by a scripted runner that records every call.
 """
 from contextlib import redirect_stdout
+import copy
 from datetime import datetime, timezone
+import functools
+import hashlib
 import importlib.util
 import io
 import json
@@ -15,6 +18,8 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+import warnings
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("backend_deploy", ROOT / "scripts" / "backend_deploy.py")
@@ -36,15 +41,26 @@ def tearDownModule():
 
 
 REPO = bd.REPOSITORY
-ACCOUNT = "111111111111"
+ACCOUNT = "478478097368"
 INSTANCE = "i-0123456789abcdef0"
 DIGEST = "sha256:" + "d" * 64
 OTHER_DIGEST = "sha256:" + "e" * 64
 SOURCE = "a" * 40
 MAIN = "b" * 40
-RUN_ID = 4242
+RUN_ID = 45670000002  # 11 digits, like real run IDs
 COMMAND = "11111111-2222-3333-4444-555555555555"
 SECRET = "SYNTHETIC-SECRET-VALUE-0001"
+URI = f"{ACCOUNT}.dkr.ecr.ap-northeast-2.amazonaws.com/toi-be"
+
+
+def publish_job(**overrides):
+    job = {"name": "Publish image", "run_id": RUN_ID, "run_attempt": 1, "head_sha": SOURCE,
+           "status": "completed", "conclusion": "success",
+           "started_at": "2026-11-26T01:25:00Z", "completed_at": "2026-11-26T01:31:00Z"}
+    job.update(overrides)
+    return job
+
+
 CHECKSUMS = [f"{c * 64}  /opt/toi/scripts/{name}.sh" for c, name in
              (("1", "deploy"), ("2", "rollback"), ("3", "deployment_common"))]
 API_OK = "api " + "4" * 64 + " sha256:" + "5" * 64 + " running healthy"
@@ -83,6 +99,7 @@ def execute_env(**overrides):
         "GITHUB_RUN_ID": "9001", "GITHUB_RUN_ATTEMPT": "1", "VALIDATED_ATTEMPT": "1",
         "GITHUB_ACTOR": "admin-user", "GITHUB_TRIGGERING_ACTOR": "admin-user",
         "PUBLISH_RUN_ID": str(RUN_ID), "PUBLISH_RUN_ATTEMPT": "1",
+        "DIGEST_URI": f"{ACCOUNT}.dkr.ecr.ap-northeast-2.amazonaws.com/toi-be@{DIGEST}",
         "AWS_SECRET_ACCESS_KEY": SECRET,
     }
     env.update(overrides)
@@ -90,9 +107,11 @@ def execute_env(**overrides):
 
 
 def publish_run(**overrides):
-    run = {"id": RUN_ID, "run_attempt": 1, "path": bd.PUBLISH_WORKFLOW, "event": "workflow_dispatch",
-           "head_branch": "main", "status": "completed", "conclusion": "success", "head_sha": SOURCE,
-           "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO}}
+    run = {"id": RUN_ID, "run_attempt": 1, "path": bd.PUBLISH_WORKFLOW, "name": "ECR Image Publish",
+           "event": "workflow_dispatch", "head_branch": "main", "status": "completed", "conclusion": "success",
+           "head_sha": SOURCE, "repository": {"full_name": REPO, "id": bd.REPOSITORY_ID},
+           "head_repository": {"full_name": REPO}, "actor": {"login": "admin-user"},
+           "triggering_actor": {"login": "admin-user"}}
     run.update(overrides)
     return run
 
@@ -104,6 +123,7 @@ def github(run=None, latest=None, permission="admin", compare="ahead"):
         f"repos/{REPO}/actions/runs/{RUN_ID}/attempts/1": run or publish_run(),
         f"repos/{REPO}/actions/runs/{RUN_ID}": latest or run or publish_run(),
         f"repos/{REPO}/compare/{SOURCE}...{MAIN}": {"status": compare},
+        f"repos/{REPO}/actions/runs/{RUN_ID}/attempts/1/jobs?per_page=100": {"jobs": [publish_job()]},
     }
 
     def fetch(path, token):
@@ -113,7 +133,8 @@ def github(run=None, latest=None, permission="admin", compare="ahead"):
 
 
 def confirmed_evidence(**context):
-    return {"image_digest": context["digest"], "source_sha": context["source_sha"]}
+    return {"image_digest": context["digest"], "source_sha": context["run"]["head_sha"],
+            "digest_uri": f"{URI}@{context['digest']}"}
 
 
 class Result:
@@ -280,6 +301,10 @@ class PublishRunTests(unittest.TestCase):
             (publish_run(), publish_run(run_attempt=2)),
             (publish_run(), publish_run(head_sha="f" * 40)),
             (publish_run(head_sha="short"), None),
+            (publish_run(name="Other"), None),
+            (publish_run(repository={"full_name": REPO, "id": 1}), None),
+            (publish_run(triggering_actor={"login": "write-user"}), None),
+            (publish_run(actor=None), None),
         ]
         for run, latest in cases:
             with self.subTest(run=run, latest=latest), self.assertRaises(bd.Blocked):
@@ -303,19 +328,20 @@ class ValidateTests(unittest.TestCase):
                 code = bd.run_validate(env, **kwargs)
             return code, output.read_text(encoding="utf-8"), stdout.getvalue()
 
-    def test_blocks_until_evidence_contract_is_integrated(self):
+    def test_blocks_until_reviewed_publisher_hashes_are_registered(self):
+        self.assertEqual(bd.TRUSTED_PUBLISHERS, ())
         code, outputs, stdout = self.run_validate(dispatch_env(), fetch=github())
         self.assertEqual(code, 1)
         self.assertEqual(outputs, "")
-        self.assertIn("evidence contract", stdout)
+        self.assertIn("No reviewed ECR publisher hashes", stdout)
         self.assertNotIn(SECRET, stdout)
 
     def test_writes_outputs_after_confirmed_evidence(self):
         code, outputs, stdout = self.run_validate(dispatch_env(GITHUB_RUN_ATTEMPT="3"), fetch=github(),
                                                   verify_evidence=confirmed_evidence)
         self.assertEqual(code, 0)
-        self.assertEqual(outputs, f"image_digest={DIGEST}\nsource_sha={SOURCE}\npublish_run_id={RUN_ID}\n"
-                                  "publish_run_attempt=1\nvalidated_attempt=3\n")
+        self.assertEqual(outputs, f"image_digest={DIGEST}\nsource_sha={SOURCE}\ndigest_uri={URI}@{DIGEST}\n"
+                                  f"publish_run_id={RUN_ID}\npublish_run_attempt=1\nvalidated_attempt=3\n")
         self.assertIn(f"publish run {RUN_ID} attempt 1", stdout)
         self.assertNotIn(SECRET, stdout)
 
@@ -332,7 +358,8 @@ class ValidateTests(unittest.TestCase):
 
     def test_evidence_mismatch_blocks(self):
         def other(**context):
-            return {"image_digest": OTHER_DIGEST, "source_sha": context["source_sha"]}
+            return {"image_digest": OTHER_DIGEST, "source_sha": context["run"]["head_sha"],
+                    "digest_uri": f"{URI}@{OTHER_DIGEST}"}
         code, outputs, _ = self.run_validate(dispatch_env(), fetch=github(), verify_evidence=other)
         self.assertEqual((code, outputs), (1, ""))
 
@@ -505,9 +532,12 @@ class ExecuteTests(unittest.TestCase):
                 self.assert_no_leak(stdout, summary)
 
     def test_digest_handoff_must_match_dispatch_input(self):
-        fake = FakeAws()
-        code, _, _, _ = run_execute(fake, execute_env(INPUT_IMAGE_DIGEST=OTHER_DIGEST))
-        self.assertEqual((code, fake.calls), (1, []))
+        for override in ({"INPUT_IMAGE_DIGEST": OTHER_DIGEST}, {"DIGEST_URI": f"{URI}:{SOURCE}"},
+                         {"DIGEST_URI": f"{URI}@{OTHER_DIGEST}"}, {"DIGEST_URI": None}):
+            with self.subTest(override=override):
+                fake = FakeAws()
+                code, _, _, _ = run_execute(fake, execute_env(**override))
+                self.assertEqual((code, fake.calls), (1, []))
 
     def test_deploy_success_is_verified_by_post_status(self):
         fake = FakeAws(**deploy_script())
@@ -660,6 +690,295 @@ class LostResponseTests(unittest.TestCase):
         code, _, _, _ = run_execute(fake)
         self.assertEqual(code, 1)
         self.assertEqual(fake.count("send-command:ToI-DeploymentStatus"), 1)
+
+
+REL_BASE, REL_HEAD, TREE = "c" * 40, "e" * 40, "1" * 40
+PUBLISHER_BYTES = {bd.PUBLISH_WORKFLOW: b"name: ECR Image Publish\n", "scripts/ecr_image_publish.py": b"print()\n"}
+TRUSTED = ({path: hashlib.sha256(data).hexdigest() for path, data in PUBLISHER_BYTES.items()},)
+ARTIFACT_ID = 9100000001
+
+
+def evidence_doc():
+    """Contract v1 example with this module's synthetic values."""
+    return {
+        "schema_version": 1, "record_type": "production", "simulation": False,
+        "publication_authorized": True, "deployable": True, "repository": REPO,
+        "source": {"sha": SOURCE, "tree": TREE},
+        "release": {"pr_number": 145, "base_sha": REL_BASE, "head_sha": REL_HEAD, "merge_tree_sha": TREE,
+                    "change_digest": "1" * 64},
+        "release_workflow": {"run_id": 45670000001, "run_attempt": 1, "workflow_sha": REL_BASE,
+                             "dispatcher": "admin-user", "official_job_id": 139400000001},
+        "approval": {"comment_id": 7168000001, "approver": "admin-user", "record_sha256": "2" * 64,
+                     "review": {"head": REL_HEAD, "blocking": 0,
+                                "record": f"https://github.com/{REPO}/pull/145#issuecomment-7168000000"}},
+        "verifier": {"files": {path: "3" * 64 for path in bd.RELEASE_VERIFIER_FILES}},
+        "release_artifact": {"id": 9000000001, "digest": "sha256:" + "7" * 64,
+                             "name": "release-image-45670000001-1"},
+        "verification": {"regression": "passed", "migration": "passed", "postgresql": "passed",
+                         "container_smoke": "passed", "image_security": "passed", "postgresql_passed": 82},
+        "image": {"platform": "linux/amd64", "archive_sha256": "8" * 64, "config_digest": "sha256:" + "9" * 64,
+                  "manifest_digest": DIGEST},
+        "ecr": {"account_id": ACCOUNT, "region": "ap-northeast-2", "repository_uri": URI, "tag": SOURCE,
+                "digest": DIGEST, "digest_uri": f"{URI}@{DIGEST}", "remote_verified": True},
+        "publish_workflow": {"run_id": RUN_ID, "run_attempt": 1, "workflow_sha": SOURCE,
+                             "dispatcher": "admin-user"},
+        "outcome": "published", "confirmed_at": "2026-11-26T01:30:00Z",
+    }
+
+
+def with_value(doc, path, value):
+    doc = copy.deepcopy(doc)
+    *parents, last = path.split(".")
+    target = doc
+    for key in parents:
+        target = target[key]
+    if value is DELETE:
+        del target[last]
+    else:
+        target[last] = value
+    return doc
+
+
+DELETE = object()
+
+
+def zipped(entries):
+    buffer = io.BytesIO()
+    with warnings.catch_warnings(), zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        warnings.simplefilter("ignore")  # duplicate names are written on purpose
+        for name, data in entries:
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+def evidence_zip(doc=None, raw=None):
+    data = raw if raw is not None else json.dumps(doc or evidence_doc()).encode()
+    return zipped([(bd.EVIDENCE_FILE, data)])
+
+
+def artifact_entry(data, **overrides):
+    entry = {"id": ARTIFACT_ID, "name": f"image-publish-{RUN_ID}-1", "expired": False,
+             "size_in_bytes": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+             "workflow_run": {"id": RUN_ID, "repository_id": bd.REPOSITORY_ID,
+                              "head_repository_id": bd.REPOSITORY_ID, "head_sha": SOURCE, "head_branch": "main"}}
+    entry.update(overrides)
+    return entry
+
+
+def merge_commit(**overrides):
+    commit = {"sha": SOURCE, "tree": {"sha": TREE}, "parents": [{"sha": REL_BASE}, {"sha": REL_HEAD}]}
+    commit.update(overrides)
+    return commit
+
+
+def release_pr(**overrides):
+    pr = {"number": 145, "merged": True, "merge_commit_sha": SOURCE, "head": {"sha": REL_HEAD},
+          "base": {"ref": "main", "repo": {"full_name": REPO}}}
+    pr.update(overrides)
+    return pr
+
+
+def evidence_github(data, listing=None, commit=None, pr=None):
+    responses = {
+        f"repos/{REPO}/actions/runs/{RUN_ID}/artifacts?name=image-publish-{RUN_ID}-1&per_page=100":
+            listing if listing is not None else {"artifacts": [artifact_entry(data)]},
+        f"repos/{REPO}/git/commits/{SOURCE}": commit or merge_commit(),
+        f"repos/{REPO}/pulls/145": pr or release_pr(),
+    }
+
+    def fetch(path, token):
+        assert token == SECRET
+        return responses[path]
+    return fetch
+
+
+class EvidenceTests(unittest.TestCase):
+    def verify(self, data=None, *, listing=None, commit=None, pr=None, trusted=TRUSTED, files=PUBLISHER_BYTES,
+               job=None, digest=DIGEST, download_data=None):
+        data = evidence_zip() if data is None else data
+        downloads = []
+
+        def download(artifact_id):
+            downloads.append(artifact_id)
+            return data if download_data is None else download_data
+        return bd.verify_evidence(
+            fetch=evidence_github(data, listing, commit, pr), token=SECRET, run=publish_run(),
+            job=job or publish_job(), run_id=RUN_ID, run_attempt=1, digest=digest, account=ACCOUNT,
+            read_file=lambda path, ref: files[path] if ref == SOURCE else b"", download=download,
+            trusted=trusted), downloads
+
+    def blocked(self, **kwargs):
+        with self.assertRaises(bd.Blocked) as caught:
+            self.verify(**kwargs)
+        return str(caught.exception)
+
+    def test_contract_example_is_accepted(self):
+        result, downloads = self.verify()
+        self.assertEqual(result, {"image_digest": DIGEST, "source_sha": SOURCE, "digest_uri": f"{URI}@{DIGEST}"})
+        self.assertEqual(downloads, [ARTIFACT_ID])
+        for outcome in ("already_present", "reconciled"):
+            self.verify(evidence_zip(with_value(evidence_doc(), "outcome", outcome)))
+
+    def test_reviewed_publisher_hashes_are_required(self):
+        self.assertIn("No reviewed ECR publisher hashes", self.blocked(trusted=()))
+        changed = dict(PUBLISHER_BYTES, **{"scripts/ecr_image_publish.py": b"print('changed')\n"})
+        self.assertIn("do not match a reviewed version", self.blocked(files=changed))
+        partial = ({bd.PUBLISH_WORKFLOW: TRUSTED[0][bd.PUBLISH_WORKFLOW]},)
+        self.assertIn("Invalid reviewed ECR publisher entry", self.blocked(trusted=partial))
+
+    def test_artifact_records_must_match_github(self):
+        data = evidence_zip()
+        cases = {
+            "missing": {"artifacts": []},
+            "duplicate": {"artifacts": [artifact_entry(data), artifact_entry(data, id=ARTIFACT_ID + 1)]},
+            "expired": {"artifacts": [artifact_entry(data, expired=True)]},
+            "other run": {"artifacts": [artifact_entry(data, workflow_run={
+                "id": RUN_ID + 1, "repository_id": bd.REPOSITORY_ID, "head_repository_id": bd.REPOSITORY_ID,
+                "head_sha": SOURCE, "head_branch": "main"})]},
+            "other repository": {"artifacts": [artifact_entry(data, workflow_run={
+                "id": RUN_ID, "repository_id": 1, "head_repository_id": 1, "head_sha": SOURCE,
+                "head_branch": "main"})]},
+            "no digest": {"artifacts": [artifact_entry(data, digest=None)]},
+            "string id": {"artifacts": [artifact_entry(data, id=str(ARTIFACT_ID))]},
+            "oversized": {"artifacts": [artifact_entry(data, size_in_bytes=bd.MAX_JSON + 1)]},
+        }
+        for name, listing in cases.items():
+            with self.subTest(name=name):
+                self.blocked(data=data, listing=listing)
+
+    def test_zip_integrity(self):
+        doc = json.dumps(evidence_doc()).encode()
+        good = evidence_zip()
+        cases = {
+            "digest mismatch": dict(data=good, download_data=evidence_zip(with_value(evidence_doc(), "outcome",
+                                                                                     "reconciled"))),
+            "extra file": dict(data=zipped([(bd.EVIDENCE_FILE, doc), ("notes.txt", b"x")])),
+            "duplicate file": dict(data=zipped([(bd.EVIDENCE_FILE, doc), (bd.EVIDENCE_FILE, doc)])),
+            "nested path": dict(data=zipped([("dir/" + bd.EVIDENCE_FILE, doc)])),
+            "traversal": dict(data=zipped([("../" + bd.EVIDENCE_FILE, doc)])),
+            "wrong name": dict(data=zipped([("evidence.json", doc)])),
+            "not a zip": dict(data=b"not a zip"),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name=name):
+                self.blocked(**kwargs)
+        with patch.object(bd, "MAX_JSON", len(doc) - 1):
+            with self.assertRaises(bd.Blocked):
+                bd.read_evidence_zip(good, "sha256:" + hashlib.sha256(good).hexdigest())
+
+    def test_strict_json(self):
+        text = json.dumps(evidence_doc())
+        cases = {
+            "duplicate key": text.replace('"outcome": "published"', '"outcome": "published", "outcome": "published"'),
+            "nan": text.replace('"postgresql_passed": 82', '"postgresql_passed": NaN'),
+            "infinity": text.replace('"postgresql_passed": 82', '"postgresql_passed": Infinity'),
+            "not json": "{",
+        }
+        for name, raw in cases.items():
+            with self.subTest(name=name):
+                self.blocked(data=evidence_zip(raw=raw.encode()))
+        self.blocked(data=evidence_zip(raw=b"\xff\xfe{}"))
+
+    def test_production_markers_and_strict_types(self):
+        cases = [
+            ("schema_version", 2), ("schema_version", "1"), ("schema_version", True),
+            ("record_type", "simulation"), ("simulation", True), ("simulation", 0),
+            ("publication_authorized", False), ("publication_authorized", "true"),
+            ("deployable", False), ("deployable", 1), ("ecr.remote_verified", False),
+            ("outcome", "skipped"), ("verification.regression", "failed"), ("verification.image_security", True),
+            ("verification.postgresql_passed", 81), ("verification.postgresql_passed", "82"),
+            ("verification.postgresql_passed", 82.0), ("image.platform", "linux/arm64"),
+            ("approval.review.blocking", False), ("approval.review.blocking", 1),
+            ("publish_workflow.run_id", str(RUN_ID)), ("publish_workflow.run_attempt", True),
+            ("release.pr_number", 0), ("ecr.account_id", int(ACCOUNT)), ("ecr.region", "us-east-1"),
+            ("source.sha", SOURCE.upper()), ("source.tree", "1" * 39), ("image.archive_sha256", "8" * 63),
+            ("release_artifact.digest", "7" * 64), ("confirmed_at", "2026-11-26 01:30:00"),
+            ("confirmed_at", "2026-11-26T01:30:00+09:00"), ("approval.review.record", "https://example.com/x"),
+            ("repository", "fork/walkwithdog-BE"), ("extra", 1), ("ecr.extra", 1), ("image.platform", DELETE),
+            ("verifier.files", {".github/workflows/ecr-image-publish.yml": "3" * 64}),
+        ]
+        for path, value in cases:
+            with self.subTest(path=path, value=value):
+                self.blocked(data=evidence_zip(with_value(evidence_doc(), path, value)))
+
+    def test_field_relations(self):
+        other_sha, other_digest = "f" * 40, OTHER_DIGEST
+        cases = [
+            ("ecr.tag", other_sha), ("release.merge_tree_sha", other_sha), ("publish_workflow.workflow_sha", other_sha),
+            ("publish_workflow.run_id", RUN_ID + 1), ("publish_workflow.run_attempt", 2),
+            ("publish_workflow.dispatcher", "someone-else"), ("release_workflow.workflow_sha", other_sha),
+            ("approval.review.head", other_sha), ("image.manifest_digest", other_digest),
+            ("ecr.digest_uri", f"{URI}:{SOURCE}"), ("ecr.digest_uri", f"{URI}@{other_digest}"),
+            ("ecr.repository_uri", f"{ACCOUNT}.dkr.ecr.ap-northeast-2.amazonaws.com/other"),
+            ("release_artifact.name", "release-image-45670000001-2"),
+            ("confirmed_at", "2026-11-26T01:20:00Z"), ("confirmed_at", "2026-11-26T01:40:00Z"),
+        ]
+        for path, value in cases:
+            with self.subTest(path=path):
+                self.blocked(data=evidence_zip(with_value(evidence_doc(), path, value)))
+        both = with_value(with_value(evidence_doc(), "ecr.digest", other_digest), "image.manifest_digest",
+                          other_digest)
+        both = with_value(both, "ecr.digest_uri", f"{URI}@{other_digest}")
+        self.assertIn("requested image digest", self.blocked(data=evidence_zip(both)))
+
+    def test_release_merge_must_match_github(self):
+        cases = {
+            "tree": dict(commit=merge_commit(tree={"sha": "f" * 40})),
+            "swapped parents": dict(commit=merge_commit(parents=[{"sha": REL_HEAD}, {"sha": REL_BASE}])),
+            "single parent": dict(commit=merge_commit(parents=[{"sha": REL_BASE}])),
+            "not merged": dict(pr=release_pr(merged=False)),
+            "other merge commit": dict(pr=release_pr(merge_commit_sha="f" * 40)),
+            "other base": dict(pr=release_pr(base={"ref": "dev", "repo": {"full_name": REPO}})),
+            "other head": dict(pr=release_pr(head={"sha": "f" * 40})),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name=name):
+                self.blocked(**kwargs)
+
+    def test_publish_job_must_succeed_in_the_attempt(self):
+        bd.check_publish_job({"jobs": [publish_job(), {"name": "Validate release"}]}, RUN_ID, 1, SOURCE)
+        for jobs in ({"jobs": []}, {"jobs": [publish_job(), publish_job()]},
+                     {"jobs": [publish_job(conclusion="failure")]}, {"jobs": [publish_job(status="in_progress")]},
+                     {"jobs": [publish_job(run_attempt=2)]}, {"jobs": [publish_job(head_sha="f" * 40)]},
+                     {"jobs": [publish_job(completed_at=None)]}):
+            with self.subTest(jobs=jobs), self.assertRaises(bd.Blocked):
+                bd.check_publish_job(jobs, RUN_ID, 1, SOURCE)
+
+    def test_validate_end_to_end_with_reviewed_publisher(self):
+        data = evidence_zip()
+        base = github()
+        extra = evidence_github(data)
+
+        def fetch(path, token):
+            try:
+                return base(path, token)
+            except KeyError:
+                return extra(path, token)
+        verifier = functools.partial(bd.verify_evidence, trusted=TRUSTED, download=lambda _id: data,
+                                     read_file=lambda path, ref: PUBLISHER_BYTES[path])
+        code, outputs, stdout = ValidateTests.run_validate(self, dispatch_env(), fetch=fetch,
+                                                           verify_evidence=verifier)
+        self.assertEqual(code, 0, stdout)
+        self.assertIn(f"digest_uri={URI}@{DIGEST}", outputs)
+        self.assertNotIn(SECRET, stdout)
+
+    def test_non_admin_publisher_blocks_before_evidence(self):
+        base = github()
+
+        def fetch(path, token):
+            if path.endswith("/collaborators/publisher-user/permission"):
+                return {"user": {"login": "publisher-user"}, "permission": "write"}
+            return base(path, token)
+        run = publish_run(actor={"login": "publisher-user"}, triggering_actor={"login": "publisher-user"})
+
+        def never(**_context):
+            raise AssertionError("evidence must not be read")
+        responses = {f"repos/{REPO}/actions/runs/{RUN_ID}/attempts/1": run, f"repos/{REPO}/actions/runs/{RUN_ID}": run}
+
+        def fetch_runs(path, token):
+            return responses.get(path) or fetch(path, token)
+        code, outputs, _ = ValidateTests.run_validate(self, dispatch_env(), fetch=fetch_runs, verify_evidence=never)
+        self.assertEqual((code, outputs), (1, ""))
 
 
 class WorkflowAndPolicyTests(unittest.TestCase):
