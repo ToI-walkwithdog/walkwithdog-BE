@@ -7,6 +7,14 @@
 - `scripts/check_runtime_env.py`는 템플릿과 실제 배포 설정을 구분해 읽기 전용으로 검사한다. 비밀값은 출력하지 않는다. 일반 인증 테스트는 고정 OTP 환경변수와 분리하고 루트 `.env`에는 고정 OTP 값을 두지 않는다. 테스트, 리뷰, CI 결과는 #128 PR을 참조한다.
 - 실제 EC2 환경 파일 작성, DB 변경, AWS 설정 및 배포는 별도 승인 대상이다. 최초 시연 서버 배포 전 설정 검증, Mock SMS, 접근 제한 및 프록시 뒤 요청 제한을 확인한다. [EC2 설치](../deployment/EC2_SETUP.md), [실행 절차](../deployment/RUNBOOK.md)
 
+## 서비스 정책 설정 (#118, 16-9)
+
+- 시연용 문서는 `policies/terms/terms-demo-v1.md`와 `policies/privacy/privacy-demo-v1.md`다. 실제 법률 문구가 아니며, 운영 적용 전에 승인된 약관과 개인정보 처리방침으로 교체해야 한다. 문서 조회 버전은 `TERMS_DOCUMENT_VERSION`, `PRIVACY_DOCUMENT_VERSION`, 서약 버전은 `PLEDGE_CURRENT_VERSION`, 필수 동의 설정은 `PRIVACY_REQUIRED_CONSENTS`와 일치시킨다.
+- 정책 manifest의 `sha256`은 UTF-8 본문에서 CRLF를 LF로 정규화한 바이트 기준이다. 런타임도 같은 정규화를 적용하므로 Windows와 Linux 체크아웃에서 동일하다.
+- `SHELTER_CODE_HMAC_KEY`는 32바이트 난수(64자리 hex)를 권장하고 `deploy/.env.api`에만 저장한다. `VOLUNTEER_LEVEL_POLICY_VERSION`과 `VOLUNTEER_LEVEL_POLICY_START_AT`은 함께 설정해야 레벨 평가가 켜진다. 실제 비밀값과 운영 시작 시각은 이 저장소나 테스트 문서에 기록하지 않는다.
+- 이 작업은 환경변수 전달 문서와 설정 동작 테스트만 구성한다. 법률 검토, 실서버 파일 수정, DB 적용 및 배포는 별도 승인 후 진행한다.
+- 로컬 전체 테스트는 `DATABASE_URL=sqlite:// python -m pytest -q` 기준 920 passed, 231 skipped, 47 warnings였다. PostgreSQL 전용 그룹은 격리 테스트 DB URL을 설정하지 않아 skip됐으며, CI에서 disposable PostgreSQL로 다시 검증해야 한다. 테스트 수집 인벤토리는 1,151개 수집 ID와 일치하도록 갱신했다.
+
 ## Mock SMS 테스트 환경 (#124)
 
 - 시연과 테스트 서버는 SOLAPI 없이 Mock SMS를 쓴다. `SMS_MOCK_FIXED_CODE`(ASCII 숫자 6자리)가 있으면 모든 요청의 인증번호가 그 값이 된다. `SMS_PROVIDER=mock`이고 `APP_ENV`가 `local`, `development`, `test`일 때만 적용되며, 그 밖의 조합에 값이 있으면 두 발송 API가 503 `SMS_DELIVERY_UNAVAILABLE`이고 아무것도 기록하지 않는다. 빈 값이나 미설정이면 기존 무작위 인증번호다. 값은 저장소, Issue, PR, 로그에 남기지 않는다.
