@@ -94,7 +94,7 @@ def _read_document(kind: str, version: str) -> PolicyDocument:
     except (TypeError, ValueError, OverflowError):
         raise PolicyDocumentUnavailable(kind, "invalid effective timestamp") from None
     body = _read_markdown(directory, kind, entry.get("file"))
-    checksum = sha256(body).hexdigest()
+    checksum = sha256(body.replace(b"\r\n", b"\n")).hexdigest()
     if checksum != entry.get("sha256"):
         raise PolicyDocumentUnavailable(kind, "checksum mismatch")
     try:

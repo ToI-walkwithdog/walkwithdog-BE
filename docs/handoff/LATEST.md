@@ -7,6 +7,14 @@
 - `scripts/check_runtime_env.py`는 템플릿과 실제 배포 설정을 구분해 읽기 전용으로 검사한다. 비밀값은 출력하지 않는다. 일반 인증 테스트는 고정 OTP 환경변수와 분리하고 루트 `.env`에는 고정 OTP 값을 두지 않는다. 테스트, 리뷰, CI 결과는 #128 PR을 참조한다.
 - 실제 EC2 환경 파일 작성, DB 변경, AWS 설정 및 배포는 별도 승인 대상이다. 최초 시연 서버 배포 전 설정 검증, Mock SMS, 접근 제한 및 프록시 뒤 요청 제한을 확인한다. [EC2 설치](../deployment/EC2_SETUP.md), [실행 절차](../deployment/RUNBOOK.md)
 
+## 서비스 정책 설정 (#118, 16-9)
+
+- 시연용 문서는 `policies/terms/terms-demo-v1.md`와 `policies/privacy/privacy-demo-v1.md`다. 실제 법률 문구가 아니며, 운영 적용 전에 승인된 약관과 개인정보 처리방침으로 교체해야 한다. 문서 조회 버전은 `TERMS_DOCUMENT_VERSION`, `PRIVACY_DOCUMENT_VERSION`, 서약 버전은 `PLEDGE_CURRENT_VERSION`, 필수 동의 설정은 `PRIVACY_REQUIRED_CONSENTS`와 일치시킨다.
+- 정책 manifest의 `sha256`은 UTF-8 본문에서 CRLF를 LF로 정규화한 바이트 기준이다. 런타임도 같은 정규화를 적용하므로 Windows와 Linux 체크아웃에서 동일하다.
+- `SHELTER_CODE_HMAC_KEY`는 32바이트 난수(64자리 hex)를 권장하고 `deploy/.env.api`에만 저장한다. `VOLUNTEER_LEVEL_POLICY_VERSION`과 `VOLUNTEER_LEVEL_POLICY_START_AT`은 함께 설정해야 레벨 평가가 켜진다. 실제 비밀값과 운영 시작 시각은 이 저장소나 테스트 문서에 기록하지 않는다.
+- 이 작업은 환경변수 전달 문서와 설정 동작 테스트만 구성한다. 법률 검토, 실서버 파일 수정, DB 적용 및 배포는 별도 승인 후 진행한다.
+- 로컬 전체 테스트는 `DATABASE_URL=sqlite:// python -m pytest -q` 기준 920 passed, 231 skipped, 47 warnings였다. PostgreSQL 전용 그룹은 격리 테스트 DB URL을 설정하지 않아 skip됐으며, CI에서 disposable PostgreSQL로 다시 검증해야 한다. 테스트 수집 인벤토리는 1,151개 수집 ID와 일치하도록 갱신했다.
+
 ## Mock SMS 테스트 환경 (#124)
 
 - 시연과 테스트 서버는 SOLAPI 없이 Mock SMS를 쓴다. `SMS_MOCK_FIXED_CODE`(ASCII 숫자 6자리)가 있으면 모든 요청의 인증번호가 그 값이 된다. `SMS_PROVIDER=mock`이고 `APP_ENV`가 `local`, `development`, `test`일 때만 적용되며, 그 밖의 조합에 값이 있으면 두 발송 API가 503 `SMS_DELIVERY_UNAVAILABLE`이고 아무것도 기록하지 않는다. 빈 값이나 미설정이면 기존 무작위 인증번호다. 값은 저장소, Issue, PR, 로그에 남기지 않는다.
@@ -178,3 +186,26 @@
   - 로컬 환경에 PostgreSQL(`127.0.0.1:5432`) 및 `psql` 바이너리가 미구동/미설치 상태여서 `tests/test_apply_migrations_postgres.py` 3건을 포함한 PostgreSQL 통합 테스트(총 231 skipped)는 실행하지 못함
   - 실제 개발 DB 계정의 `pg_control_system()` 실행 권한 여부(superuser/`pg_monitor`/명시적 `EXECUTE` 부여 여부는 실제 DB 미접속으로 확인하지 못함)
 
+
+## 16-8 Kakao 위치 판별 설정 (#117)
+
+- 프로덕션 코드(`app/location_geocoder.py`, `app/routers/regions.py`, `app/region_service.py`)는 변경하지 않고, 결정 사항·설정 절차·16-3 환경변수 목록·테스트 보강을 완료했습니다.
+- **확정 및 보류 결정 사항**:
+  - **시연/개발 환경 호출**: Kakao 실제 API(`coord2regioncode`) 호출 사용 (`LOCATION_GEOCODING_PROVIDER=kakao`, `LOCATION_EXTERNAL_TRANSFER_ENABLED=true`).
+  - **고지 및 동의 범위**: OS 위치 권한 허용 + 서비스 내 위치정보 이용 고지 후 호출하며, 외부 제3자 저장 없이 실시간 좌표 변환만 수행합니다(서버 로그·DB·캐시에 좌표 원문 미저장, `Cache-Control: no-store`).
+  - **키 발급 및 배치 담당**: 미정(운영 전 결정 예정). `KAKAO_REST_API_KEY`는 배포 호스트의 `.env.api`(권한 `0600`)에만 두며, 저장소·Issue·로그에 남기지 않습니다.
+  - **호출 한도 및 수동 검증**: Kakao 무료 일일 쿼터 한도 내 사용. 수동 검증은 배포 호스트 `.env.api` 설정 후 사용자가 직접 수행하며, 이번 작업에서는 실제 키를 호출하지 않았습니다.
+- **16-3 환경변수 전달 목록** (`.env.example`, `deploy/.env.example` 반영 완료):
+  - `LOCATION_GEOCODING_PROVIDER` (**비비밀**): `kakao` (시연/개발·운영) 또는 `mock` (`APP_ENV`가 `local`/`development`/`test`일 때만 허용)
+  - `LOCATION_EXTERNAL_TRANSFER_ENABLED` (**비비밀**): `true` (고지·동의 후 활성화, 미설정/그 외 값은 `transfer_disabled` 503)
+  - `KAKAO_REST_API_KEY` (**비밀**): 배포 호스트 `.env.api`(0600) 전용. 누락 또는 공백이면 `provider_configuration` 503
+- **테스트 보강** ([test_location_resolution.py](file:///d:/workspace/Toi%20Prj/walkwithdog-BE-16-4/tests/test_location_resolution.py)):
+  - `test_oversized_provider_response_is_unavailable`: `MAX_RESPONSE_BYTES`(64KB) 초과 응답 시 503 `GEOCODING_UNAVAILABLE` (`provider_response`) 확인
+  - `test_whitespace_kakao_api_key_is_rejected_without_network_call`: 공백 전용 키 입력 시 외부 호출 없이 503 (`provider_configuration`) 확인
+  - `test_kakao_transport_errors_never_leak_key_or_coordinates`: `HTTPError`/`TimeoutError`/`URLError` 경로에서 응답·로그에 키와 좌표 미노출 확인
+- 테스트 실행 명령 및 결과:
+  - `.venv\Scripts\python.exe -m pytest -q tests/test_location_resolution.py` → `53 passed in 4.61s`
+  - `dev_test_report --collect-only` + `dev_gate inventory` → `1152 tests collected`, `docs/dev-automation/test-baseline.json` 갱신 완료
+- 확인하지 못한 것:
+  - 실제 `KAKAO_REST_API_KEY`를 사용한 Kakao `coord2regioncode` API 수동 연동 검증(배포 호스트 `.env.api` 설정 후 사용자 직접 수행 예정)
+  - `KAKAO_REST_API_KEY` 발급 및 `.env.api` 배치 담당자 확정(운영 전 결정 예정)

@@ -111,6 +111,8 @@ class PolicyDocumentTests(unittest.TestCase):
             [],
             [terms, terms, privacy],
             [{**terms, "title": " "}, privacy],
+            [{**terms, "effective_at": None}, privacy],
+            [{**terms, "effective_at": "not-a-timestamp"}, privacy],
             [{**terms, "effective_at": "2026-12-01T00:00:00"}, privacy],
             [{**terms, "file": "privacy/privacy-test-v1.md"}, privacy],
             [{**terms, "file": "terms/../outside.md"}, privacy],
@@ -155,4 +157,5 @@ class PolicyDocumentTests(unittest.TestCase):
         entries = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))["documents"]
         for entry in entries:
             with self.subTest(file=entry["file"]):
-                self.assertEqual(sha256((directory / entry["file"]).read_bytes()).hexdigest(), entry["sha256"])
+                content = (directory / entry["file"]).read_bytes().replace(b"\r\n", b"\n")
+                self.assertEqual(sha256(content).hexdigest(), entry["sha256"])
