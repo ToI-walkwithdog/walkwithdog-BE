@@ -3,7 +3,7 @@
 The main flows run on a schema built only by the checked-in SQL files, in an order that satisfies
 every manifest `requires`, without create_all(): the base tables of a dev database before 016
 (005, 006, 007, 014, 015), then 002, 016_onboarding_signup, 017_remove_user_email, 018_user_consents,
-019, 023, 024, 025, 022, 026, 027, 035 and 036. Account exit reads activity tables (chat, matching) that those files do not create, so
+019, 023, 024, 025, 022, 026, 027, 035, 036 and 037. Account exit reads activity tables (chat, matching) that those files do not create, so
 its scenario runs on the model schema instead.
 
 Synthetic accounts and regions only. SMS goes to the in-memory MockSmsProvider; nothing is sent.
@@ -32,6 +32,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.routers import (age_review, auth, onboarding_basic, onboarding_experience, onboarding_routine,
                              regions, users)
     from app.sms_provider import MockSmsProvider, get_sms_provider
+    from app.phone_verification_service import SmsDispatcher, get_sms_dispatcher
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -60,7 +61,8 @@ ONBOARDING_CHAIN = ("002_auth_sessions.sql", "016_onboarding_signup.sql", "017_r
                     "024_onboarding_basic_info.sql", "025_onboarding_dog_experience.sql", "022_regions.sql",
                     "026_onboarding_walking_routine.sql", "027_onboarding_agreements.sql",
                     "035_profile_phone_change.sql",  # Issue #103: requires 024 only
-                    "036_walk_preferences.sql")  # Issue #105: base users only; sign-up exit deletes it
+                    "036_walk_preferences.sql",  # Issue #105: base users only; sign-up exit deletes it
+                    "037_phone_verification_suppressed.sql")  # Issue #110: requires 024
 REGIONS = (("11", "서울특별시", LEVEL_SIDO, None), ("11110", "종로구", LEVEL_SIGUNGU, "11"),
            ("11680", "강남구", LEVEL_SIGUNGU, "11"), ("26", "부산광역시", LEVEL_SIDO, None),
            ("26350", "해운대구", LEVEL_SIGUNGU, "26"), ("36", "세종특별자치시", LEVEL_SIDO, None),
@@ -200,6 +202,8 @@ class OnboardingIntegrationPostgresTests(unittest.TestCase):
         app.dependency_overrides[get_db] = test_db
         app.dependency_overrides[get_clock] = lambda: (lambda: self.now)
         app.dependency_overrides[get_sms_provider] = lambda: self.sms
+        self.dispatcher = SmsDispatcher(inline=True)  # delivery runs inside the request (#110)
+        app.dependency_overrides[get_sms_dispatcher] = lambda: self.dispatcher
         # Per-IP limits are verified in test_rate_limit; one flow here signs up several times.
         for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER, auth.LOGIN_RATE_LIMITER):
             app.dependency_overrides[limiter] = lambda: None
@@ -547,13 +551,15 @@ class OnboardingIntegrationPostgresTests(unittest.TestCase):
         token = self.log_in()
         self.pledge(token)
         self.sms.next_outcome = ["failed"]
-        self.assert_error(self.send_code(token), 503, "SMS_DELIVERY_UNAVAILABLE", {})
+        # Issue #110: the send is accepted (200); the provider's refusal stays internal, and
+        # confirming the failed request answers like a wrong code.
+        self.assertEqual(self.send_code(token).status_code, 200)
         with self.Session() as db:
             failed = db.query(PhoneVerification).one()
             self.assertEqual(failed.send_status, "FAILED")
         confirm = self.call("POST", "/users/me/phone-verifications/confirm", token,
                             json={"verification_id": str(failed.id), "code": "123456"})
-        self.assert_error(confirm, 409, "VERIFICATION_NOT_SENT")
+        self.assert_error(confirm, 422, "VERIFICATION_CODE_INVALID")
         self.now += timedelta(seconds=61)
         self.assertEqual(self.ok(self.save_basic(token, self.verified(token)))["next_step"], "PET_EXPERIENCE")
         with self.Session() as db:

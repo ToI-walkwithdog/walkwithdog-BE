@@ -1,5 +1,16 @@
 # 작업 인수인계
 
+## 인증번호 발송의 등록 여부 비노출 (#110)
+
+- 대상은 `POST /users/me/phone-verifications`(온보딩)와 `POST /users/me/profile/phone-verifications`(프로필 번호 변경)입니다. 다른 계정에 등록된 번호인지 발송과 확인 응답으로 구분할 수 없습니다.
+- 발송 200 `{verification_id, expires_in_seconds, resend_after_seconds}`는 **서버의 발송 요청 접수**이며 실제 문자 발송이나 수신을 뜻하지 않습니다. 503 `SMS_DELIVERY_UNAVAILABLE`은 공급자 미설정이나 발송 대기열 포화일 때만이고, 아무것도 기록하거나 차감하지 않습니다. 발송 409 `PHONE_ALREADY_REGISTERED`는 없어졌습니다.
+- 처리 순서는 발송 슬롯 확보, 계정 상태와 서약(또는 Step 1) 확인, 일일 카운터 차감, 재발송 간격 확인, 등록 여부 확인입니다. 번호 카운터 행의 잠금이 서로 다른 계정의 같은 번호 요청을 직렬화합니다. 거절(재발송 간격, 일일 한도, DB 오류)은 차감까지 전부 롤백합니다.
+- 다른 계정에 등록된 번호의 요청은 `SUPPRESSED`로 저장합니다. 인증번호는 만들어 HMAC만 저장하고 버리며, 공급자를 호출하지 않습니다. 어떤 인증번호로도 인증되지 않고 저장에도 쓰이지 않습니다. 한도와 최신 요청 규칙은 실제 발송과 같습니다.
+- 실제 발송은 프로세스 내부 Thread Pool(worker 2개, 대기 20개)에서 독립 세션으로 합니다. 발송 직전에 `users` FOR SHARE, 요청 FOR UPDATE 순서로 잠그고, 존재, `PENDING`, 만료 전, 최신 요청, ACTIVE 계정일 때만 `SENDING`으로 바꿉니다. 아니면 `FAILED`이고 공급자를 호출하지 않습니다. 공급자 호출 중에는 트랜잭션이 없습니다. 결과는 `SENDING`일 때만 `SENT`, `FAILED`, `UNKNOWN`으로 기록하며, 그사이 인증된 요청은 항상 `SENT`가 되고 인증 정보는 바뀌지 않습니다. 자동 재발송은 없습니다.
+- 확인은 DB만 사용합니다(공급자 lookup 없음). 틀린 인증번호는 발송 상태와 무관하게 422 `VERIFICATION_CODE_INVALID`이고 실패 횟수에 반영됩니다. 맞는 인증번호는 `SENDING`, `SENT`, `UNKNOWN`에서만 인증됩니다. 확인 409 `VERIFICATION_NOT_SENT`는 없어졌습니다. Step 1 저장과 프로필 PATCH도 같은 상태 조건으로 증빙을 다시 확인하고, 소유 증명 후의 409 `PHONE_ALREADY_REGISTERED`는 유지합니다.
+- 전제와 남는 위험: 발송 슬롯은 프로세스별이며 배포는 API worker 1개입니다. 프로세스가 대기 중이나 발송 중에 종료되면 요청이 `PENDING`이나 `SENDING`으로 남고 사용자가 60초 뒤 재요청합니다(남은 행은 만료 후 정리 작업이 삭제). 슬롯 반납 시점 차이를 통한 과부하 관찰과 번호별 일일 한도 소진은 `docs/TODO.md`의 16-10 전 검토 항목입니다.
+- 마이그레이션 `037_phone_verification_suppressed.sql`(상태 CHECK 교체, 기존 행 유지, 재실행 가능, 선행 024)이 필요합니다. 개발 DB 적용은 16-6단계에서 별도 승인 후 진행합니다.
+
 ## 산책 선호 설정 (#105)
 
 - `GET /users/me/walk-preferences`, `PATCH /users/me/walk-preferences`를 추가했습니다. ACTIVE 일반 사용자만 사용할 수 있고, 서약과 온보딩 완료는 요구하지 않습니다. 보호소와 관리자는 403 `PREFERENCE_NOT_ALLOWED`, 나이 확인 대기 계정은 403 `AGE_REVIEW_REQUIRED`입니다. 응답은 `Cache-Control: private, no-store`입니다.

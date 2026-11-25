@@ -508,6 +508,20 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "037_phone_verification_suppressed.sql",
+      "sha256": "13cb7878a3daca395acf28df6f931ebd367995afba376d63521e65ef2f9162c3",
+      "requires": [
+        "024_onboarding_basic_info.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [

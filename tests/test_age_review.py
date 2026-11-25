@@ -22,6 +22,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.rate_limit import FailureLimiter
     from app.routers import age_review, auth, onboarding_basic, users
     from app.sms_provider import MockSmsProvider, get_sms_provider
+    from app.phone_verification_service import SmsDispatcher, get_sms_dispatcher
     from app.walk_models import VolunteerProfile, Walk, WalkIncident, WalkRequest
 
 from fastapi import FastAPI
@@ -88,6 +89,8 @@ class AgeReviewTestCase(unittest.TestCase):
         app.dependency_overrides[get_db] = test_db
         app.dependency_overrides[get_clock] = lambda: self.clock
         app.dependency_overrides[get_sms_provider] = lambda: MockSmsProvider()
+        self.dispatcher = SmsDispatcher(inline=True)  # delivery runs inside the request (#110)
+        app.dependency_overrides[get_sms_dispatcher] = lambda: self.dispatcher
         for limiter_dependency in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER, auth.LOGIN_RATE_LIMITER):
             app.dependency_overrides[limiter_dependency] = lambda: None
         self.client = TestClient(app)

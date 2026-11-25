@@ -11,7 +11,13 @@ Result meanings:
 - ACCEPTED: the provider accepted the message. It does not mean the phone received it.
 - FAILED: the provider reported a definite failure.
 - SmsProviderTimeout or any other exception: the outcome is unknown (UNKNOWN). The
-  caller must not resend automatically; lookup() may settle it later.
+  caller must not resend automatically.
+
+Since Issue #110 the provider is called by the delivery job of
+app.phone_verification_service (a bounded in-process pool), after the send API has
+already answered, and never while a database transaction is open. A provider result
+only changes the request's internal status; the API answers never depend on it.
+confirm() no longer calls lookup(): a matching code is itself proof of delivery.
 """
 from dataclasses import dataclass, field
 import os

@@ -19,6 +19,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.routers import (age_review, auth, onboarding_basic, onboarding_experience, onboarding_routine,
                              users)
     from app.sms_provider import MockSmsProvider, get_sms_provider
+    from app.phone_verification_service import SmsDispatcher, get_sms_dispatcher
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -80,6 +81,8 @@ class UsersMeOnboardingTests(unittest.TestCase):
         app.dependency_overrides[get_db] = test_db
         app.dependency_overrides[get_clock] = lambda: self.clock
         app.dependency_overrides[get_sms_provider] = lambda: self.sms
+        self.dispatcher = SmsDispatcher(inline=True)  # delivery runs inside the request (#110)
+        app.dependency_overrides[get_sms_dispatcher] = lambda: self.dispatcher
         for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER, auth.LOGIN_RATE_LIMITER):
             app.dependency_overrides[limiter] = lambda: None
         self.client = TestClient(app)

@@ -19,6 +19,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
                             UserPledgeAcknowledgement, UserRole, VolunteerOnboardingBasic)
     from app.onboarding_common import age_years, first_incomplete_step, get_clock
     from app.phone_verification_service import purge_phone_verifications
+    from app.phone_verification_service import SmsDispatcher, get_sms_dispatcher
     from app.routers import auth, onboarding_basic, users
     from app.sms_provider import (MockSmsProvider, SolapiSmsProvider, configured_sms_provider, get_sms_provider,
                                   SmsProviderUnavailable)
@@ -72,6 +73,8 @@ class Step1TestCase(unittest.TestCase):
         app.dependency_overrides[get_db] = test_db
         app.dependency_overrides[get_clock] = lambda: self.clock
         app.dependency_overrides[get_sms_provider] = lambda: self.sms
+        self.dispatcher = SmsDispatcher(inline=True)  # delivery runs inside the request (#110)
+        app.dependency_overrides[get_sms_dispatcher] = lambda: self.dispatcher
         for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER, auth.LOGIN_RATE_LIMITER):
             app.dependency_overrides[limiter] = lambda: None
         self.app = app
@@ -236,9 +239,21 @@ class PhoneRuleTests(Step1TestCase):
         self.assertEqual(self.sms.outbox[-1]["to"], PHONE_E164)
 
     def test_number_registered_by_another_account_is_refused(self):
+        # Issue #110: the send answers like any other (no disclosure); the request is
+        # SUPPRESSED, nothing is sent, and no code can verify it or save Step 1.
         self.save(self.verified(PHONE, user_id=2), user_id=2)
         self.clock.advance(seconds=61)
-        self.assert_error(self.send(PHONE, user_id=1), 409, "PHONE_ALREADY_REGISTERED", {"field": "phone_number"})
+        sent_before = len(self.sms.outbox)
+        with patch("app.phone_verification_service.secrets.randbelow", return_value=123456):
+            response = self.send(PHONE, user_id=1)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(set(response.json()["data"]), {"verification_id", "expires_in_seconds", "resend_after_seconds"})
+        self.assertEqual(len(self.sms.outbox), sent_before)
+        verification_id = response.json()["data"]["verification_id"]
+        with self.Session() as db:
+            self.assertEqual(db.get(PhoneVerification, uuid.UUID(verification_id)).send_status, "SUPPRESSED")
+        self.assert_error(self.confirm(verification_id, "123456", user_id=1), 422, "VERIFICATION_CODE_INVALID")
+        self.assert_error(self.save(verification_id, user_id=1), 409, "PHONE_VERIFICATION_REQUIRED")
 
 
 class TimingTests(Step1TestCase):
@@ -349,11 +364,13 @@ class DailyLimitTests(Step1TestCase):
 
 class ProviderTests(Step1TestCase):
     def test_definite_failure_is_503_failed_and_cannot_be_confirmed(self):
+        # Issue #110: the send was accepted (200); the provider's refusal is internal only.
         self.sms.next_outcome = ["failed"]
-        self.assert_error(self.send(), 503, "SMS_DELIVERY_UNAVAILABLE", {})
+        self.assertEqual(self.send().status_code, 200)
         (row,) = self.rows(PhoneVerification)
         self.assertEqual(row.send_status, "FAILED")
-        self.assert_error(self.confirm(str(row.id), "123456"), 409, "VERIFICATION_NOT_SENT")
+        self.assert_error(self.confirm(str(row.id), "123456"), 422, "VERIFICATION_CODE_INVALID")  # same as a wrong code
+        self.assertEqual(self.rows(PhoneVerification)[0].attempt_count, 1)
 
     def test_timeout_is_unknown_never_resent_and_settled_by_lookup(self):
         log = io.StringIO()
@@ -362,18 +379,14 @@ class ProviderTests(Step1TestCase):
         self.addCleanup(logging.getLogger().removeHandler, handler)
         self.sms.next_outcome = ["timeout"]
         with patch("app.phone_verification_service.secrets.randbelow", return_value=23841):
-            self.assert_error(self.send(), 503, "SMS_DELIVERY_UNAVAILABLE", {})
+            self.assertEqual(self.send().status_code, 200)  # accepted; the outcome is internal (#110)
         (row,) = self.rows(PhoneVerification)
         self.assertEqual((row.send_status, self.sms.outbox), ("UNKNOWN", []))
         verification_id = str(row.id)
-        # Still unknown: refused, no failure counted, no resend.
-        self.assert_error(self.confirm(verification_id, "023841"), 409, "VERIFICATION_NOT_SENT")
-        self.assertEqual(self.rows(PhoneVerification)[0].attempt_count, 0)
-        # The provider later reports it as accepted: the code now works.
-        self.sms.lookup_results[verification_id] = True
+        # A wrong code is the usual 422; the matching code proves delivery and verifies.
+        self.assert_error(self.confirm(verification_id, "111111"), 422, "VERIFICATION_CODE_INVALID")
         self.assertEqual(self.confirm(verification_id, "023841").status_code, 200)
-        self.assertEqual(self.rows(PhoneVerification)[0].send_status, "SENT")
-        self.assertEqual(len(self.sms.lookups), 2)
+        self.assertEqual(self.sms.lookups, [])  # confirm never asks the provider (#110)
         self.assertEqual(len(self.rows(PhoneVerification)), 1)  # nothing was resent
         output = log.getvalue()
         for secret in ("023841", "1234", "5678", PHONE_E164):
@@ -381,13 +394,14 @@ class ProviderTests(Step1TestCase):
         self.assertIn("SmsProviderTimeout", output)
 
     def test_lookup_reporting_failure_and_connection_errors(self):
+        # Issue #110: no lookup any more; a connection error leaves UNKNOWN and a wrong code is 422.
         self.sms.next_outcome = ["error"]
-        self.assert_error(self.send(), 503, "SMS_DELIVERY_UNAVAILABLE")
+        self.assertEqual(self.send().status_code, 200)
         (row,) = self.rows(PhoneVerification)
         self.assertEqual(row.send_status, "UNKNOWN")
         self.sms.lookup_results[str(row.id)] = False
-        self.assert_error(self.confirm(str(row.id), "123456"), 409, "VERIFICATION_NOT_SENT")
-        self.assertEqual(self.rows(PhoneVerification)[0].send_status, "FAILED")
+        self.assert_error(self.confirm(str(row.id), "123456"), 422, "VERIFICATION_CODE_INVALID")
+        self.assertEqual((self.rows(PhoneVerification)[0].send_status, self.sms.lookups), ("UNKNOWN", []))
 
     def test_unknown_and_failed_sends_count_toward_the_daily_limit(self):
         self.sms.next_outcome = ["timeout", "failed", "accepted", "error", "accepted"]
@@ -427,7 +441,7 @@ class ProviderTests(Step1TestCase):
 
     def test_solapi_placeholder_never_reports_a_send(self):
         self.app.dependency_overrides[get_sms_provider] = lambda: SolapiSmsProvider("k", "s", "01000000000")
-        self.assert_error(self.send(), 503, "SMS_DELIVERY_UNAVAILABLE")
+        self.assertEqual(self.send().status_code, 200)  # accepted (#110); the placeholder never sends
         self.assertEqual(self.rows(PhoneVerification)[0].send_status, "FAILED")
 
 

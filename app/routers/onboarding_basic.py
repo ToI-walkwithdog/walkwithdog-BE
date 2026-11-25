@@ -14,7 +14,8 @@ from app.basic_info_service import (normalize_full_name, parse_birth_date, read_
 from app.database import get_db
 from app.models import User
 from app.onboarding_common import get_clock, get_onboarding_user
-from app.phone_verification_service import confirm_code, normalize_phone, parse_verification_id, send_verification
+from app.phone_verification_service import (confirm_code, get_sms_dispatcher, normalize_phone, parse_verification_id,
+                                            send_verification)
 from app.sms_provider import get_sms_provider
 
 router = APIRouter(prefix="/users/me", tags=["onboarding"], route_class=ContractRoute)
@@ -108,16 +109,17 @@ def get_basic_info(user: User = Depends(get_onboarding_user), db: Session = Depe
 @router.post("/phone-verifications",
              responses={**COMMON_ERRORS,
                         422: {"model": ContractErrorResponse, "description": "PHONE_NUMBER_REQUIRED, INVALID_PHONE_NUMBER"},
-                        409: {"model": ContractErrorResponse,
-                              "description": "PREVIOUS_STEP_NOT_COMPLETED, PHONE_ALREADY_REGISTERED"},
+                        409: {"model": ContractErrorResponse, "description": "PREVIOUS_STEP_NOT_COMPLETED"},
                         429: {"model": ContractErrorResponse,
                               "description": "PHONE_VERIFICATION_RATE_LIMITED(retry_after_seconds, Retry-After)"},
                         503: {"model": ContractErrorResponse,
-                              "description": "SMS_DELIVERY_UNAVAILABLE. 공급자 미설정, 발송 실패, 결과 불명(UNKNOWN)"}})
+                              "description": "SMS_DELIVERY_UNAVAILABLE. 공급자 미설정 또는 발송 대기열 포화(등록 여부와 무관)"}})
 def post_phone_verification(payload: PhoneVerificationRequest, user: User = Depends(get_onboarding_user),
                             db: Session = Depends(get_db), provider=Depends(get_sms_provider),
-                            clock=Depends(get_clock)):
-    data = send_verification(db, provider, user.id, payload.phone_number, clock())
+                            dispatcher=Depends(get_sms_dispatcher), clock=Depends(get_clock)):
+    """200은 서버의 발송 요청 접수이며 실제 문자 수신을 뜻하지 않는다. 등록 여부와 관계없이 같은 응답(#110).
+    문자가 오지 않으면 60초 후 다시 요청한다."""
+    data = send_verification(db, provider, user.id, payload.phone_number, clock(), dispatcher=dispatcher, clock=clock)
     return ok(data, "인증번호를 발송했습니다.")
 
 
@@ -125,15 +127,15 @@ def post_phone_verification(payload: PhoneVerificationRequest, user: User = Depe
              responses={**COMMON_ERRORS,
                         404: {"model": ContractErrorResponse, "description": "VERIFICATION_NOT_FOUND(없음, 타인 소유)"},
                         409: {"model": ContractErrorResponse,
-                              "description": "PREVIOUS_STEP_NOT_COMPLETED, VERIFICATION_NOT_SENT, VERIFICATION_ALREADY_CONSUMED"},
+                              "description": "PREVIOUS_STEP_NOT_COMPLETED, VERIFICATION_ALREADY_CONSUMED"},
                         410: {"model": ContractErrorResponse, "description": "VERIFICATION_EXPIRED(만료, 재발송으로 대체)"},
                         422: {"model": ContractErrorResponse,
-                              "description": "INVALID_VERIFICATION_PAYLOAD, VERIFICATION_CODE_INVALID"},
+                              "description": "INVALID_VERIFICATION_PAYLOAD, VERIFICATION_CODE_INVALID(발송 상태와 무관)"},
                         429: {"model": ContractErrorResponse, "description": "VERIFICATION_ATTEMPTS_EXCEEDED"}})
 def post_phone_verification_confirm(payload: PhoneVerificationConfirmRequest,
                                     user: User = Depends(get_onboarding_user), db: Session = Depends(get_db),
-                                    provider=Depends(get_sms_provider), clock=Depends(get_clock)):
-    data = confirm_code(db, provider, user.id, parse_verification_id(payload.verification_id), payload.code, clock())
+                                    clock=Depends(get_clock)):
+    data = confirm_code(db, user.id, parse_verification_id(payload.verification_id), payload.code, clock())
     return ok(data, "전화번호 인증이 완료되었습니다.")
 
 

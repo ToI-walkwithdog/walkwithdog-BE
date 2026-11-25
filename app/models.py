@@ -230,7 +230,9 @@ class PhoneVerification(Base):
     """SMS code requests (Issue #40, migration 024). Only an HMAC of the code is stored."""
     __tablename__ = "phone_verifications"
     __table_args__ = (
-        CheckConstraint("send_status IN ('PENDING', 'SENDING', 'SENT', 'UNKNOWN', 'FAILED')",
+        # SUPPRESSED (Issue #110, migration 037): accepted for a number registered to another
+        # account, never sent and never verifiable.
+        CheckConstraint("send_status IN ('PENDING', 'SENDING', 'SENT', 'UNKNOWN', 'FAILED', 'SUPPRESSED')",
                         name="ck_phone_verifications_send_status"),
         CheckConstraint("attempt_count >= 0", name="ck_phone_verifications_attempt_count"),
         CheckConstraint("purpose IN ('ONBOARDING', 'PROFILE_PHONE_CHANGE')", name="ck_phone_verifications_purpose"),

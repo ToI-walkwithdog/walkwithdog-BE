@@ -1,27 +1,46 @@
-"""SMS phone verification for onboarding Step 1 (Issue #40).
+"""SMS phone verification for onboarding Step 1 (Issue #40) and profile phone change (#103).
 
 Policy (Notion, Issue #40): 6-digit CSPRNG code valid 300 s, resend after 60 s,
-5 failed checks per request, saving Step 1 allowed for 15 min after success, at most
+5 failed checks per request, saving allowed for 15 min after success, at most
 5 sends per account and per number per Asia/Seoul day. Only the latest request of
 an account is usable; sending again makes older ones unusable.
 
-Transactions (each short; none is open while the SMS provider is called):
-  T1 reserve   lock users row FOR UPDATE, re-check status and pledge, resend wait,
-               daily counters (atomic upsert), insert PENDING, commit
-  T2 claim     PENDING -> SENDING by conditional UPDATE, commit (one send per request)
-  -- provider call, no transaction --
-  T3 result    SENDING -> SENT | FAILED | UNKNOWN, commit
-  T4 confirm   lock the request row FOR UPDATE, check, count a failure or mark verified, commit
-An UNKNOWN outcome is never resent automatically. confirm() asks the provider once
-more (outside any transaction) and only proceeds if the request is then SENT.
+Registration is never disclosed by sending (Issue #110). A request for a number that
+another account has registered is accepted exactly like any other: it takes a delivery
+slot, is charged to both daily counters and the resend wait, and answers the same 200.
+It is stored as SUPPRESSED: its code is generated, hashed and thrown away, no provider is
+called, and it can never be verified. Ownership-proven saves still answer
+PHONE_ALREADY_REGISTERED, because only the number's owner can reach them.
+
+Request path (each transaction short):
+  slot     take one delivery slot of the bounded pool, or 503 before anything is written
+  T1       lock users FOR UPDATE, re-check status and pledge (or Step 1), charge the
+           account and number counters (atomic upserts; the number row lock serializes
+           one number across accounts), then the resend waits, then registration;
+           insert PENDING or SUPPRESSED, commit. Any refusal rolls back the charge.
+  answer   200 {verification_id, expires_in_seconds, resend_after_seconds}: the send was
+           ACCEPTED by the server, not delivered. PENDING is handed to the pool.
+Delivery job (own session, no transaction open while the provider is called):
+  T2       lock users FOR SHARE, then the request FOR UPDATE (the users -> phone_verifications
+           order of every other path); send only if it still exists, is PENDING, unexpired,
+           the account's latest and the account is ACTIVE: PENDING -> SENDING, commit.
+           Otherwise PENDING -> FAILED without calling the provider.
+  call     provider.send() outside any transaction. Never resent automatically.
+  T3       conditional on SENDING: SENT | FAILED | UNKNOWN, or SENT whenever the request was
+           verified meanwhile (the matching code proves delivery). Verification fields are
+           never touched, so a late provider answer cannot undo a verification.
+Confirm (database only, no provider call): a wrong code answers 422 and counts a failure
+whatever the delivery status; a matching code verifies SENDING, SENT and UNKNOWN requests;
+PENDING, FAILED and SUPPRESSED never verify.
 
 Purpose (Issue #103): each request records ONBOARDING or PROFILE_PHONE_CHANGE, set by the
 endpoint. A proof is only usable for its own purpose. The latest-request rule, the resend
 wait and the daily limits stay per account and per number across both purposes.
 
 Secrets: PHONE_VERIFICATION_HMAC_KEY (at least 32 characters) signs codes and number
-keys. Codes are never stored, returned or logged; numbers and codes are never logged.
+keys. Codes live in memory only: never stored, returned or logged; numbers are never logged.
 """
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import hashlib
 import hmac
@@ -30,18 +49,19 @@ import math
 import os
 import re
 import secrets
+import threading
 import uuid
 
-from sqlalchemy import and_, or_, update
+from sqlalchemy import and_, case, or_, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
-from app.account_status import ensure_active, lock_user
+from app.account_status import ensure_active, is_active, lock_user
 from app.api_contract import ContractError
 from app.auth import contract_unauthorized
 from app.models import PhoneVerification, PhoneVerificationDailyCount, VolunteerOnboardingBasic
-from app.onboarding_common import as_utc, ensure_pledge_completed, kst_date, next_kst_midnight
+from app.onboarding_common import as_utc, ensure_pledge_completed, kst_date, next_kst_midnight, utc_now
 from app.sms_provider import SmsProvider, SmsProviderUnavailable
 
 logger = logging.getLogger(__name__)
@@ -54,6 +74,9 @@ DAILY_SEND_LIMIT = 5
 HMAC_KEY_MIN_LENGTH = 32
 
 PENDING, SENDING, SENT, UNKNOWN, FAILED = "PENDING", "SENDING", "SENT", "UNKNOWN", "FAILED"
+SUPPRESSED = "SUPPRESSED"  # registered to another account: accepted, never sent, never verifiable (#110)
+VERIFIABLE_STATUSES = (SENDING, SENT, UNKNOWN)  # a matching code proves delivery for these
+DISPATCH_WORKERS, DISPATCH_QUEUE = 2, 20  # initial limits of the in-process delivery pool (#110)
 PURPOSE_ONBOARDING, PURPOSE_PROFILE = "ONBOARDING", "PROFILE_PHONE_CHANGE"
 PHONE_INPUT = re.compile(r"010-?\d{4}-?\d{4}")
 
@@ -145,7 +168,10 @@ def profile_basic_info_required() -> ContractError:
 
 def reserve_send(db: Session, user_id: int, phone_e164: str, now: datetime, key: bytes,
                  purpose: str = PURPOSE_ONBOARDING):
-    """T1. Returns (verification_id, code). The code exists only in memory until sent."""
+    """T1. Returns (verification_id, code, suppressed). The code exists only in memory.
+
+    Every request runs the same checks in the same order; registration is looked at only
+    after the counters and resend waits, so it never changes the answer (Issue #110)."""
     try:
         user = lock_user(db, user_id, for_update=True)  # serializes this account's sends
         if user is None:
@@ -155,91 +181,187 @@ def reserve_send(db: Session, user_id: int, phone_e164: str, now: datetime, key:
             ensure_pledge_completed(db, user)
         elif db.get(VolunteerOnboardingBasic, user_id) is None:  # a phone change needs Step 1 first
             raise profile_basic_info_required()
-        if registered_to_other_user(db, phone_e164, user_id):
-            raise phone_already_registered()
+        day = kst_date(now)
+        # Charged first: the number counter row lock serializes concurrent requests for one
+        # number across accounts, so the resend wait below sees the other's committed request.
+        # Counted when reserved: UNKNOWN, FAILED and SUPPRESSED sends count too.
+        user_slot = _take_daily_slot(db, "USER", str(user_id), day, DAILY_SEND_LIMIT)
+        phone_slot = _take_daily_slot(db, "PHONE", phone_subject(key, phone_e164), day, DAILY_SEND_LIMIT)
         window_start = now - timedelta(seconds=RESEND_WAIT_SECONDS)
         for condition in (PhoneVerification.user_id == user_id, PhoneVerification.phone_e164 == phone_e164):
             recent = latest_request(db, condition, PhoneVerification.created_at > window_start)
-            if recent is not None:
+            if recent is not None:  # same precedence as before: the resend wait first
                 raise rate_limited((as_utc(recent.created_at) - window_start).total_seconds())
-        day = kst_date(now)
-        # Counted when reserved: UNKNOWN and FAILED sends count too (see Issue #40 open items).
-        if not (_take_daily_slot(db, "USER", str(user_id), day, DAILY_SEND_LIMIT)
-                and _take_daily_slot(db, "PHONE", phone_subject(key, phone_e164), day, DAILY_SEND_LIMIT)):
+        if not (user_slot and phone_slot):
             raise rate_limited((next_kst_midnight(now) - as_utc(now)).total_seconds())
+        suppressed = registered_to_other_user(db, phone_e164, user_id)
         verification_id = uuid.uuid4()
         code = f"{secrets.randbelow(10 ** 6):06d}"
         db.add(PhoneVerification(
             id=verification_id, user_id=user_id, phone_e164=phone_e164,
-            code_digest=code_digest(key, verification_id, code), send_status=PENDING,
+            code_digest=code_digest(key, verification_id, code), send_status=SUPPRESSED if suppressed else PENDING,
             provider_request_key=verification_id, expires_at=now + timedelta(seconds=CODE_TTL_SECONDS),
             attempt_count=0, created_at=now, purpose=purpose))
-        db.commit()
-        return verification_id, code
+        db.commit()  # any refusal above rolled back the counters with everything else
+        return verification_id, code, suppressed
     except Exception:
         db.rollback()
         raise
 
 
-def _move_status(db: Session, verification_id, from_status: str, **values) -> bool:
-    """Conditional UPDATE in its own short transaction; True if this call changed the row."""
+class SmsDispatcher:
+    """Bounded in-process delivery pool (Issue #110): `workers` threads and at most `queue`
+    waiting jobs. A request takes a slot before anything else, so overload answers the same
+    503 whatever the number is. Each taken slot is released exactly once: by the caller when
+    nothing was queued, otherwise by the job itself. inline=True runs jobs at once (tests)."""
+
+    def __init__(self, workers: int = DISPATCH_WORKERS, queue: int = DISPATCH_QUEUE, *, inline: bool = False):
+        self.capacity = workers + queue
+        self._in_use = 0
+        self._lock = threading.Lock()
+        self._inline = inline
+        self._executor = None if inline else ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sms-delivery")
+
+    def available(self) -> int:
+        with self._lock:
+            return self.capacity - self._in_use
+
+    def try_acquire(self) -> bool:
+        with self._lock:
+            if self._in_use >= self.capacity:
+                return False
+            self._in_use += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            if self._in_use <= 0:
+                raise RuntimeError("delivery slot released twice")
+            self._in_use -= 1
+
+    def submit(self, job) -> None:
+        """Queue `job` on an acquired slot; the job releases it. Raises if nothing was queued."""
+        def run():
+            try:
+                job()
+            except Exception as exc:  # the type only: a message could carry a number
+                logger.warning("SMS delivery job failed (%s)", type(exc).__name__)
+            finally:
+                self.release()
+
+        if self._inline:
+            run()
+        else:
+            self._executor.submit(run)
+
+
+_dispatcher: SmsDispatcher | None = None
+_dispatcher_lock = threading.Lock()
+
+
+def get_sms_dispatcher() -> SmsDispatcher:
+    """Dependency: the process-wide delivery pool, created on first use."""
+    global _dispatcher
+    with _dispatcher_lock:
+        if _dispatcher is None:
+            _dispatcher = SmsDispatcher()
+        return _dispatcher
+
+
+def _claim_for_delivery(db: Session, verification_id, now: datetime) -> bool:
+    """T2: PENDING -> SENDING only if the request may still be sent; otherwise -> FAILED."""
     try:
-        result = db.execute(update(PhoneVerification)
-                            .where(PhoneVerification.id == verification_id,
-                                   PhoneVerification.send_status == from_status)
-                            .values(**values))
+        user_id = db.query(PhoneVerification.user_id).filter(PhoneVerification.id == verification_id).scalar()
+        if user_id is None:
+            db.rollback()
+            return False  # deleted (sign-up exit): nothing to send
+        user = lock_user(db, user_id)  # FOR SHARE first: the users -> phone_verifications order
+        verification = (db.query(PhoneVerification).filter(PhoneVerification.id == verification_id)
+                        .populate_existing().with_for_update().one_or_none())
+        if verification is None or verification.send_status != PENDING:
+            db.rollback()
+            return False  # gone, or dispatched already
+        if (user is None or not is_active(user) or as_utc(now) >= as_utc(verification.expires_at)
+                or not is_latest_for_user(db, verification)):
+            verification.send_status, verification.last_checked_at = FAILED, now
+            db.commit()
+            logger.info("SMS delivery skipped: request no longer sendable")
+            return False
+        verification.send_status = SENDING
         db.commit()
-        return result.rowcount == 1
+        return True
     except Exception:
         db.rollback()
         raise
+
+
+def _record_result(db: Session, verification_id, status: str, now: datetime, **ids) -> None:
+    """T3: conditional on SENDING. A request verified meanwhile is SENT whatever the provider
+    answered; verification fields are never written here."""
+    try:
+        db.execute(update(PhoneVerification)
+                   .where(PhoneVerification.id == verification_id, PhoneVerification.send_status == SENDING)
+                   .values(send_status=case((PhoneVerification.verified_at.isnot(None), SENT), else_=status),
+                           last_checked_at=now, **ids))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def deliver_verification(bind, provider: SmsProvider, verification_id, phone_e164: str, code: str, clock) -> None:
+    """The delivery job: its own session on the request's database, no automatic resend."""
+    with sessionmaker(bind=bind)() as db:
+        if not _claim_for_delivery(db, verification_id, clock()):
+            return
+        text = f"[같이걷개] 인증번호는 {code}입니다. 5분 안에 입력해 주세요."
+        del code
+        ids = {}
+        try:
+            result = provider.send(to_e164=phone_e164, text=text, request_key=str(verification_id))
+        except SmsProviderUnavailable:
+            status = FAILED
+        except Exception as exc:
+            # Timeout, reset connection or a malformed reply: it may have been accepted.
+            logger.warning("SMS send outcome unknown (%s)", type(exc).__name__)
+            status = UNKNOWN
+        else:
+            status = SENT if result.accepted else FAILED
+            if result.accepted:
+                ids = {"provider_message_id": result.message_id, "provider_group_id": result.group_id}
+        del text
+        _record_result(db, verification_id, status, clock(), **ids)
 
 
 def send_verification(db: Session, provider: SmsProvider | None, user_id: int, phone_e164: str, now: datetime,
-                      purpose: str = PURPOSE_ONBOARDING) -> dict:
-    if provider is None:  # nothing reserved, nothing counted
+                      purpose: str = PURPOSE_ONBOARDING, *, dispatcher: SmsDispatcher | None = None,
+                      clock=None) -> dict:
+    """Accept a send request. 200 means accepted by the server, not delivered (Issue #110)."""
+    if provider is None:  # nothing reserved, nothing counted, whatever the number is
         raise delivery_unavailable()
     key = hmac_key()  # fail closed before any write
-    verification_id, code = reserve_send(db, user_id, phone_e164, now, key, purpose)
-    if not _move_status(db, verification_id, PENDING, send_status=SENDING):  # T2
-        raise RuntimeError("verification request was claimed twice")
-    text = f"[같이걷개] 인증번호는 {code}입니다. 5분 안에 입력해 주세요."
-    try:
-        result = provider.send(to_e164=phone_e164, text=text, request_key=str(verification_id))
-    except SmsProviderUnavailable:
-        _move_status(db, verification_id, SENDING, send_status=FAILED, last_checked_at=now)
-        raise delivery_unavailable() from None
-    except Exception as exc:
-        # Timeout, reset connection or a malformed reply: it may have been accepted.
-        logger.warning("SMS send outcome unknown (%s)", type(exc).__name__)
-        _move_status(db, verification_id, SENDING, send_status=UNKNOWN, last_checked_at=now)
-        raise delivery_unavailable() from None
-    del code, text
-    if not result.accepted:
-        _move_status(db, verification_id, SENDING, send_status=FAILED, last_checked_at=now)
+    dispatcher = dispatcher or get_sms_dispatcher()
+    if not dispatcher.try_acquire():  # overloaded: decided before the number is looked at
         raise delivery_unavailable()
-    _move_status(db, verification_id, SENDING, send_status=SENT, last_checked_at=now,
-                 provider_message_id=result.message_id, provider_group_id=result.group_id)
+    queued = False
+    try:
+        verification_id, code, suppressed = reserve_send(db, user_id, phone_e164, now, key, purpose)
+        if not suppressed:
+            bind, job_clock = db.get_bind(), clock or utc_now
+            job = (lambda code=code: deliver_verification(bind, provider, verification_id, phone_e164, code,
+                                                           job_clock))
+            try:
+                dispatcher.submit(job)
+                queued = True
+            except Exception as exc:  # the row stays PENDING; the user asks again after 60 s
+                logger.warning("SMS delivery could not be queued (%s)", type(exc).__name__)
+            del job
+        del code
+    finally:
+        if not queued:
+            dispatcher.release()
     return {"verification_id": str(verification_id), "expires_in_seconds": CODE_TTL_SECONDS,
             "resend_after_seconds": RESEND_WAIT_SECONDS}
-
-
-def reconcile_unknown(db: Session, provider: SmsProvider | None, verification: PhoneVerification, now: datetime) -> None:
-    """Ask the provider about an UNKNOWN send. Never resends. No transaction is open meanwhile."""
-    db.commit()  # end the read transaction before the external call
-    if provider is None:
-        return
-    try:
-        accepted = provider.lookup(request_key=str(verification.provider_request_key),
-                                   message_id=verification.provider_message_id,
-                                   group_id=verification.provider_group_id)
-    except Exception as exc:
-        logger.warning("SMS lookup failed (%s)", type(exc).__name__)
-        accepted = None
-    if accepted is None:
-        _move_status(db, verification.id, UNKNOWN, last_checked_at=now)
-    else:
-        _move_status(db, verification.id, UNKNOWN, send_status=SENT if accepted else FAILED, last_checked_at=now)
 
 
 def parse_verification_id(value) -> uuid.UUID | None:
@@ -249,33 +371,32 @@ def parse_verification_id(value) -> uuid.UUID | None:
         return None
 
 
-def confirm_code(db: Session, provider: SmsProvider | None, user_id: int, verification_id: uuid.UUID,
-                 code: str, now: datetime, purpose: str = PURPOSE_ONBOARDING) -> dict:
+def confirm_code(db: Session, user_id: int, verification_id: uuid.UUID, code: str, now: datetime,
+                 purpose: str = PURPOSE_ONBOARDING) -> dict:
+    """T4, database only. The answer depends on the code, the attempts, expiry and the
+    latest-request rule, never on the delivery status (Issue #110)."""
     not_found = _error(404, "VERIFICATION_NOT_FOUND", "인증 요청을 찾을 수 없습니다.")
     verification = db.get(PhoneVerification, verification_id)
     # Someone else's request, or one made for the other purpose, is "not found" too (#103).
     if verification is None or verification.user_id != user_id or verification.purpose != purpose:
         raise not_found
-    if verification.send_status == UNKNOWN:
-        reconcile_unknown(db, provider, verification, now)
     key = hmac_key()
+    invalid = _error(422, "VERIFICATION_CODE_INVALID", "인증번호가 일치하지 않습니다.", {"field": "code"})
     try:
         verification = (db.query(PhoneVerification).filter(PhoneVerification.id == verification_id)
-                        .populate_existing().with_for_update().one_or_none())  # T4
+                        .populate_existing().with_for_update().one_or_none())
         if verification is None:
             raise not_found
         matches = hmac.compare_digest(verification.code_digest, code_digest(key, verification.id, code))
         if verification.consumed_at is not None:
             raise _error(409, "VERIFICATION_ALREADY_CONSUMED", "새 인증번호를 요청해 주세요.")
-        if verification.send_status != SENT:
-            raise _error(409, "VERIFICATION_NOT_SENT", "인증번호를 다시 요청해 주세요.")
         expired = _error(410, "VERIFICATION_EXPIRED", "인증번호가 만료되었습니다.")
         if not is_latest_for_user(db, verification):  # a newer request replaced it
             raise expired
         if verification.verified_at is not None:
             # A retry after a lost success response: same answer, no failure counted.
             if not matches:
-                raise _error(422, "VERIFICATION_CODE_INVALID", "인증번호가 일치하지 않습니다.", {"field": "code"})
+                raise invalid
             if as_utc(now) >= as_utc(verification.verified_valid_until):
                 raise expired
             db.commit()
@@ -284,10 +405,12 @@ def confirm_code(db: Session, provider: SmsProvider | None, user_id: int, verifi
             raise expired
         if verification.attempt_count >= MAX_FAILED_ATTEMPTS:
             raise _error(429, "VERIFICATION_ATTEMPTS_EXCEEDED", "인증 시도 횟수를 초과했습니다.")
-        if not matches:
+        if not matches or verification.send_status not in VERIFIABLE_STATUSES:
+            # A wrong code, or a request that was never sent (PENDING, FAILED, SUPPRESSED):
+            # the same answer either way, and the failure counts.
             verification.attempt_count += 1
-            db.commit()  # the failure counts even though the request is answered with 422
-            raise _error(422, "VERIFICATION_CODE_INVALID", "인증번호가 일치하지 않습니다.", {"field": "code"})
+            db.commit()
+            raise invalid
         verification.verified_at = now
         verification.verified_valid_until = now + VERIFIED_SAVE_WINDOW
         db.commit()

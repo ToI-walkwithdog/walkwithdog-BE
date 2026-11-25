@@ -34,6 +34,7 @@ with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
                             UserPledgeAcknowledgement, UserRole, VolunteerOnboardingBasic)
     from app.onboarding_common import get_clock
     from app.phone_verification_service import phone_subject
+    from app.phone_verification_service import SmsDispatcher, get_sms_dispatcher
     from app.routers import (age_review, auth, chat, matching, onboarding_basic, onboarding_experience,
                              onboarding_routine, surveys, users, walk_requests, walks)
     from app.models import VolunteerExperienceChallenge, VolunteerOnboardingExperience
@@ -70,6 +71,7 @@ STEP3_MIGRATION = "026_onboarding_walking_routine.sql"
 AGREEMENTS_MIGRATION = "027_onboarding_agreements.sql"
 PROFILE_MIGRATION = "035_profile_phone_change.sql"  # Issue #103: users.profile_version, SMS purpose
 PREFERENCE_MIGRATION = "036_walk_preferences.sql"  # Issue #105: deleted by sign-up exit
+SUPPRESSED_MIGRATION = "037_phone_verification_suppressed.sql"  # Issue #110: SUPPRESSED send status
 USER_COLUMNS_AFTER_018 = {
     "first_walk_guide_completed_at": GUIDE_MIGRATION,
     "account_status": STEP1_MIGRATION,
@@ -80,7 +82,8 @@ USER_COLUMNS_AFTER_018 = {
 # from 022. 022 depends on nothing, so it runs right before 026: every stage that stops at
 # 019 to 025 still gets it.
 API_MIGRATIONS_AFTER_018 = (GUIDE_MIGRATION, PLEDGE_MIGRATION, STEP1_MIGRATION, STEP2_MIGRATION, REGION_MIGRATION,
-                            STEP3_MIGRATION, AGREEMENTS_MIGRATION, PROFILE_MIGRATION, PREFERENCE_MIGRATION)
+                            STEP3_MIGRATION, AGREEMENTS_MIGRATION, PROFILE_MIGRATION, PREFERENCE_MIGRATION,
+                            SUPPRESSED_MIGRATION)
 STEP3_FULL = {"region_codes": ["11680", "26350"], "available_time_slot_codes": ["WEEKDAY_MORNING", "WEEKEND_MORNING"],
               "walking_duration_code": "UP_TO_30_MIN", "comfortable_dog_size_code": "SMALL",
               "agreements": onboarding_agreements()}
@@ -184,6 +187,8 @@ class SignupPostgresTests(unittest.TestCase):
         self.sms = MockSmsProvider()
         app.dependency_overrides[get_clock] = lambda: (lambda: self.now)
         app.dependency_overrides[get_sms_provider] = lambda: self.sms
+        self.dispatcher = SmsDispatcher(inline=True)  # delivery runs inside the request (#110)
+        app.dependency_overrides[get_sms_dispatcher] = lambda: self.dispatcher
 
         def test_db():
             with self.Session() as db:
