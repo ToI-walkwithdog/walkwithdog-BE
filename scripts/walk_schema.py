@@ -13,6 +13,13 @@ from scripts.prepare_demo_db import ROOT, PreparationError, validate_base_tables
 CONTRACT = ROOT / "migrations/007_walk_domain.schema.json"
 MOTION_CONTRACT = ROOT / "migrations/008_gps_motion_analysis.schema.json"
 
+# Migration 007 predates later additions to the live ORM. Its reviewed table
+# inventory is immutable; later migrations must not expand this validation.
+WALK_007_TABLES = (
+    "dog_walk_settings", "dog_walk_slots", "walk_requests", "walks", "walk_points",
+    "walk_markers", "walk_reviews", "dog_trait_summaries", "volunteer_profiles", "walk_incidents",
+)
+
 
 def motion_extension(actual):
     """Validate known 008 additions, then project them out for the 007 check.
@@ -110,8 +117,6 @@ def compare_table(name, actual, expected, standalone_indexes):
 
 
 def check_walk_schema(connection):
-    from app.walk_models import WALK_MODELS
-
     # The checked-in SQL and contract target public, never another search-path schema.
     schemas = connection.execute(text("SELECT current_schemas(false)")).scalar_one()
     if list(schemas) != ["public"]:
@@ -125,13 +130,14 @@ def check_walk_schema(connection):
             raise PreparationError(f"{parent}.id 기존 참조키 구조가 다릅니다.")
 
     contract = json.loads(CONTRACT.read_text())
-    if set(contract) != {m.__tablename__ for m in WALK_MODELS}:
-        raise PreparationError("007 스키마 계약과 ORM 테이블 목록이 다릅니다.")
+    if set(contract) != set(WALK_007_TABLES):
+        raise PreparationError("007 스키마 계약의 테이블 목록이 다릅니다.")
     pending = []
-    for model in WALK_MODELS:
-        name = model.__tablename__
+    for name in WALK_007_TABLES:
         expected = contract[name]
-        standalone = {i.name for i in model.__table__.indexes}
+        # The 007 contract names constraint-backed indexes after their constraints.
+        # Only standalone indexes may be repaired by CREATE INDEX IF NOT EXISTS.
+        standalone = set(expected["indexes"]) - set(expected["constraints"])
         actual = catalog_table(connection, name)
         if name == "walks":
             actual, _ = motion_extension(actual)

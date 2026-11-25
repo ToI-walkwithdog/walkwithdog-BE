@@ -32,7 +32,7 @@ from sqlalchemy.sql.ddl import sort_tables
 
 from scripts.migrate_backend import check_version, migrate
 from scripts.prepare_demo_db import PreparationError, ROOT
-from scripts.walk_schema import CONTRACT, MOTION_CONTRACT, compare_table
+from scripts.walk_schema import CONTRACT, MOTION_CONTRACT, WALK_007_TABLES, compare_table
 
 
 class WalkMetadataTests(unittest.TestCase):
@@ -42,15 +42,17 @@ class WalkMetadataTests(unittest.TestCase):
         self.assertEqual(set(WALK_MODELS), set(CORE_007_MODELS) | set(REVIEW_020_MODELS))
         self.assertTrue(all(model.metadata is Base.metadata for model in CORE_007_MODELS))
         self.assertEqual(set(json.loads(CONTRACT.read_text())), {m.__tablename__ for m in CORE_007_MODELS})
+        self.assertEqual(set(WALK_007_TABLES), {m.__tablename__ for m in CORE_007_MODELS})
         for model in CORE_007_MODELS:
             for relationship in model.__mapper__.relationships:
                 self.assertIsNotNone(relationship.back_populates)
             for foreign in model.__table__.foreign_keys:
                 self.assertEqual(foreign.ondelete, "NO ACTION")
 
-    def test_checked_in_sql_exactly_matches_orm_postgresql_ddl(self):
+    @staticmethod
+    def historical_007_ddl():
+        """Compile the current ORM, projected to the immutable 007 schema."""
         names = {m.__tablename__ for m in CORE_007_MODELS}
-        source = (ROOT / "migrations/007_walk_domain.sql").read_text()
         statements = []
         motion = json.loads(MOTION_CONTRACT.read_text())
         post_007_columns = {c["name"] for c in motion["columns"]} | {
@@ -114,6 +116,11 @@ class WalkMetadataTests(unittest.TestCase):
                 statements.extend(str(CreateIndex(i, if_not_exists=True).compile(dialect=postgresql.dialect())) + ";"
                                   for i in sorted(table.indexes, key=lambda i: i.name)
                                   if i.name not in post_007_indexes)
+        return statements
+
+    def test_checked_in_sql_exactly_matches_orm_postgresql_ddl(self):
+        source = (ROOT / "migrations/007_walk_domain.sql").read_text()
+        statements = self.historical_007_ddl()
         actual = "\n".join(line for line in source.splitlines() if not line.startswith("--"))
         expected = "BEGIN;\n\n" + "\n\n".join(statements) + "\n\nCOMMIT;"
         self.assertEqual([l.rstrip() for l in actual.strip().splitlines()],

@@ -9,15 +9,15 @@ import unittest
 from unittest.mock import patch
 
 with patch.dict(os.environ, {'DATABASE_URL': 'sqlite://'}):
-    from app.models import Base
-    from app.walk_models import WALK_MODELS
+    # Import the models under the original isolated environment before migration helpers.
+    from app.models import Base  # noqa: F401
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from scripts.migrate_backend import migrate
 from scripts.prepare_demo_db import ROOT, PreparationError, table_counts, validate_local_engine
 from scripts.walk_schema import check_motion_schema, check_walk_schema
-from test_walk_postgres import TransactionEngine
+from test_walk_postgres import TransactionEngine, create_pre_007_schema
 
 TEST_URL = os.getenv('GPS_MOTION_TEST_DATABASE_URL')
 
@@ -35,8 +35,7 @@ class MotionMigrationPostgresTests(unittest.TestCase):
             custom = [s for s in inspector.get_schema_names() if s not in ('public', 'information_schema') and not s.startswith('pg_')]
             if inspector.get_table_names() or custom:
                 raise PreparationError('새로운 빈 격리 테스트 DB만 허용합니다.')
-            walk_names = {m.__tablename__ for m in WALK_MODELS}
-            Base.metadata.create_all(c, tables=[t for t in Base.metadata.sorted_tables if t.name not in walk_names])
+            create_pre_007_schema(c)
             for statement in (ROOT / 'migrations/007_walk_domain.sql').read_text().split(';'):
                 statement = '\n'.join(l for l in statement.splitlines() if not l.startswith('--')).strip()
                 if statement and statement.upper() not in ('BEGIN', 'COMMIT'):
