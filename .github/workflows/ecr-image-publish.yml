@@ -1,0 +1,87 @@
+name: ECR Image Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Official Release CI run ID
+        required: true
+        type: string
+      release_run_attempt:
+        description: Official Release CI run attempt
+        required: true
+        type: string
+      release_pr_number:
+        description: Approved and merged Release PR number
+        required: true
+        type: string
+
+# Phase 6: read-only preflight; official approval contract not yet installed.
+permissions: {}
+
+concurrency:
+  group: toi-be-ecr-image-publish
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release (read-only preflight)
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected && github.repository_id == '1409697696' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      publication_authorized: ${{ steps.approval.outputs.publication_authorized }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, existing Release CI pin
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Run ECR publication unit tests
+        run: python3 -m unittest discover -s .github/tests -p test_ecr_image_publish.py -v
+      - name: Validate release artifact and source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}
+          RELEASE_PR_NUMBER: ${{ inputs.release_pr_number }}
+          SOURCE_SHA: ${{ github.sha }}
+          TRUSTED_RELEASE_WORKFLOW_SHA: ${{ vars.TRUSTED_RELEASE_WORKFLOW_SHA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]]
+          [[ "$RELEASE_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,8}$ ]]
+          [[ "$RELEASE_PR_NUMBER" =~ ^[1-9][0-9]{0,18}$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_RELEASE_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'Reviewed Release CI SHA has not been configured.' >&2
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          python3 -I scripts/ecr_image_publish.py --download-artifact \
+            --run-id "$RELEASE_RUN_ID" --run-attempt "$RELEASE_RUN_ATTEMPT" \
+            --pr-number "$RELEASE_PR_NUMBER" --source-sha "$SOURCE_SHA" \
+            --trusted-workflow-sha "$TRUSTED_RELEASE_WORKFLOW_SHA"
+      - name: Block until official release approval is integrated
+        id: approval
+        shell: bash
+        run: |
+          echo 'publication_authorized=false' >> "$GITHUB_OUTPUT"
+          echo 'Publication disabled: official #125 approval contract is not integrated.' >&2
+          exit 1
+
+  publish:
+    name: Publish image (disabled until integration)
+    needs: validate
+    # Independent hard lock; this revision has no OIDC permission or AWS commands.
+    if: ${{ false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - name: Reject publication
+        run: exit 1
