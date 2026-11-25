@@ -140,7 +140,8 @@ def handover(walk_id: int, payload: WalkHandoverCreate, response: Response,
             response.status_code = 200
         return stored
 
-    return persist(db, operation, WalkHandoverReceipt, actor)
+    # Issue #93: wait for the end transaction before evaluating the handover.
+    return persist(db, operation, WalkHandoverReceipt, actor, account_nowait=False)
 
 
 @router.get("/active", response_model=ActiveWalkResponse)
