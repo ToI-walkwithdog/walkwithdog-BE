@@ -173,7 +173,7 @@ docker stop toi-ecr-test-registry
 
 선택 테스트는 새 임시 Repository에 OCI Archive를 실제 Skopeo로 복사하고 Registry의 Manifest 응답 헤더·바이트 및 모든 참조 blob의 Digest/크기를 확인한다. 테스트 종료 후 임시 Registry 컨테이너를 정리한다. 테스트 실패 시에도 컨테이너 정리를 수행한다. HTTP/TLS 검증 예외는 로컬 선택 테스트에만 적용하며 운영용 발행 코드의 TLS 요구사항을 변경하지 않는다.
 
-Phase 8 작성 환경에는 Docker와 Skopeo가 없고 외부 도구 다운로드도 불가능하므로 선택 테스트는 실행하지 못했다. 실제 Registry에서 통과해야 해당 검증을 완료 처리할 수 있다.
+Phase 8 작성 환경에서는 도구 부재로 선택 테스트를 실행하지 못했다. 2026-11-25 사용자 로컬 Docker Desktop (Linux/amd64, Ubuntu 24.04 테스트 컨테이너)에서 `TOI_TEST_LOCAL_REGISTRY=1`로 실행하여 96개 전체 통과 (0.717초, 실패 및 Skip 0개)를 확인했다. 임시 Registry는 종료 및 정리했다. 실제 AWS ECR 및 IAM 검증은 별도다.
 
 ## 10. 전체 코드 검토 (Phase 9)
 
@@ -185,12 +185,29 @@ Phase 8 작성 환경에는 Docker와 Skopeo가 없고 외부 도구 다운로�
 - 다운로드 대상의 배타적 파일 생성에 실패했을 때 다른 실행이 만든 파일을 삭제하지 않는다.
 - 신규 회귀 테스트 7개를 추가했다. Python 테스트 96개 실행(95개 성공, 1개 건너뜀), Workflow YAML 구조, Bash 문법 및 IAM JSON 문법 검사를 수행했다.
 
-현재의 독립 리뷰 관찰 결과와 Repository Variable은 공식 관리자 승인 증명이 아니며, 검증 JSON의 성공 표시 및 82개 통과 수치만으로 실제 테스트 수행을 입증하지 않는다. CLI 읽기 전용 검증 성공(종료 코드 0)도 발행 승인과 다르다. Workflow의 승인 Gate는 실패하고 Publish Job은 강제로 비활성화된다. 발행 전용 Role은 아직 생성하지 않았다. 실제 GitHub Actions/API Artifact 검증, 실제 Registry 선택 테스트, actionlint 검사는 미완료다. 현 단계는 독립 리뷰를 위한 Draft PR 준비이며 운영 발행 완료가 아니다.
+현재의 독립 리뷰 관찰 결과와 Repository Variable은 공식 관리자 승인 증명이 아니며, 검증 JSON의 성공 표시 및 82개 통과 수치만으로 실제 테스트 수행을 입증하지 않는다. CLI 읽기 전용 검증 성공(종료 코드 0)도 발행 승인과 다르다. Workflow의 승인 Gate는 실패하고 Publish Job은 강제로 비활성화된다. 발행 전용 Role은 아직 생성하지 않았다. 실제 GitHub Actions/API Artifact 검증은 미완료다. 실제 Registry 선택 테스트 및 actionlint 재검사 결과는 아래에 기록한다. 현 단계는 독립 리뷰를 위한 Draft PR 준비이며 운영 발행 완료가 아니다.
+
+### 추가 검증 기록 (2026-11-25)
+
+- 사용자 로컬 실제 Registry 통합 테스트: 96개 전체 통과, 실패 및 Skip 0개.
+- actionlint 1.7.12 최초 검사: 의도적인 Publish Job `if: ${{ false }}` 조건에 대한 `if-cond` 진단 1건, 종료 코드 1.
+- 해당 메시지만 제외한 재검사: 종료 코드 0. Workflow의 강제 차단 조건은 유지한다.
+- 실제 발행 활성화 시 예외 옵션 없이 actionlint를 재실행한다.
+
+```powershell
+docker run --rm `
+  --mount "type=bind,source=$((Get-Location).Path),target=/repo,readonly" `
+  --workdir /repo `
+  rhysd/actionlint:1.7.12 `
+  -color `
+  -ignore '^constant expression .false. in condition[.] remove the if: section$' `
+  .github/workflows/ecr-image-publish.yml
+```
 
 ## 11. 남은 완료 조건
 
 - #125 공식 실행 및 승인 증빙 계약, OCI 전달 방식에 대한 별도 승인
-- 실제 GitHub Artifact 및 격리 Registry 통합 검증
+- 실제 GitHub Artifact 통합 검증 (격리 Registry 검증은 완료)
 - 신뢰된 Workflow SHA 및 관리자 실행 승인 근거 확정
 - 발행 전용 IAM Role 별도 승인 및 실제 권한 검증
 - 검증 Job에서 발행 Job으로 안전하게 검증 결과와 이미지 전달 및 재검증
