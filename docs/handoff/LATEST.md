@@ -209,3 +209,15 @@
 - 확인하지 못한 것:
   - 실제 `KAKAO_REST_API_KEY`를 사용한 Kakao `coord2regioncode` API 수동 연동 검증(배포 호스트 `.env.api` 설정 후 사용자 직접 수행 예정)
   - `KAKAO_REST_API_KEY` 발급 및 `.env.api` 배치 담당자 확정(운영 전 결정 예정)
+
+## 16-7 공식 데이터 수집과 초기 데이터 구성 (#116)
+
+- 시드 스크립트와 테스트: `scripts/seed_dev_data.py`, `tests/test_seed_dev_data.py`, `tests/test_seed_dev_data_postgres.py`.
+- `current_pledge_version`은 `app.pledge_service`에서 가져온다. `PLEDGE_CURRENT_VERSION`, `TERMS_CURRENT_VERSION`, `PRIVACY_CURRENT_VERSION`이 없으면 각 시연용 버전을 사용하고, 시드 작업이 끝나면 환경변수를 복구한다.
+- DB 제약에 맞는 동의 유형을 저장하고, 지역 레벨 문자열로 보호소 주소 후보를 매칭한다. 공공 데이터 조회는 모의 응답으로만 테스트했으며 실제 API 호출과 개발·운영 DB 적용은 수행하지 않았다.
+- 가상 산책 스모크 테스트는 테스트용 DB 세션 의존성을 오버라이드하고 유효한 지역 코드로 목록을 조회한다. 응답의 `dog_id`와 계약 응답 내 보호소 코드를 확인하며, 산책 시간도 고정해 날짜에 의존하지 않게 한다.
+- 검증:
+  - `DATABASE_URL=sqlite:// python -m pytest -v tests/test_seed_dev_data.py tests/test_seed_dev_data_postgres.py` → 5 passed, 1 skipped.
+  - `DATABASE_URL=sqlite:// python -m pytest` → 973 passed, 235 skipped, 47 warnings (1208 collected).
+  - collection-only 테스트 보고서를 `python -m scripts.dev_gate inventory <report>`에 전달해 `docs/dev-automation/test-baseline.json`을 1,208개 테스트로 갱신했다. collection-only 검사에만 비접속 placeholder를 사용했으며 DB에 연결하지 않았다.
+- PostgreSQL 검증은 `SIGNUP_TEST_DATABASE_URL`이 설정되지 않아 skip됐다. 격리된 `toi_walk_test_*` DB 연결 설정 후 `tests/test_seed_dev_data_postgres.py`를 실제 실행해야 한다. `.env` 파일은 없었고, 비밀값이나 DB 연결 문자열은 문서에 기록하지 않았다.

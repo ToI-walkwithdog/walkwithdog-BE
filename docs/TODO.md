@@ -145,6 +145,16 @@
 - [x] `docs/migrations/README.md` 사용 문서 보강 (`scripts/apply_migrations.py` dry-run, `--apply` 필수 인자 및 가드, 종료 코드 0/1/2/3, `apply-*.json` vs `init-*.json` 기록 구분, 복구/재개 절차)
 - [ ] 로컬/CI 격리 PostgreSQL(`SIGNUP_TEST_DATABASE_URL`, `psql`) 환경에서 `tests/test_apply_migrations_postgres.py` 실실행 및 실제 개발 DB 계정의 `pg_control_system()` 실행 권한 확인 (16-5/16-6 단계)
 
+## 16-7 공식 데이터 수집과 초기 데이터 구성 (#116)
+
+- [x] `scripts/seed_dev_data.py`에서 `current_pledge_version`을 `app.pledge_service`에서 가져오고, 세 정책 버전이 미설정일 때 시연용 기본값을 적용한 뒤 원래 환경을 복구한다.
+- [x] 동의 기록과 지역 레벨 비교를 실제 DB 계약에 맞추고, 보호소 주소 매칭은 후보 지역을 보고한다. 공공 데이터 수집은 모의 응답으로만 검증했으며 실데이터 API/DB 적용은 수행하지 않았다.
+- [x] SQLite 테스트에서 가상 시드의 목록 조회부터 예약, 승인, 보호소 코드, 산책 종료와 인계까지 검증한다. 테스트용 DB 의존성, 지역 필터, 응답 필드 및 시간 제어를 실제 API 계약에 맞췄다.
+- [x] `python -m pytest -v tests/test_seed_dev_data.py tests/test_seed_dev_data_postgres.py` → 5 passed, 1 skipped.
+- [x] `python -m pytest` (`DATABASE_URL=sqlite://`) → 973 passed, 235 skipped, 47 warnings. 1,208개 테스트를 수집했다.
+- [x] collection-only 보고서와 `python -m scripts.dev_gate inventory <report>`로 `docs/dev-automation/test-baseline.json`을 1,208개 테스트 기준으로 갱신했다.
+- [ ] `SIGNUP_TEST_DATABASE_URL`에 격리 PostgreSQL이 없어 `tests/test_seed_dev_data_postgres.py`를 실제 DB에서 실행하지 못했다. DB 연결 설정 후 스키마 격리 테스트를 실행한다.
+
 ## 인증번호 발송의 등록 여부 비노출 (#110)
 
 - [ ] 17단계 FE 연동: 발송 200은 서버의 접수일 뿐 문자 수신이 아니다. 문자가 오지 않으면 60초 뒤 다시 요청하게 안내한다. 503 `SMS_DELIVERY_UNAVAILABLE`은 공급자 미설정(고정 인증번호 설정 오류 포함, #124)이나 발송 대기열 포화일 때만 온다. 발송 409 `PHONE_ALREADY_REGISTERED`와 확인 409 `VERIFICATION_NOT_SENT`는 더 이상 오지 않는다. 비동기 발송은 프로세스 종료 시 유실될 수 있고, 재요청으로 복구한다.
