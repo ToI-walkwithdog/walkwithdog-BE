@@ -463,18 +463,18 @@ def _ensure_completed_user_state(db, user: User, region_code: str | None, now: d
         created += 1
 
     if db.get(VolunteerOnboardingExperience, user.id) is None:
-        db.add(
-            VolunteerOnboardingExperience(
-                user_id=user.id,
-                has_experience=True,
-                experienced_breeds_text="푸들, 진도믹스",
-                dog_size_code="MEDIUM",
-                walking_frequency="WEEKLY_1_2",
-                perceived_difficulty="EASY",
-                completed_at=now,
-                updated_at=now,
-            )
+        experience = VolunteerOnboardingExperience(
+            user_id=user.id,
+            has_experience=True,
+            experienced_breeds_text="푸들, 진도믹스",
+            dog_size_code="MEDIUM",
+            walking_frequency="WEEKLY_1_2",
+            perceived_difficulty="EASY",
+            completed_at=now,
+            updated_at=now,
         )
+        db.add(experience)
+        db.flush()  # The challenge row references this record directly.
         db.add(
             VolunteerExperienceChallenge(
                 user_id=user.id,

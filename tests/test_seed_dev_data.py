@@ -5,7 +5,7 @@ import secrets
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -37,12 +37,19 @@ from scripts.seed_dev_data import (
 REGION_ZIP = "data/regions/legal_dong_code_full_20261123.zip"
 
 
-def _sqlite_session():
+def _sqlite_session(*, foreign_keys=False):
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    if foreign_keys:
+        @event.listens_for(engine, "connect")
+        def enable_foreign_keys(connection, _):
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
     Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     return engine, Session
@@ -71,7 +78,7 @@ def test_seed_refused_in_production_and_never_leaks_password(monkeypatch, capsys
 
 
 def test_preview_apply_idempotency_and_real_data_untouched(monkeypatch):
-    _, Session = _sqlite_session()
+    _, Session = _sqlite_session(foreign_keys=True)
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("TEST_SEED_PW", "SeedPass!2026")
     for key in (
