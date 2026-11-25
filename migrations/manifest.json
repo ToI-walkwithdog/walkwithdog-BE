@@ -105,7 +105,7 @@
     },
     {
       "file": "008_gps_motion_analysis.sql",
-      "sha256": "dd65a461239c74f364dcd61c407de5e7881aa4fd80a1643db70e1fabd5e59c91",
+      "sha256": "b7a71064416a72ab21c89056464d589bc23fb6a6f61aece98c71a764ca3d3e42",
       "requires": [
         "007_walk_domain.sql"
       ],

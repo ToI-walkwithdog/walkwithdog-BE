@@ -24,6 +24,7 @@ from scripts.apply_migrations import (
     build_schema_record,
     compare_catalog_snapshots,
     create_model_init_evidence,
+    dry_run_main,
     extract_sqlstate,
     plan_actions,
     print_plan,
@@ -215,6 +216,7 @@ class FakeExecutor:
         self.db_name = db_name
         self.system_identifier = system_identifier
         self.identity_error: Exception | None = None
+        self.identity_calls = 0
         self.execute_calls: list[tuple[bytes, str]] = []
         self.results: list[tuple[int, str | None]] = []
         self.default_result: tuple[int, str | None] = (0, None)
@@ -229,6 +231,7 @@ class FakeExecutor:
         return self.backup_list_rc, self.backup_list_output
 
     def query_db_identity(self) -> tuple[str, str]:
+        self.identity_calls += 1
         if self.identity_error is not None:
             raise self.identity_error
         return self.db_name, self.system_identifier
@@ -276,6 +279,110 @@ def test_apply_blocked_plan_refuses_before_db(inventory, tmp_path):
     assert rc == 1
     assert executor.execute_calls == []
     assert list(args.record_dir.glob("apply-*.json")) == []
+
+
+def test_apply_absent_prerequisite_chain_runs_in_manifest_order(inventory, tmp_path):
+    root, manifest = inventory
+    first = add_migration(inventory, FIRST)
+    second = add_migration(inventory, SECOND, requires=[FIRST])
+    save_manifest(root, manifest)
+    args = make_args(tmp_path, root)
+    write_evidence(
+        args.evidence,
+        "dev",
+        {
+            FIRST: {"state": "absent", "sha256": first["sha256"], "proof": "first catalog check"},
+            SECOND: {"state": "absent", "sha256": second["sha256"], "proof": "second catalog check"},
+        },
+    )
+    executor = FakeExecutor()
+
+    assert apply_main(args, executor=executor) == 0
+    assert executor.identity_calls == 1
+    assert len(executor.execute_calls) == 2
+    run_file = next(args.record_dir.glob("apply-*.json"))
+    record = json.loads(run_file.read_text(encoding="utf-8"))
+    assert [entry["file"] for entry in record["files"]] == [FIRST, SECOND]
+    assert [entry["proof"] for entry in record["files"]] == ["first catalog check", "second catalog check"]
+
+
+@pytest.mark.parametrize(
+    "prerequisite_record",
+    [
+        {"state": "unknown", "proof": "prerequisite inspection"},
+        {"state": "partial", "proof": "prerequisite inspection"},
+        {"state": "schema-match", "proof": "prerequisite inspection"},
+        None,
+    ],
+    ids=["unknown", "partial", "schema-match", "missing"],
+)
+def test_apply_absent_file_rejects_unverified_prerequisite(
+    inventory, tmp_path, prerequisite_record
+):
+    root, manifest = inventory
+    add_migration(inventory, FIRST)
+    second = add_migration(inventory, SECOND, requires=[FIRST])
+    save_manifest(root, manifest)
+    args = make_args(tmp_path, root)
+    evidence = {
+        SECOND: {"state": "absent", "sha256": second["sha256"], "proof": "catalog check"},
+    }
+    if prerequisite_record is not None:
+        evidence[FIRST] = prerequisite_record
+    write_evidence(
+        args.evidence,
+        "dev",
+        evidence,
+    )
+    executor = FakeExecutor()
+
+    assert apply_main(args, executor=executor) == 1
+    assert executor.identity_calls == 0
+    assert executor.execute_calls == []
+    assert list(args.record_dir.glob("apply-*.json")) == []
+
+
+def test_apply_absent_file_rejects_prerequisite_checksum_mismatch(inventory, tmp_path):
+    root, manifest = inventory
+    add_migration(inventory, FIRST)
+    second = add_migration(inventory, SECOND, requires=[FIRST])
+    save_manifest(root, manifest)
+    args = make_args(tmp_path, root)
+    write_evidence(
+        args.evidence,
+        "dev",
+        {
+            FIRST: {"state": "applied", "sha256": "0" * 64, "proof": "execution record"},
+            SECOND: {"state": "absent", "sha256": second["sha256"], "proof": "catalog check"},
+        },
+    )
+    executor = FakeExecutor()
+
+    assert apply_main(args, executor=executor) == 1
+    assert executor.identity_calls == 0
+    assert executor.execute_calls == []
+    assert list(args.record_dir.glob("apply-*.json")) == []
+
+
+def test_dry_run_projects_absent_prerequisite_chain_as_ready(inventory, tmp_path, capsys):
+    root, manifest = inventory
+    first = add_migration(inventory, FIRST)
+    second = add_migration(inventory, SECOND, requires=[FIRST])
+    save_manifest(root, manifest)
+    args = make_args(tmp_path, root, apply=False)
+    write_evidence(
+        args.evidence,
+        "dev",
+        {
+            FIRST: {"state": "absent", "sha256": first["sha256"], "proof": "first catalog check"},
+            SECOND: {"state": "absent", "sha256": second["sha256"], "proof": "second catalog check"},
+        },
+    )
+
+    assert dry_run_main(args) == 0
+    output = capsys.readouterr().out
+    assert output.count("READY_TO_APPLY") == 2
+    assert "BLOCKED_PREREQUISITES" not in output
 
 
 def test_apply_confirm_apply_mismatch_returns_3(inventory, tmp_path):

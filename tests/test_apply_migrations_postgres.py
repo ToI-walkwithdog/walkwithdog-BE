@@ -10,10 +10,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from scripts import check_migrations as checker
@@ -23,6 +26,7 @@ from scripts.apply_migrations import (
     apply_main,
     compare_catalog_snapshots,
     create_model_init_evidence,
+    validate_backup_file,
 )
 from scripts.prepare_demo_db import PreparationError, validate_local_engine
 
@@ -68,22 +72,9 @@ class IsolatedSchema:
 class SchemaScopedExecutor(MigrationExecutor):
     """Executor bound to a specific isolated schema via PGOPTIONS search_path."""
 
-    def __init__(self, db_url: str, schema: str, db_name: str):
+    def __init__(self, schema: str):
         super().__init__()
-        self.db_url = db_url
         self.schema = schema
-        self.db_name = db_name
-
-    def check_pg_restore_available(self) -> bool:
-        return True
-
-    def inspect_backup_list(self, backup_path: Path) -> tuple[int, str]:
-        return 0, f";\n;     dbname: {self.db_name}\n;\n"
-
-    def _with_libpq_env(self):
-        env = os.environ.copy()
-        env["PGOPTIONS"] = f"-csearch_path={self.schema}"
-        return env
 
     def execute_bytes(self, sql_bytes: bytes, transaction: str) -> tuple[int, str | None]:
         old_opts = os.environ.get("PGOPTIONS")
@@ -99,20 +90,61 @@ class SchemaScopedExecutor(MigrationExecutor):
 
 @unittest.skipUnless(TEST_URL and shutil.which("psql"), "격리 PostgreSQL 및 psql이 필요합니다")
 class ApplyMigrationsPostgresTests(IsolatedSchema, unittest.TestCase):
+    @staticmethod
+    def _libpq_environment() -> dict[str, str]:
+        url = make_url(TEST_URL)
+        env = os.environ.copy()
+        fields = {
+            "PGHOST": url.host,
+            "PGPORT": str(url.port) if url.port is not None else None,
+            "PGUSER": url.username,
+            "PGPASSWORD": url.password,
+            "PGDATABASE": url.database,
+        }
+        for key, value in fields.items():
+            if value is not None:
+                env[key] = value
+
+        query_fields = {
+            "sslmode": "PGSSLMODE",
+            "sslcert": "PGSSLCERT",
+            "sslkey": "PGSSLKEY",
+            "sslrootcert": "PGSSLROOTCERT",
+            "application_name": "PGAPPNAME",
+            "options": "PGOPTIONS",
+            "connect_timeout": "PGCONNECT_TIMEOUT",
+        }
+        for query_key, env_key in query_fields.items():
+            value = url.query.get(query_key)
+            if value is not None:
+                env[env_key] = str(value)
+        return env
+
     def _make_dummy_backup(self, tmp_dir: Path) -> Path:
         bak = tmp_dir / "verified.dump"
-        bak.write_bytes(b"PGDMP_VERIFIED")
+        pg_dump = shutil.which("pg_dump")
+        if pg_dump is None:
+            self.fail("pg_dump executable not found")
+        result = subprocess.run(
+            [pg_dump, "--format=custom", "--no-password", "--file", str(bak)],
+            env=self._libpq_environment(),
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.fail(f"pg_dump failed (exit={result.returncode})")
         return bak
 
     def _seed_pre_001_tables(self, engine) -> None:
         with engine.begin() as conn:
             conn.exec_driver_sql(
                 "CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, nickname VARCHAR(50), "
-                "phone VARCHAR(30), created_at TIMESTAMPTZ DEFAULT NOW())"
+                "email VARCHAR(255), password VARCHAR(255) DEFAULT '', phone VARCHAR(30), created_at TIMESTAMPTZ DEFAULT NOW())"
             )
+            conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS shelters (id SERIAL PRIMARY KEY, name VARCHAR(100))")
             conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS dogs (id SERIAL PRIMARY KEY, name VARCHAR(50))")
             conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS surveys (id SERIAL PRIMARY KEY)")
-            conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS matching_results (id SERIAL PRIMARY KEY)")
+            conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS matching_results (id SERIAL PRIMARY KEY, dog_id INTEGER)")
 
     def test_full_apply_rerun_skip_and_schema_record(self):
         engine, schema, identity = self.isolated_schema()
@@ -145,10 +177,12 @@ class ApplyMigrationsPostgresTests(IsolatedSchema, unittest.TestCase):
                 record_dir=rec_dir,
                 schema_record_out=schema_record_out,
             )
-            executor = SchemaScopedExecutor(TEST_URL, schema, identity["database"])
+            executor = SchemaScopedExecutor(schema)
             provider = Pg16PublicV1SnapshotProvider()
 
-            rc = apply_main(args, executor=executor, snapshot_provider=provider)
+            with patch.dict(os.environ, self._libpq_environment()):
+                self.assertIsNotNone(validate_backup_file(bak, identity["database"], MigrationExecutor()))
+                rc = apply_main(args, executor=executor, snapshot_provider=provider)
             self.assertEqual(rc, 0)
             self.assertTrue(schema_record_out.is_file())
 
@@ -159,7 +193,8 @@ class ApplyMigrationsPostgresTests(IsolatedSchema, unittest.TestCase):
             }
             ev_path.write_text(json.dumps({"environment": "local-test", "files": ev_applied}), encoding="utf-8")
             args.schema_record_out = None
-            rc2 = apply_main(args, executor=executor, snapshot_provider=provider)
+            with patch.dict(os.environ, self._libpq_environment()):
+                rc2 = apply_main(args, executor=executor, snapshot_provider=provider)
             self.assertEqual(rc2, 0)
 
     def test_partial_failure_stops_and_blocks_resume(self):
@@ -208,8 +243,9 @@ class ApplyMigrationsPostgresTests(IsolatedSchema, unittest.TestCase):
                 backup_file=bak,
                 record_dir=rec_dir,
             )
-            executor = SchemaScopedExecutor(TEST_URL, schema, identity["database"])
-            rc = apply_main(args, executor=executor)
+            executor = SchemaScopedExecutor(schema)
+            with patch.dict(os.environ, self._libpq_environment()):
+                rc = apply_main(args, executor=executor)
             self.assertEqual(rc, 2)
             runs = list(rec_dir.glob("apply-*.json"))
             self.assertEqual(len(runs), 1)
@@ -218,8 +254,9 @@ class ApplyMigrationsPostgresTests(IsolatedSchema, unittest.TestCase):
 
     def test_model_init_equivalence_and_app_smoke(self):
         from fastapi.testclient import TestClient
-        from app.database import Base, get_db
-        from app.main import app
+        with patch.dict(os.environ, {"DATABASE_URL": "sqlite://", "AUTO_CREATE_SCHEMA": "false"}):
+            from app import main as app_module
+            from app.database import Base, get_db as database_get_db
 
         engine_model, schema_model, identity = self.isolated_schema()
         Base.metadata.create_all(bind=engine_model)
@@ -252,10 +289,12 @@ class ApplyMigrationsPostgresTests(IsolatedSchema, unittest.TestCase):
             finally:
                 db.close()
 
-        app.dependency_overrides[get_db] = override_get_db
-        try:
-            client = TestClient(app)
+        overrides = app_module.app.dependency_overrides
+        previous_overrides = overrides.copy()
+        self.addCleanup(overrides.update, previous_overrides)
+        self.addCleanup(overrides.clear)
+        overrides[app_module.get_db] = override_get_db
+        overrides[database_get_db] = override_get_db
+        with TestClient(app_module.app) as client:
             resp = client.get("/db-test")
             self.assertEqual(resp.status_code, 200)
-        finally:
-            app.dependency_overrides.clear()

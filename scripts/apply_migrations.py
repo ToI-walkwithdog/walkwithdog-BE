@@ -320,6 +320,43 @@ def is_blocked_action(action: str) -> bool:
     return action.startswith(("RECONCILE", "BLOCKED", "OUTSIDE_ENVIRONMENT"))
 
 
+def projected_apply_plan(environment: str, evidence_records: dict, migrations: list[dict]):
+    """Project absent migrations as applied to validate prerequisites before execution."""
+    observed_actions = plan_actions(environment, evidence_records, migrations)
+    absent_files = {
+        name
+        for name, _ in observed_actions
+        if evidence_records.get(name, {}).get("state") == "absent"
+    }
+    manifest_by_file = {row["file"]: row for row in migrations}
+    projected_records = {
+        name: dict(record)
+        for name, record in evidence_records.items()
+    }
+    for name in absent_files:
+        projected_records[name]["state"] = "applied"
+        projected_records[name]["sha256"] = manifest_by_file[name]["sha256"]
+
+    projected_actions = plan_actions(environment, projected_records, migrations)
+    observed_by_file = dict(observed_actions)
+    display_actions = []
+    for name, action in projected_actions:
+        if name in absent_files and observed_by_file[name].startswith("RECONCILE"):
+            action = observed_by_file[name]
+        elif name in absent_files and action == "SKIP_RECORDED":
+            action = "READY_TO_APPLY"
+        display_actions.append((name, action))
+
+    candidate_reconciliation = any(
+        name in absent_files and action.startswith("RECONCILE")
+        for name, action in observed_actions
+    )
+    blocked = candidate_reconciliation or any(
+        is_blocked_action(action) for _, action in projected_actions
+    )
+    return absent_files, observed_actions, display_actions, blocked
+
+
 def print_plan(environment: str, actions: list[tuple[str, str]], manifest_by_file: dict[str, dict] | None = None) -> None:
     print(f"evidence environment: {environment}")
     print("mode: dry-run (no database connection, no changes)")
@@ -579,14 +616,13 @@ def dry_run_main(args) -> int:
         environment = evidence["environment"]
         records = evidence["files"]
         migrations = manifest["migrations"]
-        actions = plan_actions(environment, records, migrations)
+        _, _, display_actions, blocked = projected_apply_plan(environment, records, migrations)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    blocked = any(is_blocked_action(action) for _, action in actions)
     manifest_by_file = {row["file"]: row for row in migrations}
-    print_plan(environment, actions, manifest_by_file=manifest_by_file)
+    print_plan(environment, display_actions, manifest_by_file=manifest_by_file)
 
     commit = git_commit()
     print(f"git_commit: {commit}")
@@ -647,14 +683,16 @@ def apply_main(
         environment = evidence["environment"]
         records = evidence["files"]
         migrations = manifest["migrations"]
-        actions = plan_actions(environment, records, migrations)
+        candidate_files, actions, display_actions, blocked = projected_apply_plan(
+            environment, records, migrations
+        )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     # (b) Reject blocked plans before any DB connection
-    if any(is_blocked_action(action) for _, action in actions):
-        for name, action in actions:
+    if blocked:
+        for name, action in display_actions:
             print(f"{action}: {name}")
         print("ERROR: plan contains blocked actions; refusing to connect to database", file=sys.stderr)
         return 1
@@ -662,13 +700,10 @@ def apply_main(
     # (c) Read SQL files once, verify checksums, and reject psql meta-commands
     manifest_by_file = {row["file"]: row for row in migrations}
     prepared_files: list[tuple[dict, bytes, str, dict]] = []
-    for name, action in actions:
-        if action == "SKIP_RECORDED":
+    for row in migrations:
+        name = row["file"]
+        if name not in candidate_files:
             continue
-        row = manifest_by_file.get(name)
-        if row is None:
-            print(f"ERROR: {name} not in manifest", file=sys.stderr)
-            return 1
         sql_path = args.root / "migrations" / name
         try:
             sql_bytes = sql_path.read_bytes().replace(b"\r\n", b"\n")
