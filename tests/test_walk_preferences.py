@@ -205,13 +205,24 @@ class PreferencePatchTests(PreferenceTestCase):
         self.assertEqual(self.data(self.patch_preferences({"expected_version": 0, "size_code": "SMALL"}))["version"], 1)
 
     def test_a_primary_key_collision_on_first_save_is_a_version_conflict(self):
-        # Any other integrity error (no row behind it) is not hidden as 409.
-        other = IntegrityError("INSERT", {}, Exception("synthetic check violation"))
-        with patch.object(OrmSession, "flush", side_effect=other), self.assertLogs("app.api_contract", "ERROR"):
+        original_flush = OrmSession.flush
+
+        def failing_write_flush(session, *args, **kwargs):
+            """Fail only the flush that writes the preference row (not autoflushes of reads)."""
+            if any(isinstance(row, VolunteerWalkPreference) for row in (*session.new, *session.dirty)):
+                raise IntegrityError("WRITE", {}, Exception("synthetic check violation"))
+            return original_flush(session, *args, **kwargs)
+
+        # Any other integrity error is not hidden as 409: on the first INSERT (no row behind it) ...
+        with patch.object(OrmSession, "flush", failing_write_flush), self.assertLogs("app.api_contract", "ERROR"):
             self.assert_error(self.patch_preferences({"expected_version": 0, "size_code": "SMALL"}),
                               500, "INTERNAL_SERVER_ERROR")
         self.assertEqual(self.preference_rows(), 0)
         self.data(self.patch_preferences({"expected_version": 0, "size_code": "SMALL"}))
+        # ... nor on an UPDATE of an existing row.
+        with patch.object(OrmSession, "flush", failing_write_flush), self.assertLogs("app.api_contract", "ERROR"):
+            self.assert_error(self.patch_preferences({"expected_version": 1, "size_code": "MEDIUM"}),
+                              500, "INTERNAL_SERVER_ERROR")
         # As if another first save committed right after this request read "no row".
         with patch.object(walk_preference_service, "current_preference", return_value=None):
             self.assert_error(self.patch_preferences({"expected_version": 0, "size_code": "LARGE"}),

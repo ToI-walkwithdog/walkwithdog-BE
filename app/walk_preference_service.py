@@ -120,6 +120,7 @@ def current_preference(db: Session, user_id: int) -> VolunteerWalkPreference | N
 
 def update_preferences(db: Session, user_id: int, body, now: datetime) -> dict:
     changes = parse_patch(body)
+    inserting = False
     try:
         user = lock_user(db, user_id, for_update=True)
         if user is None:
@@ -136,6 +137,7 @@ def update_preferences(db: Session, user_id: int, body, now: datetime) -> dict:
             db.rollback()  # nothing to write: end the locking transaction
             return result
         if preference is None:
+            inserting = True
             preference = VolunteerWalkPreference(user_id=user_id, version=1, updated_at=now,
                                                  **{field: changes[field] for field in changed})
             db.add(preference)
@@ -155,8 +157,9 @@ def update_preferences(db: Session, user_id: int, body, now: datetime) -> dict:
     except IntegrityError:
         db.rollback()
         # Another first save won the user_id primary key (the users lock makes this unreachable;
-        # the key is the last guard). Any other violation stays a 500 instead of hiding as 409.
-        if db.query(VolunteerWalkPreference.user_id).filter(VolunteerWalkPreference.user_id == user_id).first():
+        # the key is the last guard). Any other violation, or any on an UPDATE, stays a 500.
+        if inserting and db.query(VolunteerWalkPreference.user_id).filter(
+                VolunteerWalkPreference.user_id == user_id).first():
             raise version_mismatch() from None
         raise
     except Exception:
