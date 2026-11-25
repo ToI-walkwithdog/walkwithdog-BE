@@ -50,9 +50,9 @@ SMS 정책 변경(확정, 2026-11-25): 최종 배포는 기능 테스트와 시�
 
 | 단계 | 작업 | 담당 | Issue | 상태 |
 | --- | --- | --- | --- | --- |
-| 16-1 | 전화번호 등록 여부 노출 방지 | 사용자 | #110 | dev 병합 완료. PG 일일 한도 롤백 검증 후 종료 |
-| 16-2 | Mock SMS 테스트 환경 구성(이전: SOLAPI 어댑터) | 사용자 | [#124](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/124) | 고정 인증번호와 내부 합성 테스트 번호 대역 확정 |
-| 16-3 | 배포 환경변수 템플릿과 설정(SOLAPI 제외) | 사용자 | 추후 | 예정 |
+| 16-1 | 전화번호 등록 여부 노출 방지 | 사용자 | #110 | dev 병합 및 PG 추가 검증, Issue 종료 완료 |
+| 16-2 | Mock SMS 테스트 환경 구성(이전: SOLAPI 어댑터) | 사용자 | [#124](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/124) | PR #126 dev 병합 및 Issue 종료 완료 |
+| 16-3 | 배포 환경변수 템플릿, 비밀값 절차, 설정 점검(SOLAPI 제외) | 사용자 | [#128](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/128) | 템플릿과 점검 구현, 검증 범위. 실제 서버 적용은 별도 승인 |
 | 16-4 | 통합 DB 마이그레이션 도구 구현과 검증 | BE 팀원 | [#113](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/113) | 예정 |
 | 16-5 | 실제 개발 DB 읽기 전용 조사 | BE 팀원 | [#114](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/114) | 예정 |
 | 16-6 | 실제 개발 DB 마이그레이션 적용 | BE 팀원 | [#115](https://github.com/ToI-walkwithdog/walkwithdog-BE/issues/115) | 예정 |
@@ -98,7 +98,7 @@ FE 담당자의 역할과 FE Issue는 이 문서 범위가 아니다. FE 연동 
 | 16-7 | 도구는 없음. 실제 적용은 #115 이후 |
 | 16-8 | 위치정보 고지와 동의 범위, 키 발급 결정 |
 | 16-9 | 정책 문서 출처, 레벨 정책 버전과 시작 시각 결정. 실제 적용은 #115, #116 이후 |
-| 16-10 | 16-2, 16-3, 16-6, 16-7, 16-9, 배포 파이프라인 |
+| 16-10 | 16-2, 16-3, 16-6, 16-7, 16-9, 배포 파이프라인. 승인된 실제 환경 설정 검증과 프록시 뒤 요청 제한 확인 포함 |
 
 ## 5. 브랜치, Worktree, 변경 경로와 충돌 방지
 

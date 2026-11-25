@@ -92,7 +92,8 @@ class AccessControlTests(unittest.TestCase):
 
     def setUp(self):
         env = patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION,
-                                      "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef"})
+                                      "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef",
+                                      "SMS_MOCK_FIXED_CODE": ""})  # no fixed code from the shell (#128)
         env.start()
         self.addCleanup(env.stop)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)

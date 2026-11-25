@@ -31,7 +31,8 @@ from privacy_test_support import onboarding_agreements, use_test_privacy_policy
 
 PLEDGE_VERSION = "pledge-test-v1"  # test-only values
 TEST_ENV = {"PLEDGE_CURRENT_VERSION": PLEDGE_VERSION,
-            "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef"}
+            "PHONE_VERIFICATION_HMAC_KEY": "test-only-hmac-key-0123456789abcdef",
+            "SMS_MOCK_FIXED_CODE": ""}  # SMS_MOCK_FIXED_CODE: a shell or root .env value must not reach these tests (#128)
 START = datetime(2026, 11, 24, 1, 0, tzinfo=timezone.utc)
 PASSWORD = "WalkTogether2026!"
 ME = "/users/me"
