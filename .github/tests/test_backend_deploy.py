@@ -391,6 +391,8 @@ class ClassifyTests(unittest.TestCase):
                                           api="api absent"),
             "success result": status_text("status=ready current=- previous=- last_result=success",
                                           api="api absent"),
+            "unchanged result": status_text("status=ready current=- previous=- last_result=unchanged",
+                                            api="api absent"),
             "api present": status_text("status=ready current=- previous=- last_result=failed"),
             "api exited": status_text("status=ready current=- previous=- last_result=failed",
                                       api=API_OK.replace("running healthy", "exited none")),

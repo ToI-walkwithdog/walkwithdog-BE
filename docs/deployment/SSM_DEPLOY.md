@@ -65,10 +65,10 @@ SSM 문서 버전은 코드에 고정한다. `ToI-DeploymentStatus`는 `1`(#121�
 | 최초 배포 재시도 | `status=ready current=- previous=- last_result=failed`, `api absent`, DB 컨테이너 `running healthy`를 모두 만족 | 관리자가 수동으로 다시 실행한 경우에 한해 배포 허용 |
 | 정상 운영 | `status=ready`, `current`에 Digest가 있고 API와 DB가 `running healthy` | 배포 허용 |
 | 작업 중 | `deployment=busy` | 중단, 진행 중인 작업이 끝난 뒤 재실행 |
-| 장애 | `in_progress`, `blocked`, 기록된 `current`가 있는데 API가 없거나 비정상, `current`가 없는데 `previous`나 API가 있거나 `last_result`가 `running` 또는 `success`, 최초 배포 전인데 DB 미준비 | 중단, [롤백과 수동 복구](https://github.com/ToI-walkwithdog/walkwithdog-BE/blob/dev/docs/deployment/ROLLBACK.md) 절차로 확인 |
+| 장애 | `in_progress`, `blocked`, 기록된 `current`가 있는데 API가 없거나 비정상, `current`가 없는데 `previous`나 API가 있거나 `last_result`가 `none`, `failed` 이외의 값, 최초 배포 전인데 DB 미준비 | 중단, [롤백과 수동 복구](https://github.com/ToI-walkwithdog/walkwithdog-BE/blob/dev/docs/deployment/ROLLBACK.md) 절차로 확인 |
+| 조회 실패 | 상태 문서의 실패, 0이 아닌 응답 코드, 출력 형식 오류 | 중단 |
 
 최초 배포 재시도 상태는 `deploy.sh`가 최초 배포의 사전 점검(종료 코드 3, 6, 7 등)에서 API를 바꾸기 전에 중단하면서 기록한다. `deploy.sh`도 이 상태에서 재시도를 허용한다. Workflow는 이 상태를 자동으로 재시도하지 않고 서버 상태 파일을 초기화하지도 않는다. 관리자가 원인(승인 파일, ECR Pull 등)을 해결한 뒤 Workflow를 새로 실행하거나 전체 재실행해야 한다. 재시도에서도 `deploy.sh`가 DB 호환성 근거와 배포 사전 검증을 처음부터 다시 수행한다. 하나라도 조건이 어긋나면 장애로 보고 기존 차단 정책을 따른다.
-| 조회 실패 | 상태 문서의 실패, 0이 아닌 응답 코드, 출력 형식 오류 | 중단 |
 
 상태 출력 형식 검증은 AWS Connection Test(#121)의 규칙을 그대로 따른다. 체크섬 줄은 `deploy`, `rollback`, `deployment_common` 순서여야 한다. Summary에는 상태 줄의 값, 컨테이너 상태와 헬스, 설치 스크립트 SHA-256만 남긴다.
 
