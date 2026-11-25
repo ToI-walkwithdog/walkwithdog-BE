@@ -3,17 +3,26 @@
 ## 배포 환경변수 구성 (#128, 16-3)
 
 - 로컬 uvicorn [`.env.example`](../../.env.example), 로컬 Compose [`deploy/.env.example`](../../deploy/.env.example), EC2 API [`deploy/.env.api.example`](../../deploy/.env.api.example)를 구분한다. 템플릿은 비밀값을 비워 두며 그대로 실행하지 않는다. 실제 값은 승인 후 입력한다.
-- EC2의 `.env`는 DB 초기 구성, `.env.api`는 API 접속 및 기능 설정으로 분리한다. HMAC 키는 환경별, 용도별로 분리하며 SOLAPI를 연동하지 않는다. #116~#118 담당자가 승인된 기능 설정을 전달한다. `ACCOUNT_EXIT_RECORD_POLICY`는 미설정으로 둔다.
+- EC2의 `.env`는 DB 초기 구성, `.env.api`는 API 접속 및 기능 설정으로 분리한다. HMAC 키는 환경별, 용도별로 분리하며 SOLAPI를 연동하지 않는다. #116~#118 담당자가 승인된 기능 설정을 전달한다. `ACCOUNT_EXIT_RECORD_POLICY`는 #118에서 변경하지 않는다.
 - `scripts/check_runtime_env.py`는 템플릿과 실제 배포 설정을 구분해 읽기 전용으로 검사한다. 비밀값은 출력하지 않는다. 일반 인증 테스트는 고정 OTP 환경변수와 분리하고 루트 `.env`에는 고정 OTP 값을 두지 않는다. 테스트, 리뷰, CI 결과는 #128 PR을 참조한다.
 - 실제 EC2 환경 파일 작성, DB 변경, AWS 설정 및 배포는 별도 승인 대상이다. 최초 시연 서버 배포 전 설정 검증, Mock SMS, 접근 제한 및 프록시 뒤 요청 제한을 확인한다. [EC2 설치](../deployment/EC2_SETUP.md), [실행 절차](../deployment/RUNBOOK.md)
 
 ## 서비스 정책 설정 (#118, 16-9)
 
-- 시연용 문서는 `policies/terms/terms-demo-v1.md`와 `policies/privacy/privacy-demo-v1.md`다. 실제 법률 문구가 아니며, 운영 적용 전에 승인된 약관과 개인정보 처리방침으로 교체해야 한다. 문서 조회 버전은 `TERMS_DOCUMENT_VERSION`, `PRIVACY_DOCUMENT_VERSION`, 서약 버전은 `PLEDGE_CURRENT_VERSION`, 필수 동의 설정은 `PRIVACY_REQUIRED_CONSENTS`와 일치시킨다.
+- 16-3 담당자가 `terms-demo-v1` 및 `privacy-demo-v1`을 시연·테스트용 임시 문서로 승인했다. 실제 법률 문구가 아니며, 정식 약관과 개인정보 처리방침 승인 시 `policies/README.md` 절차로 새 버전을 등록해 교체한다. 승인된 v1 본문은 수정하지 않는다.
+- 배포 담당자는 아래 값을 배포 호스트 `deploy/.env.api`에 설정한다. 나열한 값은 형식 예시이며, 이 저장소에는 실제 운영 시작 시각이나 비밀값을 기록하지 않는다.
+  - `TERMS_DOCUMENT_VERSION=terms-demo-v1` (비밀 아님)
+  - `PRIVACY_DOCUMENT_VERSION=privacy-demo-v1` (비밀 아님)
+  - `PRIVACY_REQUIRED_CONSENTS=PRIVACY_COLLECTION_USE` (비밀 아님; 현재 필수 동의 코드)
+  - `PLEDGE_CURRENT_VERSION=pledge-demo-v1` (비밀 아님)
+  - `SHELTER_CODE_HMAC_KEY=<64자리 hex>` (비밀; 32바이트 난수)
+  - `VOLUNTEER_LEVEL_POLICY_VERSION=level-demo-v1` (비밀 아님)
+  - `VOLUNTEER_LEVEL_POLICY_START_AT=2026-12-01T00:00:00Z` (비밀 아님; 오픈 직전 UTC 시각의 형식 예시)
+- 16-3 배포 담당자는 `SHELTER_CODE_HMAC_KEY`를 `python -c "import secrets; print(secrets.token_hex(32))"`로 생성해 `.env.api`에만 보관한다. 저장소·Issue·로그에 키를 남기지 않는다. `ACCOUNT_EXIT_RECORD_POLICY`는 변경하지 않는다.
+- 신규 시드/시연 환경은 정책 시작 시각 이후 산책만 집계하므로 `scripts/backfill_volunteer_stats.py`를 초기 구축 때 실행하지 않는다. 운영 중 누적 통계 보정이 필요할 때만 수동 실행한다.
 - 정책 manifest의 `sha256`은 UTF-8 본문에서 CRLF를 LF로 정규화한 바이트 기준이다. 런타임도 같은 정규화를 적용하므로 Windows와 Linux 체크아웃에서 동일하다.
-- `SHELTER_CODE_HMAC_KEY`는 32바이트 난수(64자리 hex)를 권장하고 `deploy/.env.api`에만 저장한다. `VOLUNTEER_LEVEL_POLICY_VERSION`과 `VOLUNTEER_LEVEL_POLICY_START_AT`은 함께 설정해야 레벨 평가가 켜진다. 실제 비밀값과 운영 시작 시각은 이 저장소나 테스트 문서에 기록하지 않는다.
-- 이 작업은 환경변수 전달 문서와 설정 동작 테스트만 구성한다. 법률 검토, 실서버 파일 수정, DB 적용 및 배포는 별도 승인 후 진행한다.
-- 로컬 전체 테스트는 `DATABASE_URL=sqlite:// python -m pytest -q` 기준 920 passed, 231 skipped, 47 warnings였다. PostgreSQL 전용 그룹은 격리 테스트 DB URL을 설정하지 않아 skip됐으며, CI에서 disposable PostgreSQL로 다시 검증해야 한다. 테스트 수집 인벤토리는 1,151개 수집 ID와 일치하도록 갱신했다.
+- `VOLUNTEER_LEVEL_POLICY_VERSION`과 `VOLUNTEER_LEVEL_POLICY_START_AT`은 함께 설정해야 레벨 평가가 켜진다. 시작 시각은 UTC ISO-8601 형식이며, 위 날짜는 예시일 뿐 실제 설정은 시연 오픈 직전에 한다.
+- 이 Issue에서는 배포 호스트 `.env.api` 수정, DB 적용 및 서버 배포를 하지 않는다. 정책·가입·시드 산책·보호소 코드·레벨 정책 테스트와 최종 전체 테스트 결과는 해당 PR의 검증 내역을 참조한다.
 
 ## Mock SMS 테스트 환경 (#124)
 
