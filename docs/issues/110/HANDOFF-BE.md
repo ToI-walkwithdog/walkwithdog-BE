@@ -18,8 +18,8 @@
 
 ## 0. 공통 작업 규칙
 
-- **Issue 전달 절차**: 착수는 [docs/dev-automation/RUNBOOK.md](../../dev-automation/RUNBOOK.md)의 승인 절차를 따른다. 브랜치는 `feature/`, `fix/`, `chore/`, `test/`, `docs/` 소문자 kebab-case이고 AI 도구 이름을 쓰지 않는다.
-- **보호 경로**: `.github/`, `docs/dev-automation/`(기준 목록 `test-baseline.json` 제외), `scripts/dev_*`, `scripts/issue_delivery.py`, `scripts/check_migrations.py`, `tests/test_dev_delivery.py`, `CLAUDE.md`, `AGENTS.md`, `.gitignore`는 기능 PR로 바꿀 수 없다. 필요하면 사람이 검토하고 병합하는 별도 유지보수 PR로 분리한다.
+- **Issue 전달 절차**: 착수는 [docs/dev-automation/RUNBOOK.md](../../dev-automation/RUNBOOK.md)의 승인 절차를 따른다. 브랜치는 `feature/`, `fix/`, `refactor/`, `chore/`, `test/`, `docs/` 소문자 kebab-case이고 AI 도구 이름을 쓰지 않는다.
+- **보호 경로**: `.github/`, `docs/dev-automation/`(기준 목록 `test-baseline.json` 제외), `scripts/dev_*`, `scripts/issue_delivery.py`, `scripts/check_migrations.py`, `tests/test_dev_delivery.py`, `CLAUDE.md`, `AGENTS.md`, `.gitignore`와 테스트 설정 파일(`conftest.py`, `pytest.ini`, `pyproject.toml`, `tox.ini`, `setup.cfg`, `requirements.txt`, `scripts/issue_delivery.py`의 `TEST_CONFIG`)은 기능 PR로 바꿀 수 없다. 새 의존성이 필요하면 미리 알린다. 필요하면 사람이 검토하고 병합하는 별도 유지보수 PR로 분리한다.
 - **DB 안전**
   - 실제 개발 DB 접속 정보는 추측하지 않고, 비밀 값과 연결 문자열을 Issue, PR, 로그, 문서에 남기지 않는다.
   - 테스트는 `toi_walk_test_*` 이름의 빈 로컬 PostgreSQL에서 격리 스키마로 한다(예: `tests/test_user_profile_postgres.py`의 `IsolatedSchema`).
@@ -33,7 +33,7 @@
 
 ### 현재 상태(확인함)
 
-- **`migrations/manifest.json`**(version 1): 정식 37개(001~037, 010 제외, 017과 018은 각각 두 파일), 예약 1개(`010_add_f04_walk_booking.sql`, branch-only). 항목마다 `file`, `sha256`(CRLF만 LF로 바꾼 바이트의 SHA-256), `requires`, `transaction`(`file` 또는 `psql-single`), `environments`, `prechecks`가 있다.
+- **`migrations/manifest.json`**(version 1): 정식 37개(001~037 중 010과 021은 없고, 017과 018은 각각 두 파일), 예약 1개(`010_add_f04_walk_booking.sql`, branch-only). 항목마다 `file`, `sha256`(CRLF만 LF로 바꾼 바이트의 SHA-256), `requires`, `transaction`(`file` 또는 `psql-single`), `environments`, `prechecks`가 있다.
 - **`scripts/check_migrations.py`**(보호 경로, 수정 금지): DB 없이 다음을 검사한다.
   - 기본: 파일과 manifest의 양방향 대조, 체크섬, 선행 SQL, 순환, 순서
   - `--evidence`: 파일별 기록 상태(`applied`, `absent`, `schema-match`, `partial`, `unknown`)로 적용 후보를 계획한다(`evidence_plan()`).
@@ -43,7 +43,7 @@
   - `backup_database(engine, directory)`: `pg_dump`, 0600 권한, 자격 증명을 인자에 넣지 않는다.
   - `validate_local_engine()`: **localhost만 허용**한다. 실제 개발 DB에는 쓸 수 없다.
 - **`scripts/walk_schema.py`**: 007의 카탈로그 계약을 읽기 전용으로 검증한다.
-- **`scripts/deployment_common.sh`의 `catalog_snapshot()`**: 배포 호환성 지문 `pg16-public-v1`을 만든다(`public` 스키마의 관계, 열, 제약, 인덱스, enum, 시퀀스, 함수, 뷰, 트리거 정의를 정규화한 SHA-256).
+- **`scripts/deployment_common.sh`**: `catalog_snapshot()`이 읽기 전용으로 카탈로그를 출력하고, `schema_evidence()`가 그 정규화 SHA-256(`pg16-public-v1` 지문)을 계산해 기록과 대조한다. 대상은 `public` 스키마의 관계, 열, 제약, 인덱스, enum, 시퀀스, 함수, 뷰, 트리거, RLS 정책, 확장 버전이다([EC2_SETUP.md](../../deployment/EC2_SETUP.md)).
 - **[docs/migrations/README.md](../../migrations/README.md)**: "모든 기능 개발 후" 절차 1~4, 파일별 사전과 사후 확인표, `psql` 단일 파일 실행 기준, 실패 복구 기준을 정의한다.
 
 ### 요구사항
@@ -118,7 +118,7 @@
   2. 호환성 기록과 이미지별 승인의 `migrations`에 037 파일명과 SHA-256을 넣는다.
   3. 카탈로그 지문은 037 적용 이후에 만든다.
   4. 모델 초기화 DB는 동등 스키마를 검증하고, 적용 이력과 초기화 증빙을 구분한다.
-  5. 배포 스크립트가 순서를 강제하지 않음을 승인 체크리스트에 명시한다.
+  5. 배포 스크립트는 지문과 DB 식별은 대조하지만 `migrations` 내용과 이미지 요구 스키마는 검사하지 않아 순서를 강제하지 않는다. 이를 승인 체크리스트에 명시하고 발급자가 확인한다.
   6. 이전 이미지로 롤백할 때 DB를 되돌리지 않는다.
 - 적용 후 `schema-record.json`과 이미지별 승인 파일을 [EC2_SETUP.md](../../deployment/EC2_SETUP.md) 형식으로 발급할 수 있게 자료를 넘긴다. 발급과 배포는 배포 담당(사용자)이 한다.
 - 적용 후 스모크: 앱 부팅, `/db-test`, 로그인, `/users/me`, 정책 문서 조회, 발송 접수(Mock), 예약 목록
@@ -179,6 +179,7 @@
    - 과거 일정과 겹치는 일정은 만들지 않는다.
 8. **계정과 권한 구성**
    - ADMIN 1명: 생성 API가 없으므로 시드 도구가 직접 만든다.
+   - SHELTER 계정도 생성 API가 없다. 가입(`POST /users/`)은 항상 `USER`로 만들고(`app/signup_service.py`), 역할 변경 API는 #13 미구현 범위다. 시드 도구가 직접 만든다. `PATCH /users/{id}/shelter`는 이미 SHELTER인 계정에만 동작한다(아니면 409).
    - 보호소 담당자(SHELTER): 가상 보호소에 연결한다.
    - 일반 사용자: 온보딩 완료, 미완료, 나이 확인 대기 등 상태별로 만든다. Step 1 전화번호는 합성 번호이며, Mock SMS 정책(16-2)과 조율한다.
    - 비밀번호는 출력하거나 저장소에 남기지 않는다. 전달 방법은 미확정이다.

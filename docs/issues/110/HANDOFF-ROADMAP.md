@@ -115,7 +115,7 @@ FE 담당자의 역할과 FE Issue는 이 문서 범위가 아니다. FE 연동 
 | 기준 목록 | 공통 | `docs/dev-automation/test-baseline.json` | 충돌 시 최신 dev 반영 후 `dev_gate inventory`로 다시 만든다. 수동 병합하지 않는다. |
 
 - 기본은 각자 메인 저장소에서 한 번에 한 Issue(`main` 모드)다. 병렬이 필요하면 `worktree` 모드를 별도 승인받아 `projects/walkwithdog-BE-worktrees/<기능명>`에 만든다.
-- 사용자의 `deployment-pipeline` Worktree(`chore/deployment-pipeline`, 기준 `e30ef34`, 미추적 배포 파일 있음)는 다른 사람이 건드리지 않는다.
+- 사용자가 로컬에서 쓰는 `deployment-pipeline` Worktree(브랜치 `chore/deployment-pipeline`)는 사용자 PC에만 있으며 배포 작업용이다. 팀원은 같은 이름의 브랜치를 만들거나 바꾸지 않는다.
 - 같은 파일을 바꾸는 PR은 한 건씩 병합한다. 먼저 병합된 변경을 후속 브랜치에 반영하고, 충돌, 마이그레이션, 기준 목록, 회귀 테스트, 독립 리뷰, CI를 다시 확인한다.
 
 ## 6. PR 병합, DB 구성, 통합 검증, 배포 순서

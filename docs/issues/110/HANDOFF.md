@@ -43,7 +43,7 @@
 | API | 목적 | 응답 |
 | --- | --- | --- |
 | `POST /users/me/phone-verifications` | 온보딩 Step 1 | 200 접수. 등록 여부와 무관하게 같은 응답 |
-| `POST /users/me/phone-verifications/confirm` | 온보딩 확인 | 200 인증, 422 불일치, 410 만료, 429 시도 초과, 404 없음 |
+| `POST /users/me/phone-verifications/confirm` | 온보딩 확인 | 200 인증, 422 불일치, 410 만료, 429 시도 초과, 409 이미 사용(`VERIFICATION_ALREADY_CONSUMED`), 404 없음 |
 | `POST /users/me/profile/phone-verifications` | 프로필 번호 변경 | 위와 같음(Step 1 기록 필요) |
 | `POST /users/me/profile/phone-verifications/confirm` | 프로필 확인 | 위와 같음 |
 
@@ -81,7 +81,7 @@
 2. DB 호환성 기록(`schema-record.json`)과 이미지별 승인의 `migrations`에 `037_phone_verification_suppressed.sql`과 그 SHA-256을 포함한다.
 3. 카탈로그 지문(`fingerprint`)은 037 적용 **이후**의 카탈로그로 생성한다.
 4. 신규 DB를 모델로 초기화한 경우에도 037과 동등한 CHECK가 있는지 검증하고, 실제 SQL 적용 이력과 초기화 증빙을 구분해 기록한다.
-5. 기존 배포 스크립트(`scripts/deploy.sh`, `scripts/deployment_common.sh`)는 기록의 형식만 검사하며 선행 적용 순서를 **직접 강제하지 않는다**. 순서는 기록 발급 절차와 검토로 지킨다.
+5. 기존 배포 스크립트(`scripts/deploy.sh`, `scripts/deployment_common.sh`의 `schema_evidence()`)는 기록 형식, DB 식별값, 배포 시점 카탈로그 지문과 기록의 일치, 승인 파일과 기록의 일치를 검사한다. 하지만 `migrations` 배열의 내용(037 포함 여부)이나 그 스키마가 이미지가 요구하는 스키마인지는 검사하지 않으므로 선행 적용 순서를 **직접 강제하지 않는다**. 순서는 기록 발급 절차와 검토로 지킨다.
 6. 이전 이미지로 롤백할 때 DB 마이그레이션을 무조건 되돌리지 않는다. 이전 코드에서도 `SUPPRESSED` 행은 인증되지 않는다. 스키마 자체를 되돌릴 때만 `SUPPRESSED` 행을 먼저 삭제해야 이전 CHECK를 다시 걸 수 있다.
 
 ## 5. 커밋, PR, 리뷰, 테스트
@@ -124,4 +124,5 @@
 미확정(16-2에서 결정, 인수인계 이후 상세 설계):
 - **고정 OTP 여부와 인증번호 전달 방식**: 현재 `MockSmsProvider`는 인증번호를 서버 메모리의 `outbox`에만 둔다. 그래서 배포된 서버의 테스트 사용자가 인증번호를 볼 방법이 없다.
 - **Mock 허용 환경**: Mock 공급자는 `APP_ENV`가 `local`, `development`, `test`일 때만 허용된다(`MOCK_ALLOWED_ENVIRONMENTS`). 시연 서버의 `APP_ENV` 값과, 그 환경의 접근 제한 방법을 정해야 한다.
+- **로컬에서도 같은 제약**: `outbox`를 보여주는 API나 스크립트가 없어 로컬 BE에서도 HTTP만으로 확인 단계를 끝낼 수 없다. Mock 사용에는 `SMS_PROVIDER=mock`과 32자 이상의 `PHONE_VERIFICATION_HMAC_KEY`가 함께 필요하다(키가 없으면 500).
 - 결정 전까지 FE는 발송과 확인 API 계약만 맞춰 연동한다([HANDOFF-FE.md](HANDOFF-FE.md)).

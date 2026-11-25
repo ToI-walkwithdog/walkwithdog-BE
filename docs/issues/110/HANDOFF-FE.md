@@ -93,7 +93,7 @@ FE 파일 경로는 봉사자 앱 `src/screens/` 기준이다. 폴더가 생략�
 | 8-1, 8-2 내 예약 | `bookings/MyBookingsScreen.tsx` | `GET /walk-requests/my`(`status`, `status_group`) | Mock 사용 | FE | #84 | 2 | 지난 예약 정의 다름 |
 | 8-3~8-5 상세 | `bookings/BookingDetailScreen.tsx` | `GET /walk-requests/{id}`(`actions`) | Mock 사용 | FE | #84 | 2 | 예약 번호와 사유 고정 |
 | 8-6~8-8 취소 | `bookings/BookingCancellationScreen.tsx` | `PATCH /walk-requests/{id}` `CANCEL` | Mock 사용 | FE | #84 | 2 | 사유 미전송, 대기 취소 없음 |
-| 4-1~4-3 보호소 코드 | `walk/ShelterCodeScreen.tsx`, `CodeEntryResultScreen.tsx` | `POST /walk-requests/{id}/shelter-code/verify` | Mock 사용, 실환경 필요 | FE | #87 | 3 | 코드 `428619` 고정. 보호소 발급 필요 |
+| 4-1~4-3 보호소 코드 | `walk/ShelterCodeScreen.tsx`(`CodeEntryResultScreen.tsx`는 어느 라우트에서도 쓰지 않음) | `POST /walk-requests/{id}/shelter-code/verify` | Mock 사용, 실환경 필요 | FE | #87 | 3 | 코드 `428619` 고정. 보호소 발급 필요 |
 | 4-4 출발 체크 | `walk/WalkChecklistScreen.tsx` | `POST /walks` | Mock 사용 | FE | #87 | 3 | 체크 후 시작 API 없음 |
 | 5-1, 5-2, 5-4 산책 중, 마커 | `walk/WalkScreen.tsx` | `GET /walks/active`, `POST /walks/{id}/points`, `POST /walks/{id}/markers` | Mock 사용, 실환경 필요 | FE | #89 | 3 | 통계 고정, GPS 미수집 |
 | 5-3 GPS 끊김 | `walk/GPSLostScreen.tsx` | `GET /walks/active`(`last_point_received_at`, `auto_end_at`) | Mock 사용 | FE | #89 | 4 | 자동 진입 없음 |
@@ -432,7 +432,7 @@ API 의존성 기준:
 
 | 구분 | 범위 |
 | --- | --- |
-| 서버 준비 전에도 할 수 있음 | 1~2의 클라이언트와 오류 처리, 화면별 요청과 응답 모델, Enum 매핑, 상태 관리와 화면 이동 구조, 인증번호 입력 UI, 로컬 BE(`APP_ENV=local`, Mock SMS, Mock 위치)로 하는 개발 |
+| 서버 준비 전에도 할 수 있음 | 1~2의 클라이언트와 오류 처리, 화면별 요청과 응답 모델, Enum 매핑, 상태 관리와 화면 이동 구조, 인증번호 입력 UI, 로컬 BE(`APP_ENV=local`, `SMS_PROVIDER=mock`, 32자 이상 `PHONE_VERIFICATION_HMAC_KEY`, Mock 위치)로 하는 개발. 단, 인증번호 확인은 16-2 결정 전까지 로컬에서도 끝낼 수 없다([HANDOFF 8절](HANDOFF.md#8-sms-정책-변경mock-sms)) |
 | 실서버와 초기 데이터 후 검증 | 목록, 신청, 승인, 코드 발급(보호소 계정), 산책 전 과정, 이력과 통계(16-6, 16-7, 16-10) |
 | 정책 확정 후 검증 | 정책 문서와 동의(16-9), Mock SMS 인증번호 전달(16-2), 실제 위치 판별(16-8) |
 
@@ -462,8 +462,8 @@ API 의존성 기준:
 
 | 기능 | 분류 | 근거 | 현재 처리 |
 | --- | --- | --- | --- |
-| 보호소 인증(`#verification`) | 정책 결정 | FE 화면이 "인증 방법, 서류, 승인 기준 미정"이라고 안내한다. Notion에는 ADMIN의 보호소 생성과 담당자 소속 지정만 있다. 관련 Issue가 없다. | 보호소와 담당자는 ADMIN이 만들고 연결한다(`POST /shelters/`, `PATCH /users/{id}/shelter`, 재사용). 시연 환경은 16-7 시드 계정을 쓴다. 인증 절차 자체는 범위 제외. |
-| 보호소가 작성하는 신고 | 산책 연결 신고는 재사용, 산책 무관 신고는 정책 결정 | `POST /walks/{walk_id}/incidents`는 자기 보호소 산책이면 담당자와 관리자도 허용한다(`authorize_action`). Notion 안전 신고는 산책 단위 신고만 정의한다. | FE 작성 폼을 산책 선택 방식으로 바꾼다(필수 연동). 산책과 무관한 자유 신고(예: 봉사자 행동 신고)는 정책이 정해질 때까지 범위 제외 |
+| 보호소 인증(`#verification`) | 정책 결정 | FE 화면이 "인증 방법, 서류, 승인 기준 미정"이라고 안내한다. Notion에는 ADMIN의 보호소 생성과 담당자 소속 지정만 있다. 관련 Issue가 없다. | ADMIN은 보호소 생성(`POST /shelters/`)과 기존 SHELTER 계정의 소속 연결(`PATCH /users/{id}/shelter`)만 할 수 있다(재사용). SHELTER 계정을 발급하는 API는 없다(역할 변경은 #13 미구현). 시연 환경은 16-7 시드 도구가 만든 계정을 쓴다. 인증 절차는 **미확정**이며, 정해질 때까지 연동하지 않는 것을 **권장**한다. |
+| 보호소가 작성하는 신고 | 산책 연결 신고는 재사용 가능(**미확인**), 그 밖은 정책 결정 | 코드상 `POST /walks/{walk_id}/incidents`는 자기 보호소 산책이면 담당자와 관리자도 허용한다(`authorize_action`). 실행 검증은 하지 않았다. `incident_type`은 산책 안전 사건 Enum이고, 종료된 산책에는 늦은 신고 제한이 있다. 현재 FE 폼은 봉사자에 대한 신고 작성이라 목적이 다르다. | **권장**: 산책 안전 사건이면 산책을 선택해 접수하도록 FE 폼을 바꾼다. 봉사자 행동 신고 같은 산책 무관 신고는 정책이 정해질 때까지 연동하지 않는다(**미확정**). |
 | 토큰 갱신 | 정책 결정 | Issue #13(열림)과 Notion "로그인 세션 갱신"(`/auth/refresh`, dev 미존재, 설계 필요). 세션은 1시간(`SESSION_SECONDS=3600`)이다. | 현재는 401 시 재로그인(필수 연동). 산책 중 만료로 GPS 업로드가 끊길 수 있어, 18단계 검증에서 영향을 확인하고 정책을 정한다. |
 | 보호소 코드 발급 UI | 재사용(BE), 필수 연동(FE) | BE `POST /walk-requests/{id}/shelter-code`가 있다(#87). FE에 화면이 없다. | FE에 버튼과 표시를 추가한다. |
 | 실시간 산책 현황 | 재사용, 필수 연동 | BE `GET /shelters/me/live-walks*`가 있다. FE는 안내 문구뿐이다. | FE에 목록을 추가한다. |
