@@ -798,13 +798,20 @@ class EvidenceTests(unittest.TestCase):
         data = evidence_zip() if data is None else data
         downloads = []
 
+        def read_file(path, ref):
+            if ref != SOURCE:
+                return b""
+            if path not in files:
+                raise bd.Blocked("GitHub API request failed (HTTP 404)")
+            return files[path]
+
         def download(artifact_id):
             downloads.append(artifact_id)
             return data if download_data is None else download_data
         return bd.verify_evidence(
             fetch=evidence_github(data, listing, commit, pr), token=SECRET, run=publish_run(),
             job=job or publish_job(), run_id=RUN_ID, run_attempt=1, digest=digest, account=ACCOUNT,
-            read_file=lambda path, ref: files[path] if ref == SOURCE else b"", download=download,
+            read_file=read_file, download=download,
             trusted=trusted), downloads
 
     def blocked(self, **kwargs):
@@ -825,6 +832,10 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("do not match a reviewed version", self.blocked(files=changed))
         partial = ({bd.PUBLISH_WORKFLOW: TRUSTED[0][bd.PUBLISH_WORKFLOW]},)
         self.assertIn("Invalid reviewed ECR publisher entry", self.blocked(trusted=partial))
+        # A newer reviewed version with an extra helper must not block a run of the older version.
+        newer = (dict(TRUSTED[0], **{"scripts/ecr_helper.py": "a" * 64}),)
+        self.verify(trusted=newer + TRUSTED)
+        self.assertIn("do not match a reviewed version", self.blocked(trusted=newer))
 
     def test_artifact_records_must_match_github(self):
         data = evidence_zip()
@@ -893,7 +904,8 @@ class EvidenceTests(unittest.TestCase):
             ("release.pr_number", 0), ("ecr.account_id", int(ACCOUNT)), ("ecr.region", "us-east-1"),
             ("source.sha", SOURCE.upper()), ("source.tree", "1" * 39), ("image.archive_sha256", "8" * 63),
             ("release_artifact.digest", "7" * 64), ("confirmed_at", "2026-11-26 01:30:00"),
-            ("confirmed_at", "2026-11-26T01:30:00+09:00"), ("approval.review.record", "https://example.com/x"),
+            ("confirmed_at", "2026-11-26T01:30:00+09:00"), ("confirmed_at", "2026-02-30T01:30:00Z"),
+            ("confirmed_at", "２０２６-11-26T01:30:00Z"), ("approval.review.record", "https://example.com/x"),
             ("repository", "fork/walkwithdog-BE"), ("extra", 1), ("ecr.extra", 1), ("image.platform", DELETE),
             ("verifier.files", {".github/workflows/ecr-image-publish.yml": "3" * 64}),
         ]
@@ -934,6 +946,48 @@ class EvidenceTests(unittest.TestCase):
         for name, kwargs in cases.items():
             with self.subTest(name=name):
                 self.blocked(**kwargs)
+
+    def test_artifact_download_drops_the_token_after_redirect(self):
+        import urllib.error
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def opener_raising(error):
+            class Opener:
+                def open(self, request, timeout):
+                    self.request = request
+                    raise error
+            return Opener()
+
+        def redirect(location):
+            return urllib.error.HTTPError("https://api.github.com/x", 302, "Found", {"Location": location}, None)
+
+        fetched = []
+
+        def urlopen(request, timeout):
+            fetched.append(request)
+            return Response(b"zip-bytes")
+        with patch.object(bd.urllib.request, "build_opener",
+                          return_value=opener_raising(redirect("https://storage.example/a.zip?sig=1"))), \
+                patch.object(bd.urllib.request, "urlopen", urlopen):
+            self.assertEqual(bd.download_artifact(ARTIFACT_ID, SECRET), b"zip-bytes")
+        self.assertEqual(fetched[0].full_url, "https://storage.example/a.zip?sig=1")
+        self.assertFalse(any(key.lower() == "authorization" for key in fetched[0].headers))
+        for error in (redirect("http://storage.example/a.zip"),
+                      urllib.error.HTTPError("https://api.github.com/x", 404, "Not Found", {}, None),
+                      urllib.error.URLError("down")):
+            with self.subTest(error=str(error)):
+                with patch.object(bd.urllib.request, "build_opener", return_value=opener_raising(error)), \
+                        patch.object(bd.urllib.request, "urlopen", side_effect=AssertionError("no fetch")):
+                    with self.assertRaises(bd.Blocked) as caught:
+                        bd.download_artifact(ARTIFACT_ID, SECRET)
+                self.assertNotIn(SECRET, str(caught.exception))
+                self.assertNotIn("storage.example", str(caught.exception))
 
     def test_publish_job_must_succeed_in_the_attempt(self):
         bd.check_publish_job({"jobs": [publish_job(), {"name": "Validate release"}]}, RUN_ID, 1, SOURCE)

@@ -56,7 +56,7 @@ COMMENT_PREFIX = "toi-backend-deploy"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 SHA = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
-UTC_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z")
+UTC_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z")
 NUMBER = re.compile(r"[1-9][0-9]{0,18}")
 ATTEMPT = re.compile(r"[1-9][0-9]{0,8}")
 ACCOUNT = re.compile(r"[0-9]{12}")
@@ -246,7 +246,10 @@ def check_source_on_main(compare):
 
 def parse_time(value, label):
     require(isinstance(value, str) and UTC_TIME.fullmatch(value), f"Invalid {label}")
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise Blocked(f"Invalid {label}") from None
 
 
 def check_publish_job(jobs, run_id, run_attempt, head_sha):
@@ -469,9 +472,20 @@ def check_publisher(read_file, head_sha, trusted):
         require(isinstance(entry, dict) and PUBLISHER_FILES <= set(entry)
                 and all(isinstance(value, str) and HEX64.fullmatch(value) for value in entry.values()),
                 "Invalid reviewed ECR publisher entry")
-    paths = sorted(set().union(*(set(entry) for entry in trusted)))
-    actual = {path: hashlib.sha256(read_file(path, head_sha)).hexdigest() for path in paths}
-    require(any(all(actual[path] == value for path, value in entry.items()) for entry in trusted),
+    actual = {}
+
+    def matches(entry):
+        # Each reviewed version is checked on its own files; a file it lacks only fails that version.
+        for path, value in sorted(entry.items()):
+            if path not in actual:
+                try:
+                    actual[path] = hashlib.sha256(read_file(path, head_sha)).hexdigest()
+                except Blocked:
+                    actual[path] = None
+            if actual[path] != value:
+                return False
+        return True
+    require(any(matches(entry) for entry in trusted),
             "ECR publisher files at the publish commit do not match a reviewed version")
 
 

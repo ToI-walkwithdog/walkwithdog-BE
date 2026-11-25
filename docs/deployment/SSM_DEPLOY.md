@@ -80,8 +80,8 @@ Job Summary에는 실행자, 발행 실행 ID와 시도, Source SHA, Digest, 각
 
 | 단계 | 확인 내용 |
 | --- | --- |
-| 발행기 신뢰 | Publish Run의 실행 Commit에서 `.github/workflows/ecr-image-publish.yml`, `scripts/ecr_image_publish.py`의 바이트 SHA-256을 계산해 `TRUSTED_PUBLISHERS`의 리뷰된 항목과 대조한다. 목록이 비어 있으면 차단한다. 현재 `main`과 같다는 이유로 자동 갱신하지 않고, 증빙 JSON의 값을 신뢰 기준으로 쓰지 않는다. 증빙의 `verifier.files`는 Release CI 보호 파일 4개의 해시이며 발행기 해시가 아니다. |
-| Artifact | 해당 실행의 정확한 이름 1개, 미만료, `workflow_run`의 실행 ID, 저장소 ID, `head_sha`, `main` 일치. API의 `digest`와 다운로드한 ZIP의 SHA-256 일치. 다운로드는 API 토큰 없이 저장소가 발급한 HTTPS URL에서 받는다. |
+| 발행기 신뢰 | Publish Run의 실행 Commit에서 `.github/workflows/ecr-image-publish.yml`, `scripts/ecr_image_publish.py`의 바이트 SHA-256을 계산해 `TRUSTED_PUBLISHERS`의 리뷰된 항목과 대조한다. 목록이 비어 있으면 차단한다. 현재 `main`과 같다는 이유로 자동 갱신하지 않고, 증빙 JSON의 값을 신뢰 기준으로 쓰지 않는다. 증빙의 `verifier.files`는 Release CI 보호 파일 4개의 해시이며 발행기 해시가 아니다. 등록된 버전마다 자기 파일만 대조하므로, 다른 버전에만 있는 파일이 없어도 해당 버전의 정상 발행본은 차단되지 않는다. |
+| Artifact | 해당 실행의 정확한 이름 1개, 미만료, `workflow_run`의 실행 ID, 저장소 ID, `head_sha`, `main` 일치. API의 `digest`와 다운로드한 ZIP의 SHA-256 일치. 다운로드는 API의 `/zip` 요청에만 토큰을 쓰고, 리다이렉트된 HTTPS 저장소 URL은 토큰 없이 받는다. |
 | ZIP과 JSON | 파일 1개와 정확한 파일명, 중첩 경로와 중복 파일 차단, 크기는 기존 증빙 소비자(`scripts/ecr_image_publish.py`)와 같은 8 MiB 제한. UTF-8 JSON에서 중복 키, `NaN`, `Infinity`를 거부한다. 객체마다 정해진 필드만 허용하고 문자열, 정수, Boolean을 엄격히 구분한다. |
 | 운영용 표시 | `schema_version` 1, `record_type` `production`, `simulation` false, `publication_authorized` true, `deployable` true, `ecr.remote_verified` true, `outcome` `published`, `already_present`, `reconciled` 중 하나, 검사 5개 `passed`, `postgresql_passed` 82, `image.platform` `linux/amd64`. 모의 증빙은 차단한다. |
 | 필드 정합성 | `source.sha`와 `ecr.tag`, `publish_workflow.workflow_sha`, Publish Run `head_sha` 일치. `source.tree`와 `release.merge_tree_sha` 일치. `publish_workflow`의 실행 ID, 시도, 실행자 일치. `release_workflow.workflow_sha`와 `release.base_sha`, `approval.review.head`와 `release.head_sha` 일치, `blocking` 0. `image.manifest_digest`, `ecr.digest`, 요청 Digest 일치, `ecr.digest_uri`는 `repository_uri@digest`. `release_artifact.name`은 Release 실행 ID와 시도로 구성. `confirmed_at`은 `Publish image` Job 실행 시간(앞뒤 60초 허용) 안. |
@@ -173,7 +173,7 @@ Role 생성, 정책 연결, `SSM_DEPLOY_ROLE_ARN` 등록은 별도 승인 후 �
 
 실제 `preflight` 성공에는 다음이 필요하다. `deploy`는 별도 승인으로 실행한다.
 
-- PR #137 최종 구현과 리뷰 이후 ECR 발행기 파일 해시를 `TRUSTED_PUBLISHERS`에 등록하는 별도 변경(독립 리뷰와 관리자 승인)
+- PR #137 최종 구현과 리뷰 이후 ECR 발행기 파일 해시를 `TRUSTED_PUBLISHERS`에 등록하는 별도 변경(독립 리뷰와 관리자 승인). 등록할 때 최종 Workflow가 실행하는 다른 코드(현재 #137은 `.github/tests/test_ecr_image_publish.py`도 실행)와 추가 모듈이 있는지 확인하고, 실행에 영향을 주는 파일은 항목에 포함한다.
 - 계약 v1의 운영용 증빙을 만드는 실제 ECR 발행 실행
 - 배포 전용 Role 생성과 `SSM_DEPLOY_ROLE_ARN` 등록
 - EC2의 배포 스크립트 설치와 `ToI-DeployBackend` 등록([EC2 설치](https://github.com/ToI-walkwithdog/walkwithdog-BE/blob/dev/docs/deployment/EC2_SETUP.md))
