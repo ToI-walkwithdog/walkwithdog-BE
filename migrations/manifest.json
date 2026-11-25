@@ -496,6 +496,18 @@
         "production"
       ],
       "prechecks": []
+    },
+    {
+      "file": "036_walk_preferences.sql",
+      "sha256": "57df5749335bccbe7fe379c708aa697f81b4016daf02cdd6bee4b4def2e699d6",
+      "requires": [],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
     }
   ],
   "reservations": [

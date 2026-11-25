@@ -121,7 +121,15 @@
 - [ ] FE에 인증번호 입력 UI가 없다. 17단계 연동에서 프로필 번호 변경의 발송, 인증번호 입력과 확인, `PATCH /users/me/profile` 저장 흐름을 추가한다. 확인만으로는 번호가 바뀌지 않는다.
 - [ ] FE 내 정보 수정은 조회한 `profile_version`을 `expected_profile_version`으로 보내고, 409 `PROFILE_VERSION_MISMATCH`이면 다시 조회해 사용자에게 확인받는다.
 - [ ] `users.phone`은 인증되지 않은 이전 필드로 읽거나 쓰지 않는다. 사용처를 확인한 뒤 정리 여부를 별도 Issue로 결정한다.
-- [ ] 배포 전 필수(개인정보): 온보딩과 프로필 인증 발송이 재발송 간격과 일일 한도보다 먼저 409 `PHONE_ALREADY_REGISTERED`를 반환해 번호 등록 여부를 횟수 제한 없이 확인할 수 있다(온보딩 발송의 기존 동작). 19단계 배포 전에 별도 Issue로 응답 순서나 시도 제한을 정한다.
+- [ ] 16단계 공개 전 필수(보안, 개인정보): 온보딩과 프로필 인증 발송이 재발송 간격과 일일 한도보다 먼저 409 `PHONE_ALREADY_REGISTERED`를 반환해 번호 등록 여부를 횟수 제한 없이 확인할 수 있다(온보딩 발송의 기존 동작). 별도 보안 Issue로 응답 순서나 시도 제한을 정하고, 16단계에서 실제 개발 서버와 외부 서비스를 공개하기 전에 해결한다.
 - [ ] 개발 DB에 035를 적용할 때 `phone_verifications` 크기를 확인한다. 크면 CHECK를 `NOT VALID` 추가 후 `VALIDATE`로 나눈다(16단계).
 - [ ] 20단계: `app/account_status.py`의 잠금 설명(Step 1 저장의 FOR SHARE)을 FOR UPDATE로 고친다.
-- [ ] 20단계: 같은 사용자의 Step 1 저장이나 프로필 PATCH와 겹칠 때 NOWAIT 잠금(보호소 코드 검증, 예약)이 즉시 실패할 수 있는지 18단계 검증에서 확인하고 필요하면 재시도 안내를 정한다.
+- [ ] 20단계: 같은 사용자의 Step 1 저장, 프로필 PATCH, 산책 선호 PATCH(#105)와 겹칠 때 NOWAIT 잠금(보호소 코드 검증, 예약)이 즉시 실패할 수 있는지 18단계 검증에서 확인하고 필요하면 재시도 안내를 정한다.
+
+## 산책 선호 설정 (#105)
+
+- [ ] 17단계: FE `/10-3`을 `GET/PATCH /users/me/walk-preferences`에 연결한다. 조회한 `version`을 `expected_version`으로 보내고, 409 `PREFERENCE_VERSION_MISMATCH`이면 다시 조회한다. 저장 응답을 받은 뒤에만 화면을 닫는다.
+- [ ] 17단계: `/7-2` 초기 크기 필터는 목록에서 직접 고른 값, `effective_preferences.size_code`, 전체 순서로 정한다. 목록 API는 요청받은 `size_code`만 적용한다. 초기 지역은 온보딩 Step 3의 지역 1~3개를 쓴다.
+- [ ] 16단계: 별도 승인 후 035 적용을 확인하고 `036_walk_preferences.sql`을 적용한다(새 테이블만 추가).
+- [ ] FE에 지역 선택 UI가 생기면 선호 지역 저장과 초기 검색 우선 적용을 별도 Issue로 정한다(Notion 조건부 정책).
+- [ ] `docs/dev-automation/FEATURE_PLAN.md`의 20단계 로드맵 반영은 게이트 보호 경로라 #105에서 분리했다. 사람이 검토하고 병합하는 별도 유지보수 PR로 진행한다.

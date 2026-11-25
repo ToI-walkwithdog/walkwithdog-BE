@@ -208,6 +208,24 @@ class VolunteerRoutineTimeSlot(Base):
     time_slot_code = Column(String(40), nullable=False)
 
 
+class VolunteerWalkPreference(Base):
+    """My page walk preferences on /10-3 (Issue #105, migration 036): duration and dog size
+    only, each nullable when never saved. Separate from the Step 3 routine, which is never
+    changed by it. No region: the app has no region selection yet."""
+    __tablename__ = "volunteer_walk_preferences"
+    __table_args__ = (
+        CheckConstraint(_in("duration_code", WALKING_DURATION_CODES), name="ck_walk_preferences_duration"),
+        CheckConstraint(_in("size_code", DOG_SIZE_CODES), name="ck_walk_preferences_size"),
+        CheckConstraint("version >= 1", name="ck_walk_preferences_version"),
+    )
+
+    user_id = Column(Integer, ForeignKey("users.id", name="fk_walk_preferences_user_id"), primary_key=True)
+    duration_code = Column(String(30), nullable=True)
+    size_code = Column(String(20), nullable=True)
+    version = Column(Integer, nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class PhoneVerification(Base):
     """SMS code requests (Issue #40, migration 024). Only an HMAC of the code is stored."""
     __tablename__ = "phone_verifications"

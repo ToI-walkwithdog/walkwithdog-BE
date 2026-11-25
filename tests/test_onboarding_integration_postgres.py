@@ -3,7 +3,7 @@
 The main flows run on a schema built only by the checked-in SQL files, in an order that satisfies
 every manifest `requires`, without create_all(): the base tables of a dev database before 016
 (005, 006, 007, 014, 015), then 002, 016_onboarding_signup, 017_remove_user_email, 018_user_consents,
-019, 023, 024, 025, 022, 026 and 027. Account exit reads activity tables (chat, matching) that those files do not create, so
+019, 023, 024, 025, 022, 026, 027, 035 and 036. Account exit reads activity tables (chat, matching) that those files do not create, so
 its scenario runs on the model schema instead.
 
 Synthetic accounts and regions only. SMS goes to the in-memory MockSmsProvider; nothing is sent.
@@ -59,7 +59,8 @@ ONBOARDING_CHAIN = ("002_auth_sessions.sql", "016_onboarding_signup.sql", "017_r
                     "018_user_consents.sql", "019_first_walk_guide.sql", "023_user_pledge_acknowledgements.sql",
                     "024_onboarding_basic_info.sql", "025_onboarding_dog_experience.sql", "022_regions.sql",
                     "026_onboarding_walking_routine.sql", "027_onboarding_agreements.sql",
-                    "035_profile_phone_change.sql")  # Issue #103: requires 024 only
+                    "035_profile_phone_change.sql",  # Issue #103: requires 024 only
+                    "036_walk_preferences.sql")  # Issue #105: base users only; sign-up exit deletes it
 REGIONS = (("11", "서울특별시", LEVEL_SIDO, None), ("11110", "종로구", LEVEL_SIGUNGU, "11"),
            ("11680", "강남구", LEVEL_SIGUNGU, "11"), ("26", "부산광역시", LEVEL_SIDO, None),
            ("26350", "해운대구", LEVEL_SIGUNGU, "26"), ("36", "세종특별자치시", LEVEL_SIDO, None),
