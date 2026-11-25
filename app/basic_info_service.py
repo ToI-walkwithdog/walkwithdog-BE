@@ -30,7 +30,7 @@ from app.auth import contract_unauthorized
 from app.models import PhoneVerification, User, VolunteerOnboardingBasic
 from app.onboarding_common import (age_years, as_utc, ensure_pledge_completed,
                                    first_incomplete_step, kst_date)
-from app.phone_verification_service import (PURPOSE_ONBOARDING, is_latest_for_user, mask_phone,
+from app.phone_verification_service import (PURPOSE_ONBOARDING, VERIFIABLE_STATUSES, is_latest_for_user, mask_phone,
                                             parse_verification_id, phone_already_registered,
                                             registered_to_other_user)
 
@@ -158,6 +158,7 @@ def save_basic_info(db: Session, user_id: int, full_name: str, birth: date, raw_
             return _replay(db, user_id, db.get(VolunteerOnboardingBasic, user_id), full_name, birth,
                            verification_id, now)
         if (verification.purpose != PURPOSE_ONBOARDING or verification.verified_at is None
+                or verification.send_status not in VERIFIABLE_STATUSES  # never SUPPRESSED, FAILED, PENDING (#110)
                 or verification.consumed_at is not None
                 or as_utc(now) >= as_utc(verification.verified_valid_until)
                 or not is_latest_for_user(db, verification)):

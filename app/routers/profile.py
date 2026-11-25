@@ -13,8 +13,8 @@ from app.auth import get_contract_user
 from app.database import get_db
 from app.models import User
 from app.onboarding_common import get_clock
-from app.phone_verification_service import (PURPOSE_PROFILE, confirm_code, parse_verification_id,
-                                            send_verification)
+from app.phone_verification_service import (PURPOSE_PROFILE, confirm_code, get_sms_dispatcher,
+                                            parse_verification_id, send_verification)
 from app.profile_service import invalid_payload, read_profile, require_profile_user, update_profile
 from app.routers.onboarding_basic import PhoneVerificationConfirmRequest, PhoneVerificationRequest
 from app.sms_provider import get_sms_provider
@@ -76,17 +76,18 @@ def patch_profile(payload: dict | None = PATCH_BODY, user: User = Depends(get_pr
 
 @router.post("/phone-verifications",
              responses={**COMMON_ERRORS,
-                        409: {"model": ContractErrorResponse,
-                              "description": "PROFILE_BASIC_INFO_REQUIRED, PHONE_ALREADY_REGISTERED"},
+                        409: {"model": ContractErrorResponse, "description": "PROFILE_BASIC_INFO_REQUIRED"},
                         422: {"model": ContractErrorResponse, "description": "PHONE_NUMBER_REQUIRED, INVALID_PHONE_NUMBER"},
                         429: {"model": ContractErrorResponse,
                               "description": "PHONE_VERIFICATION_RATE_LIMITED(온보딩 인증과 합산)"},
-                        503: {"model": ContractErrorResponse, "description": "SMS_DELIVERY_UNAVAILABLE"}})
+                        503: {"model": ContractErrorResponse, "description": "SMS_DELIVERY_UNAVAILABLE. 공급자 미설정 또는 발송 대기열 포화(등록 여부와 무관)"}})
 def post_profile_phone_verification(payload: PhoneVerificationRequest, user: User = Depends(get_profile_user),
                                     db: Session = Depends(get_db), provider=Depends(get_sms_provider),
-                                    clock=Depends(get_clock)):
-    """새 번호 확인용 인증번호 발송. 확인만으로 번호는 바뀌지 않으며, PATCH 저장에서만 바뀐다."""
-    data = send_verification(db, provider, user.id, payload.phone_number, clock(), purpose=PURPOSE_PROFILE)
+                                    dispatcher=Depends(get_sms_dispatcher), clock=Depends(get_clock)):
+    """새 번호 확인용 인증번호 발송. 확인만으로 번호는 바뀌지 않으며, PATCH 저장에서만 바뀐다.
+    200은 서버의 발송 요청 접수이며 실제 문자 수신을 뜻하지 않는다. 등록 여부와 관계없이 같은 응답(#110)."""
+    data = send_verification(db, provider, user.id, payload.phone_number, clock(), purpose=PURPOSE_PROFILE,
+                             dispatcher=dispatcher, clock=clock)
     return no_store(ok(data, "인증번호를 발송했습니다."))
 
 
@@ -94,14 +95,14 @@ def post_profile_phone_verification(payload: PhoneVerificationRequest, user: Use
              responses={**COMMON_ERRORS,
                         404: {"model": ContractErrorResponse, "description": "VERIFICATION_NOT_FOUND(없음, 타인, 다른 목적)"},
                         409: {"model": ContractErrorResponse,
-                              "description": "VERIFICATION_NOT_SENT, VERIFICATION_ALREADY_CONSUMED"},
+                              "description": "VERIFICATION_ALREADY_CONSUMED"},
                         410: {"model": ContractErrorResponse, "description": "VERIFICATION_EXPIRED"},
                         422: {"model": ContractErrorResponse,
-                              "description": "INVALID_VERIFICATION_PAYLOAD, VERIFICATION_CODE_INVALID"},
+                              "description": "INVALID_VERIFICATION_PAYLOAD, VERIFICATION_CODE_INVALID(발송 상태와 무관)"},
                         429: {"model": ContractErrorResponse, "description": "VERIFICATION_ATTEMPTS_EXCEEDED"}})
 def post_profile_phone_verification_confirm(payload: PhoneVerificationConfirmRequest,
                                             user: User = Depends(get_profile_user), db: Session = Depends(get_db),
-                                            provider=Depends(get_sms_provider), clock=Depends(get_clock)):
-    data = confirm_code(db, provider, user.id, parse_verification_id(payload.verification_id), payload.code, clock(),
+                                            clock=Depends(get_clock)):
+    data = confirm_code(db, user.id, parse_verification_id(payload.verification_id), payload.code, clock(),
                         purpose=PURPOSE_PROFILE)
     return no_store(ok(data, "전화번호 인증이 완료되었습니다."))

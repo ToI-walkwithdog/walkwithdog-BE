@@ -281,7 +281,17 @@ class ProfilePhoneChangeTests(ProfileTestCase):
         self.complete_step1(user_id=1)
         self.complete_step1(phone=OTHER_PHONE, user_id=2)
         self.clock.advance(seconds=61)
-        self.assert_error(self.profile_send(OTHER_PHONE), 409, "PHONE_ALREADY_REGISTERED")
+        # Issue #110: accepted like any other send, SUPPRESSED, never sent and never verifiable.
+        sent_before = len(self.sms.outbox)
+        with patch("app.phone_verification_service.secrets.randbelow", return_value=654321):
+            response = self.profile_send(OTHER_PHONE)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.sms.outbox), sent_before)
+        verification_id = response.json()["data"]["verification_id"]
+        self.assertEqual(self.proof(verification_id).send_status, "SUPPRESSED")
+        self.assert_error(self.profile_confirm(verification_id, "654321"), 422, "VERIFICATION_CODE_INVALID")
+        body = {"expected_profile_version": 1, "phone_number": OTHER_PHONE, "phone_verification_id": verification_id}
+        self.assert_error(self.patch_profile(body), 409, "PHONE_VERIFICATION_REQUIRED")
 
     def test_a_lost_phone_race_on_the_unique_index_keeps_the_proof_unused(self):
         self.complete_step1(user_id=1)
