@@ -1030,6 +1030,8 @@ class ArtifactTests(unittest.TestCase):
             ({"config": {"rootfs": {"type": "layers", "diff_ids": ["sha256:" + "1" * 64]}}}, "Missing image layers"),
             ({"images": 2}, "exactly one saved image"),
             ({"config": {"architecture": "arm64"}}, "Invalid image platform"),
+            ({"config": {"rootfs": {"type": "other", "diff_ids": ["sha256:" + ci.sha(layer) for layer in LAYERS]}}},
+             "Invalid image rootfs"),
         )
         for options, message in cases:
             with self.subTest(message=message), tempfile.TemporaryDirectory() as temp:
@@ -1056,6 +1058,28 @@ class ArtifactTests(unittest.TestCase):
                 with self.assertRaisesRegex(ci.Blocked, message):
                     ci.stage_image(smoke, stage)
                 self.assertEqual(list(stage.iterdir()), [])
+
+    def test_unreadable_saved_image_is_a_blocked_check(self):
+        with tempfile.TemporaryDirectory() as temp:
+            smoke, stage, _ = self.smoke_folder(Path(temp))
+            (smoke / "image.tar").write_bytes((smoke / "image.tar").read_bytes()[:700])
+            with self.assertRaisesRegex(ci.Blocked, "Unreadable saved smoke image"):
+                ci.stage_image(smoke, stage)
+            with redirect_stdout(io.StringIO()):
+                self.assertFalse(ci.run_check("staged", lambda: ci.stage_image(smoke, Path(temp) / "other"))[1])
+
+    def test_failed_artifact_write_leaves_no_folder(self):
+        with tempfile.TemporaryDirectory() as temp:
+            smoke, stage, _ = self.smoke_folder(Path(temp))
+            with redirect_stdout(io.StringIO()):
+                ci.stage_image(smoke, stage)
+            out = Path(temp) / "artifact"
+            results = [(name, True, "") for name in ReleaseArtifactTests.PASSED]
+            with patch.object(ci, "file_sha256", side_effect=[json.loads((stage / ci.STAGED_IMAGE).read_text())
+                                                             ["archive_sha256"], "0" * 64]), \
+                    redirect_stdout(io.StringIO()), self.assertRaisesRegex(ci.Blocked, "Unexpected release artifact"):
+                ci.write_artifact(stage, out, {}, {}, results)
+            self.assertFalse(out.exists())
 
     def verify_order(self, smoke_error=None):
         calls = []
@@ -1174,6 +1198,10 @@ class ReleaseArtifactTests(ApprovalTests):
         for missing in ("verified smoke image staged", "full regression against the protected baseline"):
             with self.subTest(missing=missing), self.assertRaisesRegex(ci.Blocked, "lacks a passed"):
                 ci.verification_claims([item for item in results if item[0] != missing])
+        path = "tests/test_walk_postgres.py"
+        with patch.dict(ci.CORE_GROUPS, {path: ("WALK", 10)}), \
+                self.assertRaisesRegex(ci.Blocked, r"PostgreSQL passes differ from the protected baseline \(82\)"):
+            ci.verification_claims(results)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -1186,7 +1214,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.text.count("upload-artifact"), 1)
         self.assertIn("release_ci.py release", verdict)
         self.assertIn('--artifact-out "$RUNNER_TEMP/toi-release-image"', verdict)
-        self.assertRegex(upload, r"uses: actions/upload-artifact@[0-9a-f]{40} # v7\.0\.2\n")
+        self.assertIn("uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2\n", upload)
         self.assertIn("name: release-image-${{ github.run_id }}-${{ github.run_attempt }}\n", upload)
         self.assertIn("path: ${{ runner.temp }}/toi-release-image/\n", upload)
         self.assertIn("retention-days: 7\n", upload)

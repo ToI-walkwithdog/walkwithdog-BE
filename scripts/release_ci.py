@@ -40,6 +40,7 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+import zlib
 
 REPOSITORY = "ToI-walkwithdog/walkwithdog-BE"
 BASE = "744793c95ba1362f7d6bba7f3f75cdd4614f1749"
@@ -558,6 +559,7 @@ OCI_LAYER = "application/vnd.oci.image.layer.v1.tar"
 OCI_LAYER_GZIP = OCI_LAYER + "+gzip"
 RUN_NUMBER = re.compile(r"[1-9][0-9]{0,18}")
 STAGED_IMAGE = "image.json"
+POSTGRESQL_PASSES = 82  # Core PostgreSQL tests of the protected baseline, also required by the consumer.
 
 
 class HashingReader:
@@ -613,6 +615,7 @@ def export_oci(saved, expected, target):
                 "Saved config differs from the smoke image")
         data = loads(config)
         require(data["os"] == "linux" and data["architecture"] == "amd64", "Invalid image platform")
+        require(data["rootfs"].get("type") == "layers", "Invalid image rootfs")
         diff_ids, paths = data["rootfs"]["diff_ids"], entry["Layers"]
         require(isinstance(paths, list) and paths and len(paths) == len(diff_ids), "Missing image layers")
         layers, blobs = [], {}
@@ -666,7 +669,10 @@ def stage_image(smoke_scratch, stage):
     image_id, = tested
     saved = smoke_scratch / "image.tar"
     require(saved.is_file() and not saved.is_symlink(), "Missing saved smoke image")
-    facts = export_oci(saved, image_id, stage / ARTIFACT_ARCHIVE)
+    try:
+        facts = export_oci(saved, image_id, stage / ARTIFACT_ARCHIVE)
+    except (tarfile.TarError, EOFError, zlib.error, KeyError) as exc:
+        raise Blocked(f"Unreadable saved smoke image: {exc}") from exc
     facts.update({"smoke_image": image_id, "archive_sha256": file_sha256(stage / ARTIFACT_ARCHIVE)})
     (stage / STAGED_IMAGE).write_text(json.dumps(facts), encoding="utf-8")
     print(f"Staged smoke image {image_id}: config {facts['config_digest']}, "
@@ -686,6 +692,8 @@ def verification_claims(results):
     claims = {key: "passed" for key in ("regression", "migration", "postgresql", "container_smoke",
                                          "image_security")}
     claims["postgresql_passed"] = sum(count for _, count in CORE_GROUPS.values())
+    require(claims["postgresql_passed"] == POSTGRESQL_PASSES,
+            f"PostgreSQL passes differ from the protected baseline ({POSTGRESQL_PASSES})")
     return claims
 
 
@@ -705,11 +713,16 @@ def write_artifact(stage, out, release, run, results):
                   "manifest_digest": facts["manifest_digest"]},
     }
     out.mkdir(mode=0o700)
-    os.replace(archive, out / ARTIFACT_ARCHIVE)
-    with open(out / ARTIFACT_EVIDENCE, "x", encoding="utf-8") as stream:
-        json.dump(evidence, stream, indent=2, sort_keys=True)
-    require(sorted(path.name for path in out.iterdir()) == sorted([ARTIFACT_ARCHIVE, ARTIFACT_EVIDENCE])
-            and file_sha256(out / ARTIFACT_ARCHIVE) == facts["archive_sha256"], "Unexpected release artifact")
+    try:
+        os.replace(archive, out / ARTIFACT_ARCHIVE)
+        with open(out / ARTIFACT_EVIDENCE, "x", encoding="utf-8") as stream:
+            json.dump(evidence, stream, indent=2, sort_keys=True)
+        require(sorted(path.name for path in out.iterdir()) == sorted([ARTIFACT_ARCHIVE, ARTIFACT_EVIDENCE])
+                and file_sha256(out / ARTIFACT_ARCHIVE) == facts["archive_sha256"], "Unexpected release artifact")
+    except BaseException:
+        # Never leave a partial folder that a later step could upload.
+        shutil.rmtree(out, ignore_errors=True)
+        raise
     print(f"Release artifact: {ARTIFACT_ARCHIVE} sha256 {facts['archive_sha256']}, "
           f"config {facts['config_digest']}, manifest {facts['manifest_digest']}")
     return evidence
