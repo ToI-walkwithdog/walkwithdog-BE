@@ -9,6 +9,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
+from app.database import Base
 from app.models import (
     Dog,
     DogWalkDateSlot,
@@ -19,7 +20,6 @@ from app.models import (
     UserPledgeAcknowledgement,
 )
 from app.region_master import read_snapshot, sync_regions
-from scripts import check_migrations as checker
 from scripts.prepare_demo_db import PreparationError, validate_local_engine
 from scripts.seed_dev_data import (
     SEED_ACCOUNTS,
@@ -31,7 +31,6 @@ from scripts.seed_dev_data import (
 
 TEST_URL = os.getenv("SIGNUP_TEST_DATABASE_URL")
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATIONS_DIR = ROOT / "migrations"
 REGION_ZIP = ROOT / "data" / "regions" / "legal_dong_code_full_20261123.zip"
 
 
@@ -72,33 +71,7 @@ class SeedDevDataPostgresTests(unittest.TestCase):
             connect_args={"options": f"-csearch_path={schema} -clock_timeout=4000"},
         )
         self.addCleanup(self.engine.dispose)
-
-        with self.engine.begin() as connection:
-            connection.exec_driver_sql("CREATE TABLE shelters (id SERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL)")
-            connection.exec_driver_sql(
-                "CREATE TABLE users (id SERIAL PRIMARY KEY, email VARCHAR(100) NOT NULL UNIQUE,"
-                " nickname VARCHAR(50) NOT NULL, password VARCHAR(255), created_at TIMESTAMPTZ DEFAULT now())"
-            )
-            connection.exec_driver_sql("CREATE TABLE dogs (id SERIAL PRIMARY KEY, name VARCHAR(100))")
-            connection.exec_driver_sql(
-                "CREATE TABLE surveys (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id))"
-            )
-            connection.exec_driver_sql(
-                "CREATE TABLE matching_results (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),"
-                " dog_id INTEGER NOT NULL REFERENCES dogs(id), score INTEGER NOT NULL)"
-            )
-
-        manifest = checker.read_json(MIGRATIONS_DIR / "manifest.json")
-        raw = self.engine.raw_connection()
-        try:
-            with raw.cursor() as cur:
-                cur.execute(f'SET search_path TO "{schema}"')
-                for entry in manifest["migrations"]:
-                    sql_text = (MIGRATIONS_DIR / entry["file"]).read_text(encoding="utf-8")
-                    cur.execute(sql_text)
-            raw.commit()
-        finally:
-            raw.close()
+        Base.metadata.create_all(self.engine)
 
         self.Session = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
 
