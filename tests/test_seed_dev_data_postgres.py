@@ -73,6 +73,21 @@ class SeedDevDataPostgresTests(unittest.TestCase):
         )
         self.addCleanup(self.engine.dispose)
 
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("CREATE TABLE shelters (id SERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL)")
+            connection.exec_driver_sql(
+                "CREATE TABLE users (id SERIAL PRIMARY KEY, email VARCHAR(100) NOT NULL UNIQUE,"
+                " nickname VARCHAR(50) NOT NULL, password VARCHAR(255), created_at TIMESTAMPTZ DEFAULT now())"
+            )
+            connection.exec_driver_sql("CREATE TABLE dogs (id SERIAL PRIMARY KEY, name VARCHAR(100))")
+            connection.exec_driver_sql(
+                "CREATE TABLE surveys (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id))"
+            )
+            connection.exec_driver_sql(
+                "CREATE TABLE matching_results (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),"
+                " dog_id INTEGER NOT NULL REFERENCES dogs(id), score INTEGER NOT NULL)"
+            )
+
         manifest = checker.read_json(MIGRATIONS_DIR / "manifest.json")
         raw = self.engine.raw_connection()
         try:
