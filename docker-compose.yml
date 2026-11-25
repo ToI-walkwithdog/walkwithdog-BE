@@ -1,0 +1,58 @@
+x-logging: &rotated-logs
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  api:
+    build:
+      context: .
+    image: ${API_IMAGE:-walkwithdog-be:local}
+    platform: linux/amd64
+    restart: unless-stopped
+    env_file:
+      - ${API_ENV_FILE:-./deploy/.env}
+    environment:
+      AUTO_CREATE_SCHEMA: "false"
+      UPLOAD_DIR: /srv/uploads/dogs
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      - uploads:/srv/uploads
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/db-test', timeout=3).close()"
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 10s
+    logging: *rotated-logs
+
+  db:
+    image: postgres:16.16
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-toi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the deployment environment}
+      POSTGRES_DB: ${POSTGRES_DB:-toi_db}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    logging: *rotated-logs
+
+volumes:
+  pgdata:
+  uploads:
