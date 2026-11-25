@@ -286,6 +286,25 @@ class MetadataTests(unittest.TestCase):
                 ci.verify_artifact_zip_hash(path, self.artifact["digest"])
 
 
+class ReleaseContractTests(unittest.TestCase):
+    def test_change_digest_matches_release_ci_name_status_encoding(self):
+        from unittest.mock import patch
+        raw = b"M\x00z.txt\x00A\x00a.txt\x00"
+        expected = hashlib.sha256(
+            json.dumps([["a.txt", "A"], ["z.txt", "M"]], separators=(",", ":"),
+                       ensure_ascii=False).encode()).hexdigest()
+        with patch.object(ci.subprocess, "check_output", return_value=raw) as command:
+            self.assertEqual(ci.release_change_digest("a" * 40, "b" * 40), expected)
+        self.assertEqual(command.call_args.args[0][-5:],
+                         ["--name-status", "-z", "a" * 40, "b" * 40, "--"])
+
+    def test_malformed_change_list_is_blocked(self):
+        from unittest.mock import patch
+        with patch.object(ci.subprocess, "check_output", return_value=b"M\x00missing-terminator"):
+            with self.assertRaisesRegex(ci.Blocked, "change list"):
+                ci.release_change_digest("a" * 40, "b" * 40)
+
+
 class GitHubIntegrationTests(unittest.TestCase):
     def setUp(self):
         from unittest.mock import Mock
@@ -302,10 +321,27 @@ class GitHubIntegrationTests(unittest.TestCase):
         f = self.fixture
         f.artifact["digest"] = digest(self.path.read_bytes())
         f.pr["user"] = {"id": 9}
+        f.run["actor"] = {"id": 11, "login": "release-dispatcher"}
+        self.change_digest = "f" * 64
+        self.verifier_hashes = {path: "e" * 64 for path in ci.RELEASE_VERIFIER_FILES}
+        approval = {"pr": 1, "base": "a" * 40, "head": "b" * 40, "merge_tree": "c" * 40,
+                    "changes": self.change_digest,
+                    "review": {"head": "b" * 40,
+                               "record": f"https://github.com/{ci.REPOSITORY}/pull/1#pullrequestreview-1",
+                               "blocking": 0}}
+        self.comment = {"id": 77, "issue_url": f"https://api.github.com/repos/{ci.REPOSITORY}/issues/1",
+                        "user": {"type": "User", "login": "release-admin"},
+                        "created_at": "2026-11-25T09:30:00Z", "updated_at": "2026-11-25T09:30:00Z",
+                        "body": "Approval\n```toi-release-approval\n" + json.dumps(approval) + "\n```"}
         self.review = {"id": 1, "user": {"id": 10}, "state": "APPROVED", "commit_id": "b" * 40,
-                       "submitted_at": "2026-11-25T09:00:00Z", "author_association": "MEMBER"}
+                       "submitted_at": "2026-11-25T09:00:00Z", "author_association": "MEMBER",
+                       "html_url": f"https://github.com/{ci.REPOSITORY}/pull/1#pullrequestreview-1"}
         self.records = {"/actions/runs/123": f.run, "/actions/runs/123/attempts/2": copy.deepcopy(f.run),
                         "/actions/runs/123/artifacts?per_page=100&page=1": {"total_count": 1, "artifacts": [f.artifact]},
+                        "/actions/runs/123/attempts/2/jobs?per_page=100&page=1": {
+                            "total_count": 1, "jobs": [{"id": 90, "name": "Official release verification",
+                                                        "status": "completed", "conclusion": "success"}]},
+                        "/issues/1/comments?per_page=100&page=1": [self.comment],
                         "/pulls/1": f.pr, "/commits/" + f.source: f.commit,
                         "/branches/main": {"name": "main", "protected": True, "commit": {"sha": f.source}},
                         "/pulls/1/reviews?per_page=100&page=1": [self.review]}
@@ -313,18 +349,55 @@ class GitHubIntegrationTests(unittest.TestCase):
         self.api.get.side_effect = lambda endpoint: self.records[endpoint]
 
     def verify(self, **changes):
+        from unittest.mock import patch
         args = dict(run_id=123, attempt=2, pr_number=1, source_sha=self.fixture.source,
                     trusted_workflow_shas={"a" * 40}, now=self.fixture.now)
         args.update(changes)
-        return ci.verify_github_zip(self.api, self.path, **args)
+        with patch.object(ci, "release_change_digest", return_value=self.change_digest), \
+                patch.object(ci, "verifier_file_hashes", return_value=self.verifier_hashes):
+            return ci.verify_github_zip(self.api, self.path, **args)
 
-    def test_good_zip_is_not_authorized(self):
+    def test_good_zip_authorizes_only_after_release_approval_and_integrity_checks(self):
         result = self.verify()
         self.assertTrue(result["metadata_verified"])
         self.assertTrue(result["integrity_verified"])
         self.assertEqual(result["independent_review_ids_observed"], [1])
-        self.assertFalse(result["approval_contract_verified"])
-        self.assertFalse(result["publication_authorized"])
+        self.assertTrue(result["approval_contract_verified"])
+        self.assertTrue(result["publication_authorized"])
+        context = result["release_context"]
+        self.assertEqual(context["release_workflow"]["official_job_id"], 90)
+        self.assertEqual(context["approval"]["comment_id"], 77)
+        self.assertEqual(context["release"]["change_digest"], self.change_digest)
+        self.assertEqual(set(context["verifier"]["files"]), set(ci.RELEASE_VERIFIER_FILES))
+
+    def test_release_approval_requires_unique_unchanged_admin_record(self):
+        original = copy.deepcopy(self.comment)
+        for update in (
+            {"updated_at": "2026-11-25T09:31:00Z"},
+            {"body": original["body"].replace(self.change_digest, "0" * 64)},
+            {"body": original["body"].replace("pullrequestreview-1", "pullrequestreview-2")},
+            {"user": {"type": "Bot", "login": "release-admin"}},
+        ):
+            self.records["/issues/1/comments?per_page=100&page=1"] = [{**original, **update}]
+            with self.subTest(update=update), self.assertRaises(ci.Blocked):
+                self.verify()
+        self.records["/issues/1/comments?per_page=100&page=1"] = [
+            original, {**original, "id": original["id"] + 1}]
+        with self.assertRaisesRegex(ci.Blocked, "exactly one"):
+            self.verify()
+        self.records["/issues/1/comments?per_page=100&page=1"] = [original]
+
+    def test_verified_bundle_contains_only_verified_release_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "verified"
+            result = self.verify(output_directory=output)
+            self.assertTrue(result["publication_authorized"])
+            self.assertEqual({path.name for path in output.iterdir()},
+                             {"image.oci.tar", "release-evidence.json", ci.VERIFIED_CONTEXT_FILE})
+            context = json.loads((output / ci.VERIFIED_CONTEXT_FILE).read_text())
+            self.assertTrue(context["publication_authorized"])
+            self.assertEqual(digest((output / "image.oci.tar").read_bytes())[7:],
+                             context["image"]["archive_sha256"])
 
     def test_old_or_inconsistent_attempt(self):
         with self.assertRaisesRegex(ci.Blocked, "latest attempt"):
@@ -342,6 +415,19 @@ class GitHubIntegrationTests(unittest.TestCase):
         branch["commit"]["sha"] = "e" * 40
         with self.assertRaisesRegex(ci.Blocked, "protected main"):
             self.verify()
+
+    def test_publish_recheck_rejects_advanced_main_or_release_rerun(self):
+        context = self.verify()["release_context"]
+        ci.verify_context_current(self.api, context)
+        branch = self.records["/branches/main"]
+        branch["commit"]["sha"] = "e" * 40
+        with self.assertRaisesRegex(ci.Blocked, "protected main"):
+            ci.verify_context_current(self.api, context)
+        branch["commit"]["sha"] = self.fixture.source
+        latest = self.records["/actions/runs/123"]
+        latest["run_attempt"] = 3
+        with self.assertRaisesRegex(ci.Blocked, "latest successful attempt"):
+            ci.verify_context_current(self.api, context)
 
     def test_zip_tampered_before_parse(self):
         self.path.write_bytes(b"altered")
@@ -718,6 +804,82 @@ class PublicationEvidenceTests(unittest.TestCase):
         self.assertEqual(list(self.directory.glob(".publish-evidence-*")), [])
 
 
+class ProductionEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.directory = Path(self.tmp.name)
+        self.integration = GitHubIntegrationTests()
+        self.integration.setUp()
+        self.addCleanup(self.integration.doCleanups)
+        self.bundle = self.directory / "verified"
+        self.integration.verify(output_directory=self.bundle)
+        self.output = self.directory / "published"
+        self.output.mkdir()
+        self.aws = MockECR(self.integration.fixture.evidence["image"]["manifest_digest"])
+        self.now = datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc)
+
+    def publish(self):
+        return ci.publish_with_evidence(
+            self.bundle, self.output, runner=self.aws,
+            publish_run_id=456, publish_run_attempt=1,
+            publish_workflow_sha=self.integration.fixture.source, dispatcher="publish-admin",
+            clock=lambda: self.now)
+
+    def test_production_record_matches_backend_contract_v1(self):
+        record = self.publish()
+        evidence_file = self.output / ci.EVIDENCE_FILE
+        self.assertEqual(json.loads(evidence_file.read_text()), record)
+        self.assertEqual(set(record), {
+            "schema_version", "record_type", "simulation", "publication_authorized", "deployable",
+            "repository", "source", "release", "release_workflow", "approval", "verifier",
+            "release_artifact", "verification", "image", "ecr", "publish_workflow", "outcome",
+            "confirmed_at",
+        })
+        self.assertEqual(set(record["source"]), {"sha", "tree"})
+        self.assertEqual(set(record["release"]), {
+            "pr_number", "base_sha", "head_sha", "merge_tree_sha", "change_digest",
+        })
+        self.assertEqual(set(record["release_workflow"]), {
+            "run_id", "run_attempt", "workflow_sha", "dispatcher", "official_job_id",
+        })
+        self.assertEqual(set(record["approval"]), {"comment_id", "approver", "record_sha256", "review"})
+        self.assertEqual(set(record["verifier"]), {"files"})
+        self.assertEqual(set(record["release_artifact"]), {"id", "digest", "name"})
+        self.assertEqual(set(record["image"]), {
+            "platform", "archive_sha256", "config_digest", "manifest_digest",
+        })
+        self.assertEqual(set(record["ecr"]), {
+            "account_id", "region", "repository_uri", "tag", "digest", "digest_uri", "remote_verified",
+        })
+        self.assertEqual(set(record["publish_workflow"]), {
+            "run_id", "run_attempt", "workflow_sha", "dispatcher",
+        })
+        self.assertEqual(record["record_type"], "production")
+        self.assertTrue(record["publication_authorized"] and record["deployable"])
+        self.assertFalse(record["simulation"])
+        self.assertTrue(record["ecr"]["remote_verified"])
+        self.assertEqual(record["ecr"]["digest"], record["image"]["manifest_digest"])
+        self.assertEqual(record["confirmed_at"], "2026-11-25T12:00:00Z")
+
+    def test_mutated_bundle_is_blocked_before_transport_or_evidence(self):
+        archive = self.bundle / "image.oci.tar"
+        archive.write_bytes(archive.read_bytes() + b"tampered")
+        with self.assertRaises(ci.Blocked):
+            self.publish()
+        self.assertEqual(self.aws.calls, [])
+        self.assertFalse((self.output / ci.EVIDENCE_FILE).exists())
+
+    def test_unauthorized_context_is_blocked_before_transport(self):
+        path = self.bundle / ci.VERIFIED_CONTEXT_FILE
+        context = json.loads(path.read_text())
+        context["publication_authorized"] = False
+        path.write_text(json.dumps(context))
+        with self.assertRaises(ci.Blocked):
+            self.publish()
+        self.assertEqual(self.aws.calls, [])
+
+
 class WorkflowDownloadTests(unittest.TestCase):
     def setUp(self):
         from unittest.mock import Mock
@@ -795,18 +957,17 @@ class WorkflowDownloadTests(unittest.TestCase):
         self.runner.assert_not_called()
 
 
-class WorkflowDraftTests(unittest.TestCase):
-    def test_draft_has_no_oidc_or_aws_execution(self):
-        # Dependency-free guard for local Windows tests. YAML structure is also
-        # checked separately during phase 6 development.
+class WorkflowActivationTests(unittest.TestCase):
+    def test_workflow_gates_oidc_and_publish_on_verified_release(self):
         path = MODULE.parents[1] / ".github/workflows/ecr-image-publish.yml"
         workflow = path.read_text(encoding="utf-8")
-        self.assertNotIn("id-token:", workflow)
-        self.assertNotIn("configure-aws-credentials", workflow)
-        self.assertNotIn("skopeo copy", workflow)
-        self.assertIn("publication_authorized=false", workflow)
+        self.assertIn("id-token: write", workflow)
+        self.assertIn("configure-aws-credentials@", workflow)
+        self.assertIn("--preserve-digests", MODULE.read_text(encoding="utf-8"))
+        self.assertNotIn("if: ${{ false }}", workflow)
+        self.assertIn("publication_authorized == 'true'", workflow)
+        self.assertIn("image-publish-${{ github.run_id }}-${{ github.run_attempt }}", workflow)
         self.assertIn("needs: validate", workflow)
-        self.assertIn("if: ${{ false }}", workflow)
         self.assertIn("github.ref_protected", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
@@ -852,10 +1013,10 @@ class PublicationPolicyTests(unittest.TestCase):
                           "ecr:PutRegistryScanningConfiguration", "ecr:SetRepositoryPolicy",
                           "ecr:CreateRepository", "ecr:StartImageScan", "ssm:SendCommand"}))
 
-    def test_runbook_preserves_disabled_boundary(self):
+    def test_runbook_documents_active_publish_contract(self):
         path = MODULE.parents[1] / "docs/deployment/ECR_PUBLISH.md"
         text = path.read_text(encoding="utf-8")
-        for expected in ("publication_authorized=false", "deployable=false", ci.ECR_ROLE,
+        for expected in ("image-publish-evidence.json", "TRUSTED_PUBLISHERS",
                          "TRUSTED_RELEASE_WORKFLOW_SHA", "ECR_PUBLISH_ROLE_ARN",
                          "repo:ToI-walkwithdog@339425868/walkwithdog-BE@1409697696:ref:refs/heads/main"):
             self.assertIn(expected, text)
@@ -1009,7 +1170,7 @@ class IsolatedFlowTests(unittest.TestCase):
         # explicitly a simulation with a loopback-only transport.
         verified = self.integration.verify()
         self.assertTrue(verified["metadata_verified"] and verified["integrity_verified"])
-        self.assertFalse(verified["publication_authorized"])
+        self.assertTrue(verified["approval_contract_verified"] and verified["publication_authorized"])
         record = self.simulate()
         status, raw = self.registry.request("/manifests/" + self.runner.sha)
         self.assertEqual(status, 200)

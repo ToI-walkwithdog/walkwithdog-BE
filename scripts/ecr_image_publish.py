@@ -1,7 +1,7 @@
-"""Integrity and read-only GitHub checks for ECR publication. Not an authorization gate.
+"""Verify the official Release CI artifact and publish it to ECR without rebuilding.
 
-The trusted GitHub run, review and source-tree checks must precede any publish.
-Publication and evidence generation remain simulation-only; no live publish command.
+GitHub evidence is checked before AWS credentials are requested. Publication is
+limited to the verified OCI archive and writes the SSM consumer's evidence v1.
 """
 import argparse
 import os
@@ -15,6 +15,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import sys
 import subprocess
 import tarfile
@@ -31,6 +32,17 @@ CONFIG = "application/vnd.oci.image.config.v1+json"
 LAYER = "application/vnd.oci.image.layer.v1.tar"
 GZIP = LAYER + "+gzip"
 CHECKS = ("regression", "migration", "postgresql", "container_smoke", "image_security")
+RELEASE_VERIFIER_FILES = (
+    ".github/workflows/release-ci.yml",
+    ".github/release-ci-trust.json",
+    "scripts/release_ci.py",
+    ".github/tests/test_release_ci.py",
+)
+APPROVAL_FIELDS = {"pr", "base", "head", "merge_tree", "changes", "review"}
+APPROVAL_BLOCK = re.compile(r"^```toi-release-approval[ \t]*\n(.*?)\n```[ \t]*$", re.M | re.S)
+LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
+EVIDENCE_FILE = "image-publish-evidence.json"
+VERIFIED_CONTEXT_FILE = "publish-context.json"
 MAX_JSON = 8 * 1024 * 1024
 BLOCK = 1024 * 1024
 MAX_ARCHIVE = 4 * 1024**3  # Provisional compressed input limit.
@@ -332,7 +344,7 @@ def verify_artifact_zip_hash(path, expected):
         raise Blocked("Unreadable artifact ZIP") from exc
 
 
-"""Read-only GitHub API integration; publication remains explicitly disabled."""
+"""Read-only GitHub API integration used by Validate and the final pre-publish recheck."""
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -416,6 +428,97 @@ def verify_current_run(api, run):
             "Run changed during verification")
 
 
+def release_change_digest(base_sha, tree_sha):
+    """Reproduce release_ci.change_digest for the approved base-to-merge-tree diff."""
+    require(SHA.fullmatch(base_sha) and SHA.fullmatch(tree_sha), "Invalid release diff identifiers")
+    try:
+        raw = subprocess.check_output(
+            ["git", "-c", "core.autocrlf=false", "diff", "--no-renames", "--no-ext-diff",
+             "--name-status", "-z", base_sha, tree_sha, "--"],
+            stderr=subprocess.PIPE)
+    except (OSError, subprocess.CalledProcessError):
+        raise Blocked("Could not verify the Release CI change list") from None
+    fields = raw.decode().split("\0")
+    require(fields[-1] == "" and len(fields) % 2 == 1, "Unexpected Release CI change list")
+    pairs = sorted(zip(fields[1:-1:2], fields[0:-1:2]))
+    payload = json.dumps([[path, status] for path, status in pairs],
+                         separators=(",", ":"), ensure_ascii=False).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def verifier_file_hashes(source_sha):
+    require(SHA.fullmatch(source_sha), "Invalid Release verifier source SHA")
+    hashes = {}
+    for path in RELEASE_VERIFIER_FILES:
+        try:
+            content = subprocess.check_output(
+                ["git", "show", f"{source_sha}:{path}"], stderr=subprocess.PIPE)
+        except (OSError, subprocess.CalledProcessError):
+            raise Blocked(f"Missing Release verifier file: {path}") from None
+        hashes[path] = hashlib.sha256(content).hexdigest()
+    return hashes
+
+
+def official_release_job_id(jobs):
+    """Identify one successful verifier job, failing closed when the run is ambiguous."""
+    successful = [job for job in jobs if job.get("status") == "completed"
+                  and job.get("conclusion") == "success"]
+    named = [job for job in successful
+             if "release" in str(job.get("name", "")).casefold()
+             and ("verify" in str(job.get("name", "")).casefold()
+                  or "official" in str(job.get("name", "")).casefold())]
+    candidates = named if named else successful
+    require(len(candidates) == 1, "Release CI must have exactly one identifiable successful job")
+    return positive_int(candidates[0], "id")
+
+
+def validate_release_approval(comments, *, pr_number, base_sha, head_sha, tree_sha, change_digest):
+    """Require the unchanged approval record certified by the trusted Release CI run."""
+    expected = {"pr": pr_number, "base": base_sha, "head": head_sha,
+                "merge_tree": tree_sha, "changes": change_digest}
+    matches = []
+    for comment in comments:
+        body = comment.get("body")
+        if not isinstance(body, str):
+            continue
+        blocks = APPROVAL_BLOCK.findall(body.replace("\r\n", "\n"))
+        if len(blocks) != 1:
+            continue
+        try:
+            record = parse_json(blocks[0].encode())
+        except Blocked:
+            continue
+        if not isinstance(record, dict) or set(record) != APPROVAL_FIELDS:
+            continue
+        review = record.get("review")
+        if not isinstance(review, dict) or set(review) != {"head", "record", "blocking"}:
+            continue
+        if any(record.get(key) != value for key, value in expected.items()):
+            continue
+        if (review.get("head") != head_sha or type(review.get("blocking")) is not int
+                or review["blocking"] != 0 or not isinstance(review.get("record"), str)
+                or not review["record"].startswith(f"https://github.com/{REPOSITORY}/")):
+            continue
+        matches.append((comment, record))
+    require(len(matches) == 1, "Expected exactly one matching Release CI approval comment")
+    comment, record = matches[0]
+    user = comment.get("user") or {}
+    login = user.get("login", "")
+    require(comment.get("issue_url") == f"https://api.github.com/repos/{REPOSITORY}/issues/{pr_number}"
+            and user.get("type") == "User" and isinstance(login, str) and LOGIN.fullmatch(login),
+            "Release approval must belong to this PR and come from a person")
+    require(comment.get("created_at") and comment.get("created_at") == comment.get("updated_at"),
+            "Edited Release approval comments are not accepted")
+    comment_id = positive_int(comment, "id")
+    body = comment["body"].encode("utf-8")
+    return {
+        "comment_id": comment_id,
+        "approver": login,
+        "record_sha256": hashlib.sha256(body).hexdigest(),
+        "review": record["review"],
+    }
+
+
 def collect_github_records(api, run_id, attempt, pr_number, source_sha):
     for key, value in (("run_id", run_id), ("run_attempt", attempt), ("pr_number", pr_number)):
         positive_int({key: value}, key)
@@ -432,11 +535,13 @@ def collect_github_records(api, run_id, attempt, pr_number, source_sha):
     artifacts = api_pages(api, f"{run_path}/artifacts", key="artifacts")
     pr = api_object(api, f"/pulls/{pr_number}")
     commit = api_object(api, f"/commits/{source_sha}")
+    jobs = api_pages(api, f"/actions/runs/{run_id}/attempts/{attempt}/jobs", key="jobs")
+    comments = api_pages(api, f"/issues/{pr_number}/comments")
     verify_current_main(api, source_sha)
     reviews = api_pages(api, f"/pulls/{pr_number}/reviews")
     # Recheck latest attempt after pagination, before accepting the inventory.
     verify_current_run(api, run)
-    return run, artifacts, pr, commit, reviews
+    return run, artifacts, pr, commit, reviews, jobs, comments
 
 
 def observe_independent_reviews(pr, reviews, head_sha, run):
@@ -456,19 +561,47 @@ def observe_independent_reviews(pr, reviews, head_sha, run):
         rank = (when, positive_int(review, "id"))
         if identifier not in decisive or rank > decisive[identifier][0]:
             decisive[identifier] = (rank, review)
-    approved = sorted(review["id"] for identifier, (rank, review) in decisive.items()
-                      if identifier != author and review.get("state") == "APPROVED"
-                      and review.get("commit_id") == head_sha and rank[0] <= min(finish, run_start)
-                      and review.get("author_association") in {"OWNER", "MEMBER", "COLLABORATOR"})
+    approved_reviews = [(review["id"], review) for identifier, (rank, review) in decisive.items()
+                        if identifier != author and review.get("state") == "APPROVED"
+                        and review.get("commit_id") == head_sha and rank[0] <= min(finish, run_start)
+                        and review.get("author_association") in {"OWNER", "MEMBER", "COLLABORATOR"}]
+    approved = sorted(identifier for identifier, _ in approved_reviews)
     require(approved, "No independent exact-head approval observed before release run")
-    return {"independent_review_ids_observed": approved, "approval_contract_verified": False}
+    return {"independent_review_ids_observed": approved,
+            "independent_review_records": [review.get("html_url") for _, review in approved_reviews],
+            "approval_contract_verified": False}
 
 
 
 
-def verify_github_zip(api, zip_path, *, run_id, attempt, pr_number, source_sha, trusted_workflow_shas, now=None):
-    """Bind the exact API-listed ZIP to its contents; never authorize publication."""
-    run, artifacts, pr, commit, reviews = collect_github_records(api, run_id, attempt, pr_number, source_sha)
+def persist_verified_bundle(output_directory, archive, evidence_raw, context):
+    output = Path(output_directory)
+    require(not output.exists() and not output.is_symlink(), "Verified artifact output already exists")
+    output.mkdir(mode=0o700)
+    try:
+        destination = output / "image.oci.tar"
+        with Path(archive).open("rb") as source, destination.open("xb") as target:
+            while block := source.read(BLOCK):
+                target.write(block)
+                require(target.tell() <= MAX_ARCHIVE, "Verified OCI archive exceeds size limit")
+        with (output / "release-evidence.json").open("xb") as stream:
+            stream.write(evidence_raw)
+        with (output / VERIFIED_CONTEXT_FILE).open("x", encoding="utf-8") as stream:
+            json.dump(context, stream, indent=2, sort_keys=True, allow_nan=False)
+            stream.write("\n")
+    except BaseException:
+        shutil.rmtree(output)
+        raise
+
+
+def verify_github_zip(api, zip_path, *, run_id, attempt, pr_number, source_sha,
+                      trusted_workflow_shas, now=None, output_directory=None):
+    """Bind the official Release CI run, approval, artifact and image bytes to main."""
+    if output_directory is not None:
+        output = Path(output_directory)
+        require(not output.exists() and not output.is_symlink(), "Verified artifact output already exists")
+    run, artifacts, pr, commit, reviews, jobs, comments = collect_github_records(
+        api, run_id, attempt, pr_number, source_sha)
     matches = [a for a in artifacts if a.get("name") == artifact_name(run_id, attempt)]
     require(len(matches) == 1, "Expected exactly one attempt-specific artifact")
     artifact = matches[0]
@@ -495,30 +628,66 @@ def verify_github_zip(api, zip_path, *, run_id, attempt, pr_number, source_sha, 
                         "Evidence exceeds size limit")
                 require(bundle.getinfo("image.oci.tar").file_size <= MAX_ARCHIVE, "OCI archive exceeds size limit")
                 with bundle.open("release-evidence.json") as evidence_stream:
-                    evidence = parse_json(evidence_stream.read(MAX_JSON + 1))
+                    evidence_raw = evidence_stream.read(MAX_JSON + 1)
+                    evidence = parse_json(evidence_raw)
                 validate_evidence(evidence)
                 require(evidence["workflow"]["run_id"] == run_id and evidence["workflow"]["run_attempt"] == attempt
                         and evidence["release"]["pr_number"] == pr_number, "Requested release identifiers mismatch")
                 result = verify_github_metadata(evidence, run=run, artifacts=artifacts, pr=pr, commit=commit,
                                                 source_sha=source_sha, trusted_workflow_shas=trusted_workflow_shas, now=now)
                 result.update(observe_independent_reviews(pr, reviews, evidence["release"]["head_sha"], run))
+                release = evidence["release"]
+                changes = release_change_digest(release["base_sha"], release["merge_tree_sha"])
+                approval = validate_release_approval(
+                    comments, pr_number=pr_number, base_sha=release["base_sha"],
+                    head_sha=release["head_sha"], tree_sha=release["merge_tree_sha"],
+                    change_digest=changes)
+                require(approval["review"]["record"] in result["independent_review_records"],
+                        "Approval record does not cite the observed independent PR review")
+                actor = object_field(run, "actor")
+                dispatcher = actor.get("login", "")
+                require(isinstance(dispatcher, str) and LOGIN.fullmatch(dispatcher),
+                        "Invalid Release CI dispatcher")
                 path = Path(folder) / "image.oci.tar"
                 with bundle.open("image.oci.tar") as source, path.open("xb") as destination:
                     while block := source.read(BLOCK):
                         destination.write(block)
                         require(destination.tell() <= MAX_ARCHIVE, "OCI archive exceeds size limit")
                 result.update(verify_archive(path, evidence))
+                context = {
+                    "publication_authorized": True,
+                    "source": {"sha": source_sha, "tree": release["merge_tree_sha"]},
+                    "release": {"pr_number": pr_number, "base_sha": release["base_sha"],
+                                "head_sha": release["head_sha"], "merge_tree_sha": release["merge_tree_sha"],
+                                "change_digest": changes},
+                    "release_workflow": {
+                        "run_id": run_id, "run_attempt": attempt, "workflow_sha": run["head_sha"],
+                        "dispatcher": dispatcher, "official_job_id": official_release_job_id(jobs),
+                    },
+                    "approval": approval,
+                    "verifier": {"files": verifier_file_hashes(source_sha)},
+                    "release_artifact": {
+                        "id": result["artifact_id"], "digest": result["artifact_digest"],
+                        "name": artifact_name(run_id, attempt),
+                    },
+                    "verification": evidence["verification"],
+                    "image": {key: evidence["image"][key] for key in
+                              ("platform", "archive_sha256", "config_digest", "manifest_digest")},
+                }
                 # Hashing large archives can take time. Do not return stale
                 # observations if the protected branch or release attempt moved.
                 verify_current_run(api, run)
                 verify_current_main(api, source_sha)
+                result.update({"approval_contract_verified": True,
+                               "publication_authorized": True, "release_context": context})
+                if output_directory is not None:
+                    persist_verified_bundle(output_directory, path, evidence_raw, context)
                 return result
     except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError) as exc:
         raise Blocked("Unreadable artifact ZIP") from exc
 
 
-# Phase 4: transport and idempotency contract. No live runner or CLI entry
-# point is installed until the official release approval boundary is agreed.
+# ECR transport and idempotency contract.
 AWS_ACCOUNT = "478478097368"
 AWS_REGION = "ap-northeast-2"
 ECR_NAME = "toi-be"
@@ -529,10 +698,10 @@ ECR_ARN = f"arn:aws:ecr:{AWS_REGION}:{AWS_ACCOUNT}:repository/{ECR_NAME}"
 
 
 class ECRTransport:
-    """Command protocol exercised with an injected fake runner only in phase 4.
+    """Command protocol with an injected runner for tests and the live CLI.
 
     runner(argv, *, input, timeout) returns a CompletedProcess-like object
-    with byte stdout/stderr. No default subprocess implementation exists.
+    with byte stdout/stderr. The live runner captures both streams and never logs them.
     """
 
     def __init__(self, runner):
@@ -613,13 +782,10 @@ class ECRTransport:
             require(copied.returncode == 0, "Image copy failed")
 
 
-def simulate_publication(archive, evidence, source_sha, *, runner, pause=lambda _: None):
-    """Test-only orchestration; synthetic inputs are NOT publication approval.
-
-    No call to this routine is wired into main(). A future live entrypoint must
-    require separately verified approval, not simply reuse this simulation.
-    """
+def publish_image(archive, evidence, source_sha, *, runner, publication_authorized, pause=lambda _: None):
+    """Publish only an integrity-verified image; caller supplies the verified authorization boundary."""
     require(isinstance(source_sha, str) and SHA.fullmatch(source_sha), "Invalid source SHA")
+    require(type(publication_authorized) is bool, "Invalid publication authorization")
     transport = ECRTransport(runner)
     with tempfile.TemporaryDirectory() as folder:
         # Pin bytes for the verification and copy steps, without trusting a
@@ -657,8 +823,14 @@ def simulate_publication(archive, evidence, source_sha, *, runner, pause=lambda 
             require(current == expected, "ECR publication unconfirmed; stop and reconcile before retry")
             outcome = "published" if copied else "reconciled"
         return {**verified, "source_sha": source_sha, "ecr_repository_uri": ECR_URI,
-                "ecr_digest": current, "outcome": outcome, "simulation": True,
-                "publication_authorized": False}
+                "ecr_digest": current, "outcome": outcome, "simulation": not publication_authorized,
+                "publication_authorized": publication_authorized}
+
+
+def simulate_publication(archive, evidence, source_sha, *, runner, pause=lambda _: None):
+    """Run the isolated, explicitly non-authorizing publication tests."""
+    return publish_image(archive, evidence, source_sha, runner=runner,
+                         publication_authorized=False, pause=pause)
 
 
 # Phase 5: an explicitly synthetic record, never a deployable evidence file.
@@ -755,6 +927,195 @@ def simulate_with_evidence(archive, evidence, source_sha, output_directory, *, r
     return record
 
 
+def validate_publish_context(context, evidence):
+    required = {"publication_authorized", "source", "release", "release_workflow", "approval",
+                "verifier", "release_artifact", "verification", "image"}
+    require(isinstance(context, dict) and set(context) == required
+            and context.get("publication_authorized") is True,
+            "Verified publication context is missing or unauthorized")
+    source = object_field(context, "source")
+    require(set(source) == {"sha", "tree"}, "Unexpected verified source fields")
+    pattern_field(source, "sha", SHA)
+    pattern_field(source, "tree", SHA)
+    release = object_field(context, "release")
+    require(set(release) == {"pr_number", "base_sha", "head_sha", "merge_tree_sha", "change_digest"},
+            "Unexpected verified release fields")
+    positive_int(release, "pr_number")
+    for key in ("base_sha", "head_sha", "merge_tree_sha"):
+        pattern_field(release, key, SHA)
+    pattern_field(release, "change_digest", HEX)
+    require(source["tree"] == release["merge_tree_sha"] and
+            release["pr_number"] == evidence["release"]["pr_number"] and
+            release["base_sha"] == evidence["release"]["base_sha"] and
+            release["head_sha"] == evidence["release"]["head_sha"] and
+            release["merge_tree_sha"] == evidence["release"]["merge_tree_sha"],
+            "Verified release context differs from Release CI evidence")
+    workflow = object_field(context, "release_workflow")
+    require(set(workflow) == {"run_id", "run_attempt", "workflow_sha", "dispatcher", "official_job_id"},
+            "Unexpected verified workflow fields")
+    for key in ("run_id", "run_attempt", "official_job_id"):
+        positive_int(workflow, key)
+    pattern_field(workflow, "workflow_sha", SHA)
+    require(workflow["workflow_sha"] == release["base_sha"], "Release workflow/base SHA mismatch")
+    require(isinstance(workflow.get("dispatcher"), str) and LOGIN.fullmatch(workflow["dispatcher"]),
+            "Invalid verified Release CI dispatcher")
+    approval = object_field(context, "approval")
+    require(set(approval) == {"comment_id", "approver", "record_sha256", "review"},
+            "Unexpected verified approval fields")
+    positive_int(approval, "comment_id")
+    require(isinstance(approval.get("approver"), str) and LOGIN.fullmatch(approval["approver"]),
+            "Invalid verified approver")
+    pattern_field(approval, "record_sha256", HEX)
+    review = object_field(approval, "review")
+    require(set(review) == {"head", "record", "blocking"} and review.get("head") == release["head_sha"]
+            and isinstance(review.get("record"), str)
+            and review["record"].startswith(f"https://github.com/{REPOSITORY}/")
+            and type(review.get("blocking")) is int and review["blocking"] == 0,
+            "Invalid verified independent review")
+    verifier = object_field(context, "verifier")
+    require(set(verifier) == {"files"}, "Unexpected verifier fields")
+    files = object_field(verifier, "files")
+    require(set(files) == set(RELEASE_VERIFIER_FILES)
+            and all(isinstance(value, str) and HEX.fullmatch(value) for value in files.values()),
+            "Invalid Release verifier hashes")
+    artifact = object_field(context, "release_artifact")
+    require(set(artifact) == {"id", "digest", "name"}, "Unexpected Release artifact fields")
+    positive_int(artifact, "id")
+    pattern_field(artifact, "digest", DIGEST)
+    require(artifact["name"] == artifact_name(workflow["run_id"], workflow["run_attempt"]),
+            "Release artifact name mismatch")
+    verification = object_field(context, "verification")
+    require(verification == evidence["verification"], "Verification claims changed after validation")
+    image = object_field(context, "image")
+    require(set(image) == {"platform", "archive_sha256", "config_digest", "manifest_digest"}
+            and image["platform"] == PLATFORM
+            and image["archive_sha256"] == evidence["image"]["archive_sha256"]
+            and image["config_digest"] == evidence["image"]["config_digest"]
+            and image["manifest_digest"] == evidence["image"]["manifest_digest"],
+            "Verified image context differs from Release CI evidence")
+    return context
+
+
+def production_evidence(evidence, context, result, *, publish_run_id, publish_run_attempt,
+                        publish_workflow_sha, dispatcher, confirmed_at):
+    """Create exactly the SSM backend-deploy evidence contract v1 after remote confirmation."""
+    validate_evidence(evidence)
+    validate_publish_context(context, evidence)
+    require(result.get("simulation") is False and result.get("publication_authorized") is True
+            and result.get("integrity_verified") is True
+            and result.get("outcome") in PUBLICATION_OUTCOMES,
+            "Only a confirmed production publication is accepted")
+    image = context["image"]
+    for key in ("archive_sha256", "config_digest", "manifest_digest", "platform"):
+        require(result.get(key) == image[key], f"Published {key} mismatch")
+    source_sha = context["source"]["sha"]
+    require(result.get("source_sha") == source_sha and result.get("ecr_digest") == image["manifest_digest"]
+            and result.get("ecr_repository_uri") == ECR_URI,
+            "Remote ECR confirmation differs from the verified image")
+    publish = {"run_id": publish_run_id, "run_attempt": publish_run_attempt,
+               "workflow_sha": publish_workflow_sha, "dispatcher": dispatcher}
+    positive_int(publish, "run_id")
+    positive_int(publish, "run_attempt")
+    pattern_field(publish, "workflow_sha", SHA)
+    require(publish["workflow_sha"] == source_sha and isinstance(dispatcher, str) and LOGIN.fullmatch(dispatcher),
+            "Publish workflow identity differs from the verified source")
+    require(isinstance(confirmed_at, datetime) and confirmed_at.utcoffset() is not None,
+            "Confirmation time must include timezone")
+    release = context["release"]
+    digest_uri = f"{ECR_URI}@{result['ecr_digest']}"
+    return {
+        "schema_version": 1,
+        "record_type": "production",
+        "simulation": False,
+        "publication_authorized": True,
+        "deployable": True,
+        "repository": REPOSITORY,
+        "source": {"sha": source_sha, "tree": context["source"]["tree"]},
+        "release": release,
+        "release_workflow": context["release_workflow"],
+        "approval": context["approval"],
+        "verifier": context["verifier"],
+        "release_artifact": context["release_artifact"],
+        "verification": context["verification"],
+        "image": image,
+        "ecr": {"account_id": AWS_ACCOUNT, "region": AWS_REGION, "repository_uri": ECR_URI,
+                "tag": source_sha, "digest": result["ecr_digest"], "digest_uri": digest_uri,
+                "remote_verified": True},
+        "publish_workflow": publish,
+        "outcome": result["outcome"],
+        "confirmed_at": confirmed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def verify_context_current(api, context):
+    source_sha = context["source"]["sha"]
+    workflow = context["release_workflow"]
+    verify_current_main(api, source_sha)
+    run = api_object(api, f"/actions/runs/{workflow['run_id']}")
+    require(run.get("id") == workflow["run_id"] and run.get("run_attempt") == workflow["run_attempt"]
+            and run.get("event") == "workflow_dispatch" and run.get("head_branch") == "main"
+            and run.get("path") == RELEASE_WORKFLOW and run.get("status") == "completed"
+            and run.get("conclusion") == "success" and run.get("head_sha") == workflow["workflow_sha"]
+            and same_repo(run.get("repository")) and same_repo(run.get("head_repository")),
+            "Verified Release CI run is no longer the latest successful attempt")
+    verify_current_run(api, run)
+
+
+def validate_verified_bundle(bundle_directory, api=None):
+    bundle = Path(bundle_directory)
+    evidence = load_evidence(bundle / "release-evidence.json")
+    context = load_evidence(bundle / VERIFIED_CONTEXT_FILE)
+    validate_publish_context(context, evidence)
+    if api is not None:
+        verify_context_current(api, context)
+    result = verify_archive(bundle / "image.oci.tar", evidence)
+    for key in ("archive_sha256", "config_digest", "manifest_digest", "platform"):
+        require(result.get(key) == context["image"][key], f"Transferred verified image {key} mismatch")
+    return evidence, context
+
+
+def publish_with_evidence(bundle_directory, output_directory, *, runner, publish_run_id,
+                          publish_run_attempt, publish_workflow_sha, dispatcher,
+                          api=None, clock=lambda: datetime.now(timezone.utc), pause=lambda _: None):
+    """Publish the transferred verified image and persist its production evidence once."""
+    bundle = Path(bundle_directory)
+    output = Path(output_directory)
+    evidence, context = validate_verified_bundle(bundle, api=api)
+    publish = {"run_id": publish_run_id, "run_attempt": publish_run_attempt,
+               "workflow_sha": publish_workflow_sha}
+    positive_int(publish, "run_id")
+    positive_int(publish, "run_attempt")
+    pattern_field(publish, "workflow_sha", SHA)
+    require(publish["workflow_sha"] == context["source"]["sha"]
+            and isinstance(dispatcher, str) and LOGIN.fullmatch(dispatcher),
+            "Publish workflow identity differs from the verified source")
+    record_path = output / EVIDENCE_FILE
+    require(output.is_dir() and not record_path.exists() and not record_path.is_symlink(),
+            "Evidence output is missing or already exists")
+    archive = bundle / "image.oci.tar"
+    result = publish_image(archive, evidence, context["source"]["sha"], runner=runner,
+                           publication_authorized=True, pause=pause)
+    record = production_evidence(
+        evidence, context, result, publish_run_id=publish_run_id,
+        publish_run_attempt=publish_run_attempt, publish_workflow_sha=publish_workflow_sha,
+        dispatcher=dispatcher, confirmed_at=clock())
+    payload = (json.dumps(record, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    require(len(payload) <= MAX_JSON, "Publication evidence exceeds size limit")
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=output, prefix=".publish-evidence-", delete=False) as stream:
+            temp = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temp, record_path)
+    except OSError:
+        raise Blocked("Could not persist production publication evidence") from None
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+    return record
+
 
 def download_release_zip(api, path, *, token, run_id, attempt, trusted_workflow_shas,
                          runner=subprocess.run, now=None):
@@ -815,13 +1176,40 @@ def download_release_zip(api, path, *, token, run_id, attempt, trusted_workflow_
         raise Blocked("Artifact download or digest verification failed") from None
     return artifact_id
 
+
+def live_subprocess_runner(argv, *, input, timeout):
+    """Run AWS and Skopeo quietly; command output can contain credentials or registry details."""
+    return subprocess.run(argv, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          timeout=timeout, check=False)
+
+
+def write_validation_outputs(result):
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        require(result.get("publication_authorized") is True
+                and result.get("integrity_verified") is True
+                and result.get("approval_contract_verified") is True,
+                "Validation did not authorize publication")
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write("publication_authorized=true\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--artifact-zip", type=Path)
+    parser.add_argument("--verified-output-dir", type=Path)
     parser.add_argument("--download-artifact", action="store_true",
                         help="Download the official attempt ZIP and perform read-only verification")
+    parser.add_argument("--publish", action="store_true",
+                        help="Publish the transferred, verified Release CI image and write evidence v1")
+    parser.add_argument("--check-bundle", action="store_true",
+                        help="Recheck the transferred verified bundle without AWS access")
+    parser.add_argument("--check-current", action="store_true",
+                        help="Also confirm protected main and the Release CI attempt are unchanged")
+    parser.add_argument("--bundle-directory", type=Path)
+    parser.add_argument("--output-directory", type=Path)
     parser.add_argument("--run-id", type=int)
     parser.add_argument("--run-attempt", type=int)
     parser.add_argument("--pr-number", type=int)
@@ -829,8 +1217,53 @@ def main():
     parser.add_argument("--trusted-workflow-sha", action="append", default=[])
     args = parser.parse_args()
     try:
+        if args.check_bundle:
+            require(args.bundle_directory is not None
+                    and not any((args.publish, args.evidence, args.archive, args.artifact_zip,
+                                 args.download_artifact, args.verified_output_dir, args.output_directory,
+                                 args.run_id, args.run_attempt, args.pr_number, args.source_sha,
+                                 args.trusted_workflow_sha)),
+                    "Bundle check accepts only --bundle-directory")
+            api = GitHubAPI(os.environ.get("GITHUB_TOKEN")) if args.check_current else None
+            evidence, context = validate_verified_bundle(args.bundle_directory, api=api)
+            print(json.dumps({"publication_authorized": context["publication_authorized"],
+                              "manifest_digest": context["image"]["manifest_digest"]}, sort_keys=True))
+            return 0
+        if args.publish:
+            require(not (args.evidence or args.archive or args.artifact_zip or args.download_artifact
+                         or args.check_bundle or args.check_current or args.verified_output_dir
+                         or args.run_id or args.run_attempt
+                         or args.pr_number or args.source_sha or args.trusted_workflow_sha),
+                    "Publish mode cannot be combined with Release CI verification options")
+            require(args.bundle_directory is not None and args.output_directory is not None,
+                    "Publish mode requires verified bundle and output directories")
+            require(os.environ.get("GITHUB_ACTIONS") == "true"
+                    and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                    and os.environ.get("GITHUB_REF") == "refs/heads/main"
+                    and os.environ.get("GITHUB_REF_PROTECTED") == "true"
+                    and os.environ.get("GITHUB_REPOSITORY") == REPOSITORY,
+                    "Publication is only allowed in the protected-main workflow_dispatch run")
+            raw_run_id = os.environ.get("GITHUB_RUN_ID", "")
+            raw_run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+            require(re.fullmatch(r"[1-9][0-9]{0,18}", raw_run_id)
+                    and re.fullmatch(r"[1-9][0-9]{0,8}", raw_run_attempt),
+                    "Invalid Publish workflow run identity")
+            publish_run_id = int(raw_run_id)
+            publish_run_attempt = int(raw_run_attempt)
+            publish_workflow_sha = os.environ.get("GITHUB_SHA", "")
+            dispatcher = os.environ.get("GITHUB_ACTOR", "")
+            record = publish_with_evidence(
+                args.bundle_directory, args.output_directory, runner=live_subprocess_runner,
+                publish_run_id=publish_run_id, publish_run_attempt=publish_run_attempt,
+                publish_workflow_sha=publish_workflow_sha, dispatcher=dispatcher,
+                api=GitHubAPI(os.environ.get("GITHUB_TOKEN")))
+            print(json.dumps({"outcome": record["outcome"], "digest": record["ecr"]["digest"],
+                              "evidence": EVIDENCE_FILE}, sort_keys=True))
+            return 0
         if args.artifact_zip is not None or args.download_artifact:
             require(args.evidence is None and args.archive is None, "Choose one verification mode")
+            require(not (args.check_bundle or args.check_current),
+                    "Bundle recheck options cannot be combined with artifact verification")
             require(args.trusted_workflow_sha and all(SHA.fullmatch(s) for s in args.trusted_workflow_sha),
                     "Independently reviewed workflow SHA required")
             require(not (args.download_artifact and args.artifact_zip is not None), "Choose one artifact source")
@@ -842,15 +1275,21 @@ def main():
             options = dict(run_id=args.run_id, attempt=args.run_attempt, pr_number=args.pr_number,
                            source_sha=args.source_sha, trusted_workflow_shas=set(args.trusted_workflow_sha))
             if args.download_artifact:
+                require(args.verified_output_dir is not None, "Verified output directory is required")
                 with tempfile.TemporaryDirectory() as folder:
                     path = Path(folder) / "artifact.zip"
                     download_release_zip(api, path, token=token, run_id=args.run_id, attempt=args.run_attempt,
                                          trusted_workflow_shas=options["trusted_workflow_shas"])
-                    result = verify_github_zip(api, path, **options)
+                    result = verify_github_zip(api, path, output_directory=args.verified_output_dir, **options)
             else:
+                require(args.verified_output_dir is None, "Verified output requires a downloaded artifact")
                 result = verify_github_zip(api, args.artifact_zip, **options)
+            write_validation_outputs(result)
         else:
             require(args.evidence is not None and args.archive is not None, "Evidence and archive required")
+            require(args.verified_output_dir is None and args.bundle_directory is None
+                    and args.output_directory is None and not args.check_bundle and not args.check_current,
+                    "Unexpected workflow output option")
             require(not any((args.run_id, args.run_attempt, args.pr_number, args.source_sha, args.trusted_workflow_sha)),
                     "GitHub options require --artifact-zip")
             result = verify_archive(args.archive, load_evidence(args.evidence))
