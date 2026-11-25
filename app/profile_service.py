@@ -29,7 +29,8 @@ from app.models import PhoneVerification, User, UserRole, VolunteerOnboardingBas
 from app.onboarding_common import as_utc
 from app.phone_verification_service import (PURPOSE_PROFILE, VERIFIABLE_STATUSES, is_latest_for_user, normalize_phone,
                                             parse_verification_id, phone_already_registered,
-                                            profile_basic_info_required, registered_to_other_user)
+                                            profile_basic_info_required, proof_number_allowed,
+                                            registered_to_other_user)
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,7 @@ def usable_profile_proof(db: Session, user_id: int, verification_id, phone_e164:
             or verification.send_status not in VERIFIABLE_STATUSES  # never SUPPRESSED, FAILED, PENDING (#110)
             or verification.consumed_at is not None
             or as_utc(now) >= as_utc(verification.verified_valid_until)
+            or not proof_number_allowed(phone_e164)  # mock test mode (#124)
             or not is_latest_for_user(db, verification)):
         raise verification_required()
     return verification

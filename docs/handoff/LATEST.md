@@ -1,5 +1,19 @@
 # 작업 인수인계
 
+## 배포 환경변수 구성 (#128, 16-3)
+
+- 로컬 uvicorn [`.env.example`](../../.env.example), 로컬 Compose [`deploy/.env.example`](../../deploy/.env.example), EC2 API [`deploy/.env.api.example`](../../deploy/.env.api.example)를 구분한다. 템플릿은 비밀값을 비워 두며 그대로 실행하지 않는다. 실제 값은 승인 후 입력한다.
+- EC2의 `.env`는 DB 초기 구성, `.env.api`는 API 접속 및 기능 설정으로 분리한다. HMAC 키는 환경별, 용도별로 분리하며 SOLAPI를 연동하지 않는다. #116~#118 담당자가 승인된 기능 설정을 전달한다. `ACCOUNT_EXIT_RECORD_POLICY`는 미설정으로 둔다.
+- `scripts/check_runtime_env.py`는 템플릿과 실제 배포 설정을 구분해 읽기 전용으로 검사한다. 비밀값은 출력하지 않는다. 일반 인증 테스트는 고정 OTP 환경변수와 분리하고 루트 `.env`에는 고정 OTP 값을 두지 않는다. 테스트, 리뷰, CI 결과는 #128 PR을 참조한다.
+- 실제 EC2 환경 파일 작성, DB 변경, AWS 설정 및 배포는 별도 승인 대상이다. 최초 시연 서버 배포 전 설정 검증, Mock SMS, 접근 제한 및 프록시 뒤 요청 제한을 확인한다. [EC2 설치](../deployment/EC2_SETUP.md), [실행 절차](../deployment/RUNBOOK.md)
+
+## Mock SMS 테스트 환경 (#124)
+
+- 시연과 테스트 서버는 SOLAPI 없이 Mock SMS를 쓴다. `SMS_MOCK_FIXED_CODE`(ASCII 숫자 6자리)가 있으면 모든 요청의 인증번호가 그 값이 된다. `SMS_PROVIDER=mock`이고 `APP_ENV`가 `local`, `development`, `test`일 때만 적용되며, 그 밖의 조합에 값이 있으면 두 발송 API가 503 `SMS_DELIVERY_UNAVAILABLE`이고 아무것도 기록하지 않는다. 빈 값이나 미설정이면 기존 무작위 인증번호다. 값은 저장소, Issue, PR, 로그에 남기지 않는다.
+- 고정 인증번호는 번호 소유를 증명하지 않으므로 내부 합성 테스트 번호 `010-0000-0000`~`010-0000-9999`만 받는다. 대역 밖 번호는 슬롯과 DB 기록 전에 422 `INVALID_PHONE_NUMBER`이고, 설정값이 있는 동안 대역 밖 번호의 증빙(모드 전에 만든 것 포함)으로는 저장할 수 없다(409 `PHONE_VERIFICATION_REQUIRED`).
+- 서버 실행용 Mock은 발송 내용을 보관하지 않는다. #110의 비동기 발송, `SUPPRESSED`, 한도, 만료, 실패 횟수, 최신 요청, 목적 분리 정책은 그대로다.
+- 담당별 번호 대역, 환경 전환 영향, FE 테스트 방법, 16-3 환경변수, 최초 시연 서버 배포 전 검증은 [#110 HANDOFF 8절](../issues/110/HANDOFF.md#8-sms-정책-변경mock-sms)에 있다.
+
 ## 인증번호 발송의 등록 여부 비노출 (#110)
 
 - 대상은 `POST /users/me/phone-verifications`(온보딩)와 `POST /users/me/profile/phone-verifications`(프로필 번호 변경)입니다. 다른 계정에 등록된 번호인지 발송과 확인 응답으로 구분할 수 없습니다.
