@@ -172,9 +172,18 @@
 
 ## 서비스 정책 설정 (#118, 16-9)
 
-- [x] 시연용 약관·개인정보 처리방침 문서와 manifest를 등록했다. 문서는 실제 법률 문구가 아니며, SHA-256은 UTF-8 본문의 CRLF를 LF로 정규화해 계산한다.
-- [x] 환경 변수 전달 목록과 보호소 HMAC 키 생성·보관 절차를 `docs/16-3-environment-variables.md`에 기록했다. 비밀 값과 실서버 설정은 저장소에 두지 않는다.
-- [ ] 실제 정책 문서는 법률 승인본으로 교체하고, EC2 `.env.api`의 비밀 설정과 레벨 정책 시작 시각을 별도 승인 후 적용·검증한다. 개발 DB 변경과 서버 배포는 이 작업에 포함하지 않는다.
+- [x] 등록된 `terms-demo-v1` 및 `privacy-demo-v1`은 16-3 담당자가 시연·테스트용 임시 문서로 승인한 버전이다. 실제 법률 문구가 아니며, 정식 문서 승인 시 `policies/README.md` 절차로 새 버전을 등록하고 교체한다. 승인된 v1 본문은 수정하지 않는다.
+- [x] 보호소 키 발급·보관 절차 확정: 16-3 배포 담당자가 아래 비밀 키를 `deploy/.env.api`에만 주입한다. 키는 `python -c "import secrets; print(secrets.token_hex(32))"`로 생성하며 저장소·Issue·로그에 남기지 않는다.
+- [x] `.env.api` 설정 기준(예시값은 형식 안내용이며 저장소에서 실제 운영 설정을 하지 않는다):
+  - `TERMS_DOCUMENT_VERSION=terms-demo-v1` (비밀 아님)
+  - `PRIVACY_DOCUMENT_VERSION=privacy-demo-v1` (비밀 아님)
+  - `PRIVACY_REQUIRED_CONSENTS=PRIVACY_COLLECTION_USE` (비밀 아님; 현재 필수 동의 코드)
+  - `PLEDGE_CURRENT_VERSION=pledge-demo-v1` (비밀 아님)
+  - `SHELTER_CODE_HMAC_KEY=<64자리 hex>` (비밀; 32바이트 난수)
+  - `VOLUNTEER_LEVEL_POLICY_VERSION=level-demo-v1` (비밀 아님)
+  - `VOLUNTEER_LEVEL_POLICY_START_AT=2026-12-01T00:00:00Z` (비밀 아님; 시연 오픈 직전 UTC 시각의 형식 예시)
+- [x] `ACCOUNT_EXIT_RECORD_POLICY`는 기존 설정을 변경하지 않는다. 신규 시드/시연 환경에서는 정책 시작 시각 이후 산책만 집계하므로 `scripts/backfill_volunteer_stats.py`를 초기 구축 때 실행하지 않는다. 운영 중 누적 통계 보정이 필요할 때만 수동 실행한다.
+- [ ] 실제 `.env.api` 설정과 정책 시작 시각은 시연 오픈 직전에 배포 담당자가 설정·검증한다. 실제 비밀값, 실제 시작 시각, 개발 DB 변경 및 서버 배포는 이 작업에 포함하지 않는다.
 - [ ] 20단계: 두 발송 라우터의 OpenAPI 503 설명과 `docs/issues/40/HANDOFF.md`의 SOLAPI 503 서술을 현재 동작(고정 인증번호 설정 오류 포함, SOLAPI 설정이 모두 있으면 200 접수 후 `FAILED`)에 맞춘다.
 - [ ] 20단계 테스트 안정성 후보: 기존 `test_037`의 제약조건 조회를 대상 스키마로 한정하는 방안을 별도 승인 후 검토한다. 같은 PostgreSQL DB의 다른 테스트 실행과 겹치면 제약조건 조회가 충돌할 수 있다. #128에서는 이 테스트를 수정하지 않는다.
 
