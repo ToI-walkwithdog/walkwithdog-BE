@@ -32,7 +32,7 @@ from app.onboarding_common import (age_years, as_utc, ensure_pledge_completed,
                                    first_incomplete_step, kst_date)
 from app.phone_verification_service import (PURPOSE_ONBOARDING, VERIFIABLE_STATUSES, is_latest_for_user, mask_phone,
                                             parse_verification_id, phone_already_registered,
-                                            registered_to_other_user)
+                                            proof_number_allowed, registered_to_other_user)
 
 FULL_NAME_MIN_LENGTH, FULL_NAME_MAX_LENGTH = 2, 10
 MINIMUM_AGE, MAXIMUM_AGE = 14, 120
@@ -161,6 +161,7 @@ def save_basic_info(db: Session, user_id: int, full_name: str, birth: date, raw_
                 or verification.send_status not in VERIFIABLE_STATUSES  # never SUPPRESSED, FAILED, PENDING (#110)
                 or verification.consumed_at is not None
                 or as_utc(now) >= as_utc(verification.verified_valid_until)
+                or not proof_number_allowed(verification.phone_e164)  # mock test mode (#124)
                 or not is_latest_for_user(db, verification)):
             raise ContractError(409, "PHONE_VERIFICATION_REQUIRED", "전화번호 인증을 완료해 주세요.",
                                 {"field": "phone_verification_id"})

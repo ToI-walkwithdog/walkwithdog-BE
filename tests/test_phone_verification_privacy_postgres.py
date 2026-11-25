@@ -1,8 +1,8 @@
 """Issue #110 on a real, isolated PostgreSQL: migration 037, one number requested by several
 accounts at once, no transaction held during the provider call, the users ->
 phone_verifications lock order of the delivery job, and a late provider result racing a
-verification, and the daily number limit across accounts with its rollback. Synthetic accounts
-and numbers only."""
+verification, and the daily number limit across accounts with its rollback. Also the mock SMS
+test mode with a fixed code (Issue #124). Synthetic accounts, numbers and codes only."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import math
@@ -289,3 +289,32 @@ class PrivacyPostgresTests(IsolatedSchema, PrivacyTestCase):
         with self.Session() as db:
             owners = db.query(service.VolunteerOnboardingBasic).filter_by(phone_e164=FREE_E164).count()
         self.assertEqual(owners, 1)
+
+    # Mock SMS test mode (Issue #124): a synthetic fixed code, test-range numbers only.
+
+    def test_the_fixed_code_mode_sends_confirms_and_saves_test_numbers_only(self):
+        self.grant_pledge(3)
+        fixed = {"SMS_PROVIDER": "mock", "APP_ENV": "test", "SMS_MOCK_FIXED_CODE": "246810"}  # synthetic
+        test_number, test_e164 = "010-0000-1001", "+821000001001"
+        with patch.dict(os.environ, fixed):
+            rows = len(self.rows(PhoneVerification))
+            self.assert_error(self.send(FREE_PHONE, user_id=3), 422, "INVALID_PHONE_NUMBER", {"field": "phone_number"})
+            self.assertEqual((len(self.rows(PhoneVerification)), self.counters()), (rows, []))
+            # Free test number: sent, verified with the fixed code and saved.
+            verification_id = self.send(test_number, user_id=3).json()["data"]["verification_id"]
+            self.assertEqual(self.status(verification_id), "SENT")
+            self.assertEqual(self.confirm(verification_id, "246810", user_id=3).status_code, 200)
+            self.assertEqual(self.save(verification_id, user_id=3).status_code, 200)
+            # The same number is now registered: another account's request is SUPPRESSED, never verified.
+            self.clock.advance(seconds=61)
+            outbox = len(self.sms.outbox)
+            suppressed = self.send(test_number, user_id=1)
+            self.assertEqual(suppressed.status_code, 200, suppressed.text)
+            suppressed_id = suppressed.json()["data"]["verification_id"]
+            self.assertEqual((self.status(suppressed_id), len(self.sms.outbox)), ("SUPPRESSED", outbox))
+            self.assert_error(self.confirm(suppressed_id, "246810", user_id=1), 422, "VERIFICATION_CODE_INVALID")
+        with self.Session() as db:
+            owners = db.query(service.VolunteerOnboardingBasic).filter_by(phone_e164=test_e164).all()
+            self.assertEqual([owner.user_id for owner in owners], [3])
+            self.assertEqual(db.get(PhoneVerification, uuid.UUID(suppressed_id)).attempt_count, 1)
+        self.assertEqual(self.dispatcher.available(), self.dispatcher.capacity)

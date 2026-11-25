@@ -82,7 +82,7 @@ FE 파일 경로는 봉사자 앱 `src/screens/` 기준이다. 폴더가 생략�
 | policy-info | `onboarding/PolicyInfoScreen.tsx` | `GET /policies/terms`, `GET /policies/privacy` | Mock 사용, 실환경 필요 | FE | #76 | 2 | 준비 중 문구 |
 | 1-6 서약 | `onboarding/PledgeScreen.tsx` | `PUT /users/me/pledge` | Mock 사용 | FE | #33 | 1 | 저장 안 함 |
 | 2-1 대기 | `onboarding/OnboardingWaitingScreen.tsx` | `GET /users/me` | FE 전용(서버 상태로 분기) | FE | #45 | 2 | 1.5초 후 자동 이동 |
-| 2-2 기본 정보 | `onboarding/UserInput1Screen.tsx` | 발송, 확인, `PUT /users/me/onboarding/basic-info` | Mock 사용, 실환경 필요 | FE | #40, #110 | 1 | 테스트 코드 `123456` 고정. OTP 전달 방식 미확정 |
+| 2-2 기본 정보 | `onboarding/UserInput1Screen.tsx` | 발송, 확인, `PUT /users/me/onboarding/basic-info` | Mock 사용, 실환경 필요 | FE | #40, #110, #124 | 1 | 앱 안에서 고정값과 비교. BE 확인 API 호출로 교체(5절) |
 | 2-3, 2-4 반려견 경험 | `UserInput2Screen.tsx`, `UserInput3Screen.tsx` | `GET/PUT /users/me/onboarding/dog-experience` | Mock 사용 | FE | #42 | 1 | 화면 간 값 전달과 저장 없음 |
 | 2-5 활동 방식, 동의 | `UserInput4Screen.tsx` | `GET /regions/sido`, `GET /regions/sigungu`, `GET/PUT /users/me/onboarding/walking-routine`(`agreements`) | Mock 사용, 계약 불일치 | FE | #43, #44, #78 | 1 | 지역 자유 입력. BE는 지역 코드 1~3개 |
 | 2-6 위치 | `UserInput5Screen.tsx` | `POST /regions/resolve-location` | Mock 사용, 실환경 필요 | FE | #46 | 3 | API 호출 없음. Kakao 결정 대기(16-8) |
@@ -413,7 +413,12 @@ FE 파일 경로는 봉사자 앱 `src/screens/` 기준이다. 폴더가 생략�
 - **제거된 응답**: 발송 409 `PHONE_ALREADY_REGISTERED`, 확인 409 `VERIFICATION_NOT_SENT`. 확인 실패는 상태와 무관하게 422 `VERIFICATION_CODE_INVALID`다.
 - **저장은 별도 호출**: 확인 뒤 반드시 저장 API를 호출한다. 온보딩은 `PUT /users/me/onboarding/basic-info`, 프로필은 `PATCH /users/me/profile`(`phone_number`, `phone_verification_id`, `expected_profile_version`)이다. 다른 계정에 등록된 번호는 저장 단계에서 409 `PHONE_ALREADY_REGISTERED`다.
 - **목적 분리**: 온보딩 API로 받은 인증은 프로필에 쓸 수 없고, 그 반대도 마찬가지다(404).
-- **Mock SMS**: Mock SMS 자체는 제거 대상이 아니다. **고정 OTP 여부와 인증번호 전달 방식은 미확정**(16-2)이다. 확정 전에는 발송과 확인 API 계약만 맞추고, 인증번호 입력 UI를 만든다.
+- **Mock SMS 테스트 방법**(#124, 정책은 [HANDOFF.md 8절](HANDOFF.md#8-sms-정책-변경mock-sms))
+  - 시연과 테스트 서버는 실제 문자를 보내지 않는다. 고정 인증번호와 내부 합성 테스트 번호 `010-0000-XXXX`만 쓴다. 고정 인증번호는 담당자가 별도로 전달하며 앱 코드, 저장소, 로그에 넣지 않는다.
+  - 순서: 회원가입, 로그인, 서약 → 발송 `POST /users/me/phone-verifications` `{"phone_number": "010-0000-XXXX"}` → 확인 `POST /users/me/phone-verifications/confirm`(`verification_id`, 사용자가 입력한 인증번호) → 저장 `PUT /users/me/onboarding/basic-info`. 프로필 번호 변경도 같은 방식이다.
+  - 앱 안에서 고정값을 비교하지 않고 반드시 BE 확인 API를 호출한다(현재 `UserInput1Screen.tsx`의 자체 비교는 교체 대상).
+  - 대역 밖 번호는 발송 422 `INVALID_PHONE_NUMBER`다. 번호는 HANDOFF.md 8절의 담당 대역(봉사자 앱 3000~3999, 보호소 웹 4000~4999) 안에서 사람마다 다르게 쓴다.
+  - 발송은 비동기다. 발송 작업 전에 확인하면 422 `VERIFICATION_CODE_INVALID`이고 실패 횟수(5회)에 포함된다. 특정 시간이 지나면 발송이 끝났다고 가정하지 말고, 확인을 자동으로 반복하지 않는다. 사용자가 인증번호를 입력하고 확인을 누를 때만 호출한다.
 
 ## 6. 권장 연동 순서
 
