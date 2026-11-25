@@ -10,7 +10,6 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from sqlalchemy import text
 from sqlalchemy import text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -21,6 +20,8 @@ from test_phone_verification_privacy import FREE_E164, FREE_PHONE, PrivacyTestCa
 from test_user_profile import THIRD_PHONE
 from test_user_profile_postgres import IsolatedSchema
 from app.models import PhoneVerification, PhoneVerificationDailyCount, UserPledgeAcknowledgement
+from app import age_review_service
+from app.api_contract import ContractError
 import app.phone_verification_service as service
 from app.sms_provider import MockSmsProvider, get_sms_provider
 
@@ -48,7 +49,7 @@ class SuppressedMigrationPostgresTests(IsolatedSchema, unittest.TestCase):
                 " CONSTRAINT ck_phone_verifications_send_status"
                 " CHECK (send_status IN ('PENDING', 'SENDING', 'SENT', 'UNKNOWN', 'FAILED')))")
             for status in ("SENT", "FAILED"):
-                connection.execute(text("INSERT INTO phone_verifications VALUES (:id, :status)"),
+                connection.execute(sql_text("INSERT INTO phone_verifications VALUES (:id, :status)"),
                                    {"id": uuid.uuid4(), "status": status})
         self.run_migration(engine)
         self.run_migration(engine)
@@ -60,9 +61,9 @@ class SuppressedMigrationPostgresTests(IsolatedSchema, unittest.TestCase):
             ).scalars().all()
             self.assertEqual(len(definition), 1)
             self.assertIn("SUPPRESSED", definition[0])
-            connection.execute(text("INSERT INTO phone_verifications VALUES (:id, 'SUPPRESSED')"), {"id": uuid.uuid4()})
+            connection.execute(sql_text("INSERT INTO phone_verifications VALUES (:id, 'SUPPRESSED')"), {"id": uuid.uuid4()})
         with self.assertRaises(IntegrityError), engine.begin() as connection:
-            connection.execute(text("INSERT INTO phone_verifications VALUES (:id, 'BOGUS')"), {"id": uuid.uuid4()})
+            connection.execute(sql_text("INSERT INTO phone_verifications VALUES (:id, 'BOGUS')"), {"id": uuid.uuid4()})
 
 
 @unittest.skipUnless(TEST_URL, "격리 PostgreSQL이 필요합니다")
@@ -132,19 +133,32 @@ class PrivacyPostgresTests(IsolatedSchema, PrivacyTestCase):
                     raise AssertionError("not released")
             return result
 
-        with patch.object(service, "is_latest_for_user", held), ThreadPoolExecutor(3) as pool:
+        def exit_account():  # sign-up exit: users FOR UPDATE, then deletes the requests
+            with self.Session() as db:
+                try:
+                    age_review_service.delete_account(db, 1)
+                except ContractError as refused:
+                    return refused.code
+            return "DELETED"
+
+        with patch.object(service, "is_latest_for_user", held), ThreadPoolExecutor(4) as pool:
             job = pool.submit(self.deliver, verification_id, FREE_E164, "123456")
             self.assertTrue(reached.wait(WAIT))
             self.clock.advance(seconds=61)
             new_send = pool.submit(self.send, FREE_PHONE)  # users FOR UPDATE: waits for the job
             confirm = pool.submit(self.confirm, verification_id, "123456")  # request FOR UPDATE: waits
+            exited = pool.submit(exit_account)  # users FOR UPDATE: waits as well
             with self.assertRaises(TimeoutError):
                 new_send.result(timeout=0.5)
+            with self.assertRaises(TimeoutError):
+                exited.result(timeout=0.1)
             release.set()
             job.result(timeout=WAIT)
-            sent, confirmed = new_send.result(timeout=WAIT), confirm.result(timeout=WAIT)
+            sent, confirmed, exit_code = (new_send.result(timeout=WAIT), confirm.result(timeout=WAIT),
+                                          exited.result(timeout=WAIT))
         self.assertEqual(sent.status_code, 200, sent.text)  # no deadlock, no lock timeout
         self.assertIn(confirmed.status_code, (200, 410), confirmed.text)  # verified, or replaced by the new send
+        self.assertEqual(exit_code, "AGE_REVIEW_NOT_REQUIRED")  # an ACTIVE account: refused after waiting
 
     def test_a_late_provider_result_racing_a_verification_keeps_it(self):
         verification_id = self.reserve(code=123456)

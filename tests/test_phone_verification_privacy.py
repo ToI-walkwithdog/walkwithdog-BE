@@ -15,7 +15,10 @@ from test_user_profile import THIRD_PHONE, THIRD_E164, ProfileTestCase
 from app.account_status import change_to_age_review
 from app.models import PhoneVerification, PhoneVerificationDailyCount, VolunteerOnboardingBasic
 import app.phone_verification_service as service
-from app.phone_verification_service import (PURPOSE_ONBOARDING, SmsDispatcher, confirm_code, deliver_verification,
+import app.profile_service as service_profile
+from app.api_contract import ContractError
+from app.phone_verification_service import (PURPOSE_ONBOARDING, PURPOSE_PROFILE, SmsDispatcher, confirm_code,
+                                            deliver_verification,
                                             get_sms_dispatcher, hmac_key, purge_phone_verifications, reserve_send)
 from app.sms_provider import get_sms_provider
 
@@ -49,11 +52,11 @@ class PrivacyTestCase(ProfileTestCase):
         with self.Session.begin() as db:
             db.get(PhoneVerification, uuid.UUID(verification_id)).send_status = status
 
-    def reserve(self, phone_e164=FREE_E164, user_id=1, code=123456):
+    def reserve(self, phone_e164=FREE_E164, user_id=1, code=123456, purpose=PURPOSE_ONBOARDING):
         """T1 only (no delivery): returns the request id as a string."""
         with patch("app.phone_verification_service.secrets.randbelow", return_value=code), self.Session() as db:
             verification_id, _code, _suppressed = reserve_send(db, user_id, phone_e164, self.clock.now, hmac_key(),
-                                                               PURPOSE_ONBOARDING)
+                                                               purpose)
         return str(verification_id)
 
     def deliver(self, verification_id, phone_e164=FREE_E164, code="123456"):
@@ -178,6 +181,20 @@ class SlotTests(PrivacyTestCase):
         self.assert_error(self.send(FREE_PHONE), 403, "AGE_REVIEW_REQUIRED")
         self.assertEqual(self.dispatcher.available(), capacity)
 
+    def test_a_slot_is_freed_once_even_when_a_job_raises_a_base_exception(self):
+        dispatcher = SmsDispatcher(workers=1, queue=0, inline=True)
+        slot = dispatcher.try_acquire()
+        self.assertIsNone(dispatcher.try_acquire())  # capacity 1 is taken
+
+        def interrupted():
+            raise SystemExit("interrupted")
+
+        with self.assertRaises(SystemExit):
+            dispatcher.submit(interrupted, slot)
+        slot.release()  # the request path releases too: no double free
+        slot.release()
+        self.assertEqual(dispatcher.available(), 1)
+
 
 class DeliveryTests(PrivacyTestCase):
     def test_delivery_rechecks_the_request_right_before_sending(self):
@@ -262,6 +279,33 @@ class ConfirmTests(PrivacyTestCase):
                 self.assertIsNone(self.basic(1))
                 self.clock.advance(seconds=61)
                 self.complete_step1(phone=PHONE, user_id=1)  # restore for the next round
+
+    def test_profile_patch_refuses_requests_that_were_never_sent_even_if_marked_verified(self):
+        for status in ("PENDING", "FAILED", "SUPPRESSED"):
+            with self.subTest(status=status):
+                self.clock.advance(seconds=61)
+                self.reset_counters()
+                verification_id = self.reserve(purpose=PURPOSE_PROFILE)
+                self.set_status(verification_id, status)
+                with self.Session.begin() as db:  # as if a verification were recorded by mistake
+                    row = db.get(PhoneVerification, uuid.UUID(verification_id))
+                    row.verified_at, row.verified_valid_until = self.clock.now, self.clock.now + timedelta(minutes=15)
+                body = {"expected_profile_version": self.version(), "phone_number": FREE_PHONE,
+                        "phone_verification_id": verification_id}
+                self.assert_error(self.patch_profile(body), 409, "PHONE_VERIFICATION_REQUIRED")
+                self.assertEqual(self.basic(1).phone_e164, PHONE_E164)
+                self.assertIsNone(self.proof(verification_id).consumed_at)
+
+    def test_a_consumed_profile_proof_is_refused_again_for_the_same_number(self):
+        verification_id = self.profile_verified(FREE_PHONE)
+        body = {"expected_profile_version": self.version(), "phone_number": FREE_PHONE,
+                "phone_verification_id": verification_id}
+        self.assertEqual(self.patch_profile(body).status_code, 200)
+        self.assertIsNotNone(self.proof(verification_id).consumed_at)
+        with self.Session() as db:  # the proof is still the latest and inside its 15 minutes
+            with self.assertRaises(ContractError) as refused:
+                service_profile.usable_profile_proof(db, 1, uuid.UUID(verification_id), FREE_E164, self.clock.now)
+        self.assertEqual((refused.exception.status_code, refused.exception.code), (409, "PHONE_VERIFICATION_REQUIRED"))
 
 
 class LateResultTests(PrivacyTestCase):

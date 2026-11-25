@@ -209,11 +209,29 @@ def reserve_send(db: Session, user_id: int, phone_e164: str, now: datetime, key:
         raise
 
 
+class DeliverySlot:
+    """One taken place of the pool. release() frees it once; later calls do nothing, so the
+    job and the request path can both release it safely on every path (Issue #110)."""
+
+    def __init__(self, dispatcher: "SmsDispatcher"):
+        self._dispatcher = dispatcher
+        self._released = False
+        self._lock = threading.Lock()
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        self._dispatcher._free()
+
+
 class SmsDispatcher:
     """Bounded in-process delivery pool (Issue #110): `workers` threads and at most `queue`
     waiting jobs. A request takes a slot before anything else, so overload answers the same
-    503 whatever the number is. Each taken slot is released exactly once: by the caller when
-    nothing was queued, otherwise by the job itself. inline=True runs jobs at once (tests)."""
+    503 whatever the number is. The job releases its slot when it ends; the request path
+    releases it when nothing was queued (idempotent). inline=True runs jobs at once (tests).
+    A graceful shutdown runs the queued jobs first; a forced kill loses them."""
 
     def __init__(self, workers: int = DISPATCH_WORKERS, queue: int = DISPATCH_QUEUE, *, inline: bool = False):
         self.capacity = workers + queue
@@ -226,28 +244,28 @@ class SmsDispatcher:
         with self._lock:
             return self.capacity - self._in_use
 
-    def try_acquire(self) -> bool:
+    def try_acquire(self) -> DeliverySlot | None:
         with self._lock:
             if self._in_use >= self.capacity:
-                return False
+                return None
             self._in_use += 1
-            return True
+            return DeliverySlot(self)
 
-    def release(self) -> None:
+    def _free(self) -> None:
         with self._lock:
             if self._in_use <= 0:
-                raise RuntimeError("delivery slot released twice")
+                raise RuntimeError("delivery slot freed twice")
             self._in_use -= 1
 
-    def submit(self, job) -> None:
-        """Queue `job` on an acquired slot; the job releases it. Raises if nothing was queued."""
+    def submit(self, job, slot: DeliverySlot) -> None:
+        """Queue `job` on `slot`; the job releases it when it ends. Raises if nothing was queued."""
         def run():
             try:
                 job()
             except Exception as exc:  # the type only: a message could carry a number
                 logger.warning("SMS delivery job failed (%s)", type(exc).__name__)
             finally:
-                self.release()
+                slot.release()
 
         if self._inline:
             run()
@@ -341,7 +359,8 @@ def send_verification(db: Session, provider: SmsProvider | None, user_id: int, p
         raise delivery_unavailable()
     key = hmac_key()  # fail closed before any write
     dispatcher = dispatcher or get_sms_dispatcher()
-    if not dispatcher.try_acquire():  # overloaded: decided before the number is looked at
+    slot = dispatcher.try_acquire()
+    if slot is None:  # overloaded: decided before the number is looked at
         raise delivery_unavailable()
     queued = False
     try:
@@ -351,7 +370,7 @@ def send_verification(db: Session, provider: SmsProvider | None, user_id: int, p
             job = (lambda code=code: deliver_verification(bind, provider, verification_id, phone_e164, code,
                                                            job_clock))
             try:
-                dispatcher.submit(job)
+                dispatcher.submit(job, slot)
                 queued = True
             except Exception as exc:  # the row stays PENDING; the user asks again after 60 s
                 logger.warning("SMS delivery could not be queued (%s)", type(exc).__name__)
@@ -359,7 +378,7 @@ def send_verification(db: Session, provider: SmsProvider | None, user_id: int, p
         del code
     finally:
         if not queued:
-            dispatcher.release()
+            slot.release()
     return {"verification_id": str(verification_id), "expires_in_seconds": CODE_TTL_SECONDS,
             "resend_after_seconds": RESEND_WAIT_SECONDS}
 

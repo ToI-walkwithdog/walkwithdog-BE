@@ -124,7 +124,8 @@ def usable_profile_proof(db: Session, user_id: int, verification_id, phone_e164:
     if (verification is None or verification.user_id != user_id
             or verification.purpose != PURPOSE_PROFILE or verification.phone_e164 != phone_e164
             or verification.verified_at is None
-            or verification.send_status not in VERIFIABLE_STATUSES  # never SUPPRESSED, FAILED, PENDING (#110) or verification.consumed_at is not None
+            or verification.send_status not in VERIFIABLE_STATUSES  # never SUPPRESSED, FAILED, PENDING (#110)
+            or verification.consumed_at is not None
             or as_utc(now) >= as_utc(verification.verified_valid_until)
             or not is_latest_for_user(db, verification)):
         raise verification_required()
