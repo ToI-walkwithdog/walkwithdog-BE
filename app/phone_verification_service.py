@@ -39,6 +39,13 @@ wait and the daily limits stay per account and per number across both purposes.
 
 Secrets: PHONE_VERIFICATION_HMAC_KEY (at least 32 characters) signs codes and number
 keys. Codes live in memory only: never stored, returned or logged; numbers are never logged.
+
+Mock SMS test environment (Issue #124): with SMS_MOCK_FIXED_CODE (see app.sms_provider) every
+request's code is that value instead of a random one; it is stored, bound to the request, as an
+HMAC like any code. It proves nothing about owning a number, so in that mode only the internal
+synthetic test numbers 010-0000-XXXX are accepted: others answer 422 before a slot is taken or
+anything is written, and while the setting has any value no proof for another number can be
+saved. Every rule above (async delivery, SUPPRESSED, limits, expiry, attempts) is unchanged.
 """
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -62,7 +69,8 @@ from app.api_contract import ContractError
 from app.auth import contract_unauthorized
 from app.models import PhoneVerification, PhoneVerificationDailyCount, VolunteerOnboardingBasic
 from app.onboarding_common import as_utc, ensure_pledge_completed, kst_date, next_kst_midnight, utc_now
-from app.sms_provider import SmsProvider, SmsProviderUnavailable
+from app.sms_provider import (SmsProvider, SmsProviderUnavailable, fixed_code_configured, is_synthetic_test_number,
+                              mock_fixed_code)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +138,17 @@ def delivery_unavailable() -> ContractError:
     return _error(503, "SMS_DELIVERY_UNAVAILABLE", "인증번호 발송이 지연되고 있습니다.")
 
 
+def synthetic_test_number_required() -> ContractError:
+    return _error(422, "INVALID_PHONE_NUMBER", "테스트 환경에서는 010-0000으로 시작하는 테스트 번호만 사용할 수 있습니다.",
+                  {"field": "phone_number"})
+
+
+def proof_number_allowed(phone_e164: str) -> bool:
+    """False for a number outside the synthetic test range while SMS_MOCK_FIXED_CODE has any
+    value, so no proof (even one made before the mode was turned on) saves such a number."""
+    return not fixed_code_configured() or is_synthetic_test_number(phone_e164)
+
+
 def phone_already_registered() -> ContractError:
     return _error(409, "PHONE_ALREADY_REGISTERED", "이미 등록된 전화번호입니다.", {"field": "phone_number"})
 
@@ -167,8 +186,9 @@ def profile_basic_info_required() -> ContractError:
 
 
 def reserve_send(db: Session, user_id: int, phone_e164: str, now: datetime, key: bytes,
-                 purpose: str = PURPOSE_ONBOARDING):
-    """T1. Returns (verification_id, code, suppressed). The code exists only in memory.
+                 purpose: str = PURPOSE_ONBOARDING, *, fixed_code: str | None = None):
+    """T1. Returns (verification_id, code, suppressed). The code exists only in memory; it is
+    `fixed_code` in the mock test mode (#124), otherwise random.
 
     Every request runs the same checks in the same order; registration is looked at only
     after the counters and resend waits, so it never changes the answer (Issue #110)."""
@@ -196,7 +216,7 @@ def reserve_send(db: Session, user_id: int, phone_e164: str, now: datetime, key:
             raise rate_limited((next_kst_midnight(now) - as_utc(now)).total_seconds())
         suppressed = registered_to_other_user(db, phone_e164, user_id)
         verification_id = uuid.uuid4()
-        code = f"{secrets.randbelow(10 ** 6):06d}"
+        code = fixed_code if fixed_code is not None else f"{secrets.randbelow(10 ** 6):06d}"
         db.add(PhoneVerification(
             id=verification_id, user_id=user_id, phone_e164=phone_e164,
             code_digest=code_digest(key, verification_id, code), send_status=SUPPRESSED if suppressed else PENDING,
@@ -357,14 +377,21 @@ def send_verification(db: Session, provider: SmsProvider | None, user_id: int, p
     """Accept a send request. 200 means accepted by the server, not delivered (Issue #110)."""
     if provider is None:  # nothing reserved, nothing counted, whatever the number is
         raise delivery_unavailable()
+    try:
+        fixed_code = mock_fixed_code()
+    except SmsProviderUnavailable:  # a fixed code where it may not be used: same 503, nothing written
+        raise delivery_unavailable() from None
     key = hmac_key()  # fail closed before any write
+    if fixed_code is not None and not is_synthetic_test_number(phone_e164):
+        raise synthetic_test_number_required()  # decided by the number alone, before any write
     dispatcher = dispatcher or get_sms_dispatcher()
     slot = dispatcher.try_acquire()
     if slot is None:  # overloaded: decided before the number is looked at
         raise delivery_unavailable()
     queued = False
     try:
-        verification_id, code, suppressed = reserve_send(db, user_id, phone_e164, now, key, purpose)
+        verification_id, code, suppressed = reserve_send(db, user_id, phone_e164, now, key, purpose,
+                                                         fixed_code=fixed_code)
         if not suppressed:
             bind, job_clock = db.get_bind(), clock or utc_now
             job = (lambda code=code: deliver_verification(bind, provider, verification_id, phone_e164, code,
@@ -375,7 +402,7 @@ def send_verification(db: Session, provider: SmsProvider | None, user_id: int, p
             except Exception as exc:  # the row stays PENDING; the user asks again after 60 s
                 logger.warning("SMS delivery could not be queued (%s)", type(exc).__name__)
             del job
-        del code
+        del code, fixed_code
     finally:
         if not queued:
             slot.release()

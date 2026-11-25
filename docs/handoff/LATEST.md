@@ -1,5 +1,12 @@
 # 작업 인수인계
 
+## Mock SMS 테스트 환경 (#124)
+
+- 시연과 테스트 서버는 SOLAPI 없이 Mock SMS를 쓴다. `SMS_MOCK_FIXED_CODE`(ASCII 숫자 6자리)가 있으면 모든 요청의 인증번호가 그 값이 된다. `SMS_PROVIDER=mock`이고 `APP_ENV`가 `local`, `development`, `test`일 때만 적용되며, 그 밖의 조합에 값이 있으면 두 발송 API가 503 `SMS_DELIVERY_UNAVAILABLE`이고 아무것도 기록하지 않는다. 빈 값이나 미설정이면 기존 무작위 인증번호다. 값은 저장소, Issue, PR, 로그에 남기지 않는다.
+- 고정 인증번호는 번호 소유를 증명하지 않으므로 내부 합성 테스트 번호 `010-0000-0000`~`010-0000-9999`만 받는다. 대역 밖 번호는 슬롯과 DB 기록 전에 422 `INVALID_PHONE_NUMBER`이고, 설정값이 있는 동안 대역 밖 번호의 증빙(모드 전에 만든 것 포함)으로는 저장할 수 없다(409 `PHONE_VERIFICATION_REQUIRED`).
+- 서버 실행용 Mock은 발송 내용을 보관하지 않는다. #110의 비동기 발송, `SUPPRESSED`, 한도, 만료, 실패 횟수, 최신 요청, 목적 분리 정책은 그대로다.
+- 담당별 번호 대역, 환경 전환 영향, FE 테스트 방법, 16-3 환경변수, 최초 시연 서버 배포 전 검증은 [#110 HANDOFF 8절](../issues/110/HANDOFF.md#8-sms-정책-변경mock-sms)에 있다.
+
 ## 인증번호 발송의 등록 여부 비노출 (#110)
 
 - 대상은 `POST /users/me/phone-verifications`(온보딩)와 `POST /users/me/profile/phone-verifications`(프로필 번호 변경)입니다. 다른 계정에 등록된 번호인지 발송과 확인 응답으로 구분할 수 없습니다.
