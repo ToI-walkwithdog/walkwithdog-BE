@@ -1,0 +1,146 @@
+name: ECR Image Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Official Release CI run ID
+        required: true
+        type: string
+      release_run_attempt:
+        description: Official Release CI run attempt
+        required: true
+        type: string
+      release_pr_number:
+        description: Approved and merged Release PR number
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: toi-be-ecr-image-publish
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected && github.repository_id == '1409697696' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      publication_authorized: ${{ steps.verify.outputs.publication_authorized }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run ECR publication unit tests
+        run: python3 -m unittest discover -s .github/tests -p test_ecr_image_publish.py -v
+      - name: Verify official Release CI artifact and approval
+        id: verify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}
+          RELEASE_PR_NUMBER: ${{ inputs.release_pr_number }}
+          SOURCE_SHA: ${{ github.sha }}
+          TRUSTED_RELEASE_WORKFLOW_SHA: ${{ vars.TRUSTED_RELEASE_WORKFLOW_SHA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]]
+          [[ "$RELEASE_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,8}$ ]]
+          [[ "$RELEASE_PR_NUMBER" =~ ^[1-9][0-9]{0,18}$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_RELEASE_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'Reviewed Release CI SHA has not been configured.' >&2
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          python3 -I scripts/ecr_image_publish.py --download-artifact \
+            --run-id "$RELEASE_RUN_ID" --run-attempt "$RELEASE_RUN_ATTEMPT" \
+            --pr-number "$RELEASE_PR_NUMBER" --source-sha "$SOURCE_SHA" \
+            --trusted-workflow-sha "$TRUSTED_RELEASE_WORKFLOW_SHA" \
+            --verified-output-dir "$RUNNER_TEMP/verified-image"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ecr-verified-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verified-image/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish image
+    needs: validate
+    if: ${{ needs.validate.result == 'success' && needs.validate.outputs.publication_authorized == 'true' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected && github.repository_id == '1409697696' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      id-token: write
+    env:
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      ECR_PUBLISH_ROLE_ARN: ${{ vars.ECR_PUBLISH_ROLE_ARN }}
+      GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ecr-verified-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verified-image
+      - name: Recheck transferred image before AWS authentication
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -I scripts/ecr_image_publish.py --check-bundle \
+            --check-current --bundle-directory "$RUNNER_TEMP/verified-image"
+      - name: Install Skopeo
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo
+          skopeo --version
+      - name: Validate ECR publishing configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ACCOUNT_ID" == '478478097368' ]]
+          [[ "$AWS_REGION" == 'ap-northeast-2' ]]
+          [[ "$ECR_REPOSITORY" == 'toi-be' ]]
+          [[ "$ECR_PUBLISH_ROLE_ARN" == 'arn:aws:iam::478478097368:role/toi-github-ecr-publish' ]]
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.2.1
+        with:
+          role-to-assume: ${{ vars.ECR_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: '478478097368'
+          role-session-name: EcrPublish-${{ github.run_id }}
+      - name: Publish verified image and create evidence v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/publish-output"
+          python3 -I scripts/ecr_image_publish.py --publish \
+            --bundle-directory "$RUNNER_TEMP/verified-image" \
+            --output-directory "$RUNNER_TEMP/publish-output"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-publish-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publish-output/image-publish-evidence.json
+          if-no-files-found: error
+          retention-days: 90
