@@ -212,3 +212,56 @@ ROLLBACK;
 3. F-10과 F-11에는 파일 단위 `BEGIN/COMMIT`이 없다. 기본 autocommit으로 실행하면 선행 `ADD COLUMN`이나 `DROP CONSTRAINT`만 남고 새 제약 부착에 실패할 수 있다. 기존 데이터의 위반 건수를 먼저 확인하고 파일당 단일 트랜잭션으로 적용한다. 신규 SQL도 가능한 한 파일당 하나의 트랜잭션으로 관리한다. `CREATE INDEX CONCURRENTLY`처럼 트랜잭션 블록 밖에서 실행해야 하는 SQL은 `outside`로 별도 검토하고, 중간 실패 후 무효 인덱스 등 남은 객체를 확인할 복구 절차를 함께 승인한다. [PostgreSQL 16 CREATE INDEX 문서](https://www.postgresql.org/docs/16/sql-createindex.html)
 4. 파일마다 종료 코드, 커밋 여부, 대상 객체와 검증 상태를 기록한다. 새 코드 기동 후 스키마 범위에 맞춰 가입과 `identifier` 로그인, `/users/me`, 만 14세 이상 자기확인 시각과 동의 저장, 필수 동의 또는 문서 버전 검증 실패 시 미저장, F-10 마커, F-11 산책 시간, 산책 안내와 보호소 평가를 합성 데이터로 검증한다. 온보딩 후속 후보에서는 서약, 기본 정보와 연령 상태, Step 2 조회 및 저장, 가입 종료를 더 확인한다. 지역 후보는 적재 후 행 수, 고유 키와 참조 무결성 및 재실행 동작을 확인한다.
 5. 오류나 연결 끊김이 발생하면 다음 파일과 서비스 기동을 멈춘다. 실제 커밋 여부를 확인하고 읽기 전용으로 사전 및 사후 상태의 차이를 다시 분류한다. 일부만 남았거나 스키마와 이력이 다르면 예방 가드로 덮거나 같은 파일을 반복 실행하지 않는다. 데이터 손실이 없는 승인된 보정 또는 검증된 백업으로 복구하고 카탈로그, 데이터 집계 및 서비스 검증을 다시 수행한다. 이메일 삭제가 커밋된 상태에서 구 버전 서비스만 재기동하는 방식은 복구가 되지 않는다. 복원 시 백업 이후 변경의 보존 방법도 함께 결정한다.
+
+## 통합 마이그레이션 실행 도구 (`scripts/apply_migrations.py`)
+
+[apply_migrations.py](../../scripts/apply_migrations.py)는 [check_migrations.py](../../scripts/check_migrations.py)의 정적 검증과 `evidence_plan()`을 재사용하여, 증빙 JSON을 기준으로 마이그레이션을 계획(dry-run)하거나 파일 단위로 안전하게 적용(`--apply`)한다. 실제 개발·운영 DB 적용은 16-5 읽기 전용 조사 증빙과 16-6 적용 승인을 확보한 뒤에만 수행한다.
+
+### 기본 실행(dry-run) 및 종료 코드
+
+기본 모드는 DB에 접속하지 않는 dry-run이며, 파일별 계획(`evidence_plan()` 반환 액션명)과 `tx`, `prechecks` 정보를 출력한다.
+
+```sh
+python scripts/apply_migrations.py --evidence path/to/evidence.json
+```
+
+| 종료 코드 | 의미 |
+| --- | --- |
+| `0` | dry-run 계획에 차단 항목이 없거나, `--apply`의 모든 대상 파일이 성공적으로 적용됨 |
+| `1` | manifest/증빙 오류, 계획 차단(`RECONCILE_*`, `BLOCKED_*`, `OUTSIDE_ENVIRONMENT`), 체크섬 불일치, 또는 `--record-dir` 내 미완료(`started`)·손상된 `apply-*.json` 발견 |
+| `2` | SQL 실행 중 오류 발생 (`psql` 비정상 종료, 즉시 중단하고 다음 파일 미실행) |
+| `3` | 안전 가드 위반 (`--confirm-apply` 불일치, `--record-dir` 또는 `--schema-record-out`이 저장소 내부이거나 디렉터리 없음, 백업 검증 실패, `psql`/`pg_restore` 미존재, DB 식별 불일치 또는 `pg_control_system()` 권한 부족, SQL 내 psql 메타 명령 발견) |
+
+### `--apply` 필수 인자와 사전 가드
+
+`--apply` 모드는 아래 필수 인자를 모두 받고, 연결 정보는 인자가 아닌 `libpq` 환경변수(`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE` 등)로만 전달한다.
+
+```sh
+python scripts/apply_migrations.py --apply \
+  --evidence path/to/evidence.json \
+  --db-name "<target_db>" \
+  --system-identifier "<system_identifier>" \
+  --confirm-apply "<target_db>" \
+  --backup-file /outside/repo/backup.dump \
+  --record-dir /outside/repo/records \
+  --schema-record-out /outside/repo/schema-record.json
+```
+
+- **필수 인자**: `--evidence`, `--db-name`, `--system-identifier`, `--confirm-apply`(`--db-name`과 정확히 일치), `--backup-file`, `--record-dir`
+- **선택 인자**: `--schema-record-out` — 모든 적용이 끝나면 `pg16-public-v1` 카탈로그 지문과 적용 순서별 `migrations` 배열을 담은 `schema-record.json`([EC2_SETUP.md](../deployment/EC2_SETUP.md))을 저장소 밖에 배타 생성한다.
+- **실행 전 사전 가드 순서**:
+  1. 증빙/manifest 정적 검증 및 차단 액션(`RECONCILE_*`, `BLOCKED_*`) 거부(DB 접속 전 종료 코드 `1`).
+  2. 실행 후보 SQL을 한 번만 읽어 SHA-256을 대조하고, `\i`, `\ir` 등 행 시작 psql 메타 명령이 있으면 종료 코드 `3`으로 거부한다. 해시한 바이트 그대로 `psql -X --no-password -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -f -`의 stdin으로 전달한다(`transaction == "psql-single"`이면 `--single-transaction` 추가, `file`이면 미추가).
+  3. `--record-dir`을 `resolve()`해 저장소 내부이거나 존재하지 않으면 종료 코드 `3`으로 거부한다. 기존 `apply-*.json`에 `started` 상태나 손상된 파일이 있으면 종료 코드 `1`로 중단한다.
+  4. **백업 검증**: 파일 존재, 비어 있지 않음, 수정 시각이 24시간 이내(`BACKUP_MAX_AGE_HOURS = 24`)이고 미래가 아님, `pg_restore --list --no-password` 성공 및 헤더 `;     dbname: <name>`이 `--db-name`과 일치해야 한다.
+  5. **DB 식별 및 권한**: `shutil.which("psql")` 확인 후, `psql`로 `current_database()`와 `pg_control_system().system_identifier`를 조회해 대조한다. `pg_control_system()`은 **superuser**, **`pg_monitor` 롤**, 또는 **`GRANT EXECUTE ON FUNCTION pg_control_system()`** 권한이 필요하며(`pg_read_all_stats`만으로는 부족), 권한 부족 시 종료 코드 `3`으로 중단한다.
+
+### 실행 기록 구분 및 실패 시 복구·재개 절차
+
+- **실행 기록(`apply-*.json`, `type: "sql-apply-run"`)**: 모든 사전 가드를 통과한 뒤에만 배타 생성(`O_EXCL`)된다. 파일별 `prechecks` 목록, 증빙 `state`/`proof`, `started_at`/`finished_at`, `result`(`started`/`applied`/`failed`), `sqlstate`(오류 시 `-v VERBOSITY=sqlstate`로 추출, 원문 오류·비밀 값 미기록)를 남긴다.
+- **모델 초기화 증빙(`init-*.json`, `type: "model-init-evidence"`)**: 빈 DB에 `AUTO_CREATE_SCHEMA=true` / `Base.metadata.create_all`로 초기화한 경우 `create_model_init_evidence()`가 `init-*.json`으로 별도 기록한다. 이는 과거 SQL 실행 이력이 아니며 `apply-*.json` 검증 대상과 섞이지 않는다.
+- **실패 시 복구 및 재개**:
+  1. SQL 실행이 실패(`exit 2`)하면 즉시 중단하고 다음 파일을 실행하지 않는다.
+  2. 이전 실행 기록에 `started`만 남은 항목이 있거나 기록 파일이 손상된 경우 도구는 자동 재개를 거부(`exit 1`)한다.
+  3. 운영자는 읽기 전용 세션으로 대상 객체의 실제 커밋 여부와 카탈로그 상태를 다시 확인해 증빙 JSON을 갱신하고, 실패 원인을 해소한 뒤 새로운 검증 백업과 함께 재실행한다.
+
