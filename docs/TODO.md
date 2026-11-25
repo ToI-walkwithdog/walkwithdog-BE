@@ -180,7 +180,9 @@
 
 ## 16-8 Kakao 위치 판별 설정 (#117)
 
-- [x] 시연/개발 환경 Kakao 실제 호출, OS 위치 권한 + 서비스 내 위치정보 이용 고지 후 실시간 변환(제3자 저장 없음), 무료 일일 쿼터 내 사용 정책 확정 및 문서화 (`docs/issues/46/TODO.md`, `docs/handoff/LATEST.md`)
-- [x] 16-3 환경변수 목록 정리: `LOCATION_GEOCODING_PROVIDER`(비비밀), `LOCATION_EXTERNAL_TRANSFER_ENABLED`(비비밀), `KAKAO_REST_API_KEY`(비밀, 배포 호스트 `.env.api` 0600 전용)
-- [x] 테스트 보강 및 기준 목록 갱신: `tests/test_location_resolution.py` 53 passed (64KB 초과 응답, 공백 API 키, 오류 경로 키·좌표 비노출 추가), `docs/dev-automation/test-baseline.json` 1,152건 갱신
-- [ ] `KAKAO_REST_API_KEY` 발급/배치 담당 결정(운영 전) 및 배포 호스트 `.env.api`(0600) 설정 후 사용자 직접 수동 검증
+- [x] 운영 결정과 설정 절차를 `docs/issues/46/TODO.md` 및 `docs/handoff/LATEST.md`에 기록: 시연 기본은 `LOCATION_GEOCODING_PROVIDER=mock`; 16-3 배포 담당자가 키를 배포 호스트 `.env.api`에 주입하고, 위치 화면(2-6)의 외부 전송·이용 목적 고지를 확인한 뒤에만 `kakao`와 `LOCATION_EXTERNAL_TRANSFER_ENABLED=true`로 전환
+- [x] 고지 선행 조건 및 비밀정보 취급 명시: 현재 좌표의 Kakao 외부 전송과 이용 목적을 2-6 화면에서 고지하기 전에는 외부 전송을 활성화하지 않는다. 키는 저장소·Issue·로그에 기록하지 않는다.
+- [x] 16-3 담당자 전달 환경변수 목록 문서화: `LOCATION_GEOCODING_PROVIDER`, `LOCATION_EXTERNAL_TRANSFER_ENABLED`, `KAKAO_REST_API_KEY`
+- [x] Mock HTTP 검증: 정상/활성 지역 변환, 미지원 지역 422, timeout·외부 오류 503, 키 누락·`transfer_disabled`, 로그·응답 캐시 제어 및 좌표 비노출 확인 (`tests/test_location_resolution.py`: 53 passed)
+- [x] 전체 회귀 및 기준 목록 갱신: 973 passed, 235 skipped, 47 warnings (1208 collected); `docs/dev-automation/test-baseline.json` 1208건
+- [ ] 실제 Kakao 호출은 2-6 고지와 배포 호스트 `.env.api` 키 주입을 확인한 뒤에만 사용자가 별도 수동 검증한다. 기본 무료 쿼터는 일 100,000건이며 백엔드 timeout 3초와 64KB 응답 제한을 유지한다.
