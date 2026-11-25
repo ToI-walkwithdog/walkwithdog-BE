@@ -303,10 +303,15 @@ def classify(output):
     if status != "ready":
         return {**report, "kind": "fault", "reason": f"deployment state is {status}"}
     if current == "-":
-        if previous != "-" or last_result != "none" or services["api"] is not None:
+        # deploy.sh records ready/-/-/failed when the first deployment stops in its
+        # preflight before touching the API; it accepts a retry from that state.
+        if previous != "-" or last_result not in ("none", "failed") or services["api"] is not None:
             return {**report, "kind": "fault", "reason": "no current digest but deployment traces exist"}
         if services["db"] != healthy:
             return {**report, "kind": "fault", "reason": "DB container is not running and healthy"}
+        if last_result == "failed":
+            return {**report, "kind": "first_retry",
+                    "reason": "first deployment failed in its preflight; a manual retry is allowed"}
         return {**report, "kind": "not_deployed", "reason": "no deployment has run yet"}
     if services["api"] != healthy or services["db"] != healthy:
         return {**report, "kind": "fault", "reason": "API or DB container is not running and healthy"}
@@ -443,7 +448,7 @@ class Runner:
         before = self.read_status("pre-status")
         require(before["kind"] != "busy",
                 "Another deployment operation is running on the host; retry after it finishes")
-        require(before["kind"] in ("not_deployed", "healthy"),
+        require(before["kind"] in ("not_deployed", "first_retry", "healthy"),
                 "Deployment host is not in a deployable state; follow docs/deployment/ROLLBACK.md")
         if operation == "preflight":
             self.note("- preflight passed; ToI-DeployBackend was not called")

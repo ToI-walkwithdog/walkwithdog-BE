@@ -57,6 +57,7 @@ def status_text(state, api=API_OK, db=DB_OK, checksums=True):
 
 
 NOT_DEPLOYED = status_text("status=ready current=- previous=- last_result=none", api="api absent")
+FIRST_RETRY = status_text("status=ready current=- previous=- last_result=failed", api="api absent")
 HEALTHY_OLD = status_text(f"status=ready current={OTHER_DIGEST} previous=- last_result=success")
 HEALTHY_NEW = status_text(f"status=ready current={DIGEST} previous={OTHER_DIGEST} last_result=success")
 
@@ -367,13 +368,42 @@ class ClassifyTests(unittest.TestCase):
                                          api=API_OK.replace("healthy", "unhealthy")),
             "db missing first": status_text("status=ready current=- previous=- last_result=none",
                                             api="api absent", db="db absent"),
-            "trace without current": status_text("status=ready current=- previous=- last_result=failed",
-                                                 api="api absent"),
+            "trace without current": status_text(f"status=ready current=- previous={OTHER_DIGEST} "
+                                                 "last_result=failed", api="api absent"),
             "api without record": status_text("status=ready current=- previous=- last_result=none"),
         }
         for name, text in cases.items():
             with self.subTest(name=name):
                 self.assertIn(bd.classify(text)["kind"], ("busy", "fault"))
+
+    def test_first_retry_requires_every_condition(self):
+        self.assertEqual(bd.classify(FIRST_RETRY)["kind"], "first_retry")
+        unhealthy_db = DB_OK.replace("healthy", "unhealthy")
+        near_misses = {
+            "blocked": status_text("status=blocked current=- previous=- last_result=failed", api="api absent"),
+            "in_progress": status_text("status=in_progress current=- previous=- last_result=failed",
+                                       api="api absent"),
+            "current set": status_text(f"status=ready current={DIGEST} previous=- last_result=failed",
+                                       api="api absent"),
+            "previous set": status_text(f"status=ready current=- previous={OTHER_DIGEST} last_result=failed",
+                                        api="api absent"),
+            "running result": status_text("status=ready current=- previous=- last_result=running",
+                                          api="api absent"),
+            "success result": status_text("status=ready current=- previous=- last_result=success",
+                                          api="api absent"),
+            "api present": status_text("status=ready current=- previous=- last_result=failed"),
+            "api exited": status_text("status=ready current=- previous=- last_result=failed",
+                                      api=API_OK.replace("running healthy", "exited none")),
+            "db absent": status_text("status=ready current=- previous=- last_result=failed",
+                                     api="api absent", db="db absent"),
+            "db unhealthy": status_text("status=ready current=- previous=- last_result=failed",
+                                        api="api absent", db=unhealthy_db),
+            "db starting": status_text("status=ready current=- previous=- last_result=failed",
+                                       api="api absent", db=DB_OK.replace("healthy", "starting")),
+        }
+        for name, text in near_misses.items():
+            with self.subTest(name=name):
+                self.assertEqual(bd.classify(text)["kind"], "fault")
 
     def test_malformed_output_blocks(self):
         reordered = "\n".join([CHECKSUMS[1], CHECKSUMS[0], CHECKSUMS[2]] + NOT_DEPLOYED.splitlines()[3:]) + "\n"
@@ -396,6 +426,24 @@ class ExecuteTests(unittest.TestCase):
         self.assertEqual(fake.count("send-command:ToI-DeployBackend"), 0)
         self.assertIn("not_deployed", summary)
         self.assert_no_leak(stdout, summary)
+
+    def test_first_retry_runs_one_deploy_and_is_verified(self):
+        code, stdout, summary, _ = run_execute(FakeAws(**base_script(pre=FIRST_RETRY)))
+        self.assertEqual(code, 0, stdout)
+        self.assertIn("first_retry", summary)
+        fake = FakeAws(**deploy_script(pre=FIRST_RETRY))
+        code, stdout, summary, _ = run_execute(fake, execute_env(OPERATION="deploy"))
+        self.assertEqual(code, 0, stdout)
+        self.assertEqual(fake.count("send-command:ToI-DeployBackend"), 1)
+        self.assertIn("deployment verified", summary)
+
+    def test_failed_first_retry_is_not_retried_automatically(self):
+        failed_again = invocation("Failed", 7)
+        fake = FakeAws(**deploy_script(pre=FIRST_RETRY, deploy_result=failed_again, post=FIRST_RETRY))
+        code, _, summary, _ = run_execute(fake, execute_env(OPERATION="deploy"))
+        self.assertEqual(code, 1)
+        self.assertEqual(fake.count("send-command:ToI-DeployBackend"), 1)
+        self.assertIn(f"exit_code=7 ({bd.EXIT_MEANINGS[7]})", summary)
 
     def test_preflight_healthy_passes(self):
         code, stdout, _, _ = run_execute(FakeAws(**base_script(pre=HEALTHY_OLD)))
