@@ -165,6 +165,7 @@ def test_kakao_uses_wgs84_and_maps_legal_code_ignoring_administrative_record(
     ]}).encode())
     response = post(client)
     assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
     assert response.json()["data"]["region"]["region_code"] == expected
     assert response.json()["data"]["region"]["sido_code"] == expected[:2]
     request = open_request.call_args.args[0]

@@ -189,26 +189,21 @@
 
 ## 16-8 Kakao 위치 판별 설정 (#117)
 
-- 프로덕션 코드(`app/location_geocoder.py`, `app/routers/regions.py`, `app/region_service.py`)는 변경하지 않고, 결정 사항·설정 절차·16-3 환경변수 목록·테스트 보강을 완료했습니다.
-- **확정 및 보류 결정 사항**:
-  - **시연/개발 환경 호출**: Kakao 실제 API(`coord2regioncode`) 호출 사용 (`LOCATION_GEOCODING_PROVIDER=kakao`, `LOCATION_EXTERNAL_TRANSFER_ENABLED=true`).
-  - **고지 및 동의 범위**: OS 위치 권한 허용 + 서비스 내 위치정보 이용 고지 후 호출하며, 외부 제3자 저장 없이 실시간 좌표 변환만 수행합니다(서버 로그·DB·캐시에 좌표 원문 미저장, `Cache-Control: no-store`).
-  - **키 발급 및 배치 담당**: 미정(운영 전 결정 예정). `KAKAO_REST_API_KEY`는 배포 호스트의 `.env.api`(권한 `0600`)에만 두며, 저장소·Issue·로그에 남기지 않습니다.
-  - **호출 한도 및 수동 검증**: Kakao 무료 일일 쿼터 한도 내 사용. 수동 검증은 배포 호스트 `.env.api` 설정 후 사용자가 직접 수행하며, 이번 작업에서는 실제 키를 호출하지 않았습니다.
-- **16-3 환경변수 전달 목록** (`.env.example`, `deploy/.env.example` 반영 완료):
-  - `LOCATION_GEOCODING_PROVIDER` (**비비밀**): `kakao` (시연/개발·운영) 또는 `mock` (`APP_ENV`가 `local`/`development`/`test`일 때만 허용)
-  - `LOCATION_EXTERNAL_TRANSFER_ENABLED` (**비비밀**): `true` (고지·동의 후 활성화, 미설정/그 외 값은 `transfer_disabled` 503)
-  - `KAKAO_REST_API_KEY` (**비밀**): 배포 호스트 `.env.api`(0600) 전용. 누락 또는 공백이면 `provider_configuration` 503
-- **테스트 보강** ([test_location_resolution.py](file:///d:/workspace/Toi%20Prj/walkwithdog-BE-16-4/tests/test_location_resolution.py)):
-  - `test_oversized_provider_response_is_unavailable`: `MAX_RESPONSE_BYTES`(64KB) 초과 응답 시 503 `GEOCODING_UNAVAILABLE` (`provider_response`) 확인
-  - `test_whitespace_kakao_api_key_is_rejected_without_network_call`: 공백 전용 키 입력 시 외부 호출 없이 503 (`provider_configuration`) 확인
-  - `test_kakao_transport_errors_never_leak_key_or_coordinates`: `HTTPError`/`TimeoutError`/`URLError` 경로에서 응답·로그에 키와 좌표 미노출 확인
-- 테스트 실행 명령 및 결과:
-  - `.venv\Scripts\python.exe -m pytest -q tests/test_location_resolution.py` → `53 passed in 4.61s`
-  - `dev_test_report --collect-only` + `dev_gate inventory` → `1152 tests collected`, `docs/dev-automation/test-baseline.json` 갱신 완료
-- 확인하지 못한 것:
-  - 실제 `KAKAO_REST_API_KEY`를 사용한 Kakao `coord2regioncode` API 수동 연동 검증(배포 호스트 `.env.api` 설정 후 사용자 직접 수행 예정)
-  - `KAKAO_REST_API_KEY` 발급 및 `.env.api` 배치 담당자 확정(운영 전 결정 예정)
+- 프로덕션 코드(`app/location_geocoder.py`, `app/routers/regions.py`, `app/region_service.py`)는 수정하지 않았습니다. `app/location_geocoder.py`의 3초 timeout과 64KB 응답 제한을 유지합니다.
+- **운영 결정 및 활성화 조건**:
+  - 시연 환경은 `LOCATION_GEOCODING_PROVIDER=mock`으로 동작합니다. 배포 호스트 `.env.api`에 키를 주입하고 2-6 화면의 고지를 확인한 뒤에만 `LOCATION_GEOCODING_PROVIDER=kakao`, `LOCATION_EXTERNAL_TRANSFER_ENABLED=true`로 전환합니다.
+  - 외부 전송을 켜기 전 온보딩 위치 조회 화면(2-6)에서 현재 좌표의 Kakao 전송 및 이용 목적을 고지해야 합니다. 확인 전에는 외부 전송을 활성화하지 않습니다.
+  - 16-3 배포 담당자가 Kakao Developers에서 REST API 키를 발급해 배포 호스트 `.env.api`에만 주입합니다. 키는 저장소, Issue, 로그에 남기지 않습니다.
+  - Kakao 로컬 역지오코딩 기본 무료 쿼터(일 100,000건) 내에서 운영합니다. 실제 키 호출은 이번 작업에서 하지 않았습니다.
+- **16-3 담당자 전달 환경변수 목록**:
+  - `LOCATION_GEOCODING_PROVIDER`: 시연 기본 `mock`; 키 주입과 고지 확인 뒤 `kakao`.
+  - `LOCATION_EXTERNAL_TRANSFER_ENABLED`: 선행 조건 완료 전 비활성; 확인 후에만 `true`.
+  - `KAKAO_REST_API_KEY`: 비밀값이며 배포 호스트 `.env.api` 전용.
+- **검증** ([test_location_resolution.py](../../tests/test_location_resolution.py)): Mock HTTP로 정상 활성 지역 변환, 미지원 지역 422 `REGION_NOT_SUPPORTED`, timeout/외부 오류 503 `GEOCODING_UNAVAILABLE`, 키 누락과 `transfer_disabled`, 로그·응답 캐시 제어 및 좌표 비노출을 확인합니다. Kakao 응답의 `Cache-Control: no-store`를 검증합니다.
+- 위치 테스트 명령: `.venv\Scripts\python.exe -m pytest -v tests/test_location_resolution.py` → `53 passed in 3.46s`.
+- 전체 테스트 명령: `$env:DATABASE_URL='sqlite://'; .venv\Scripts\python.exe -m pytest` → `973 passed, 235 skipped, 47 warnings` (1208 collected, 190.70s). 로컬 PostgreSQL URL은 전달하지 않아 PostgreSQL 전용 테스트는 skip됐습니다.
+- 기준 목록: `dev_test_report --collect-only`와 `dev_gate inventory`로 1208개 테스트를 수집해 `docs/dev-automation/test-baseline.json`을 갱신했습니다.
+- 실제 Kakao API 연동, 키 발급/배포 호스트 설정 및 2-6 화면 고지 완료 여부는 확인하지 않았으며, 조건이 완료된 뒤 사용자 수동 검증이 필요합니다.
 
 ## 16-7 공식 데이터 수집과 초기 데이터 구성 (#116)
 
