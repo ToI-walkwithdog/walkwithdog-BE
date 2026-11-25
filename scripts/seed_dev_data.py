@@ -37,7 +37,7 @@ from app.models import (
 from app.policy_documents import active_policy_document
 from app.privacy_policy import CONSENT_ACTION_AGREE
 from app.pledge_service import current_pledge_version
-from app.region_models import Region, SELECTABLE_LEVELS
+from app.region_models import LEVEL_SIDO, SEJONG_ALL_CODE, Region, SELECTABLE_LEVELS
 from app.walk_schemas import WalkSettingsPatch
 
 KST = timezone(timedelta(hours=9))
@@ -303,7 +303,11 @@ def _normalize_province_token(token: str) -> str | None:
 def match_shelter_regions(db) -> dict:
     """Match shelters with missing region_code against active region master rows (read-only report)."""
     active_regions = db.query(Region).filter(Region.is_active.is_(True)).all()
-    provinces = {r.region_code: r.region_name for r in active_regions if r.region_level == 1}
+    provinces = {
+        r.region_code: r.region_name
+        for r in active_regions
+        if r.region_level == LEVEL_SIDO
+    }
     selectable = [
         r for r in active_regions
         if r.region_level in SELECTABLE_LEVELS
@@ -330,7 +334,7 @@ def match_shelter_regions(db) -> dict:
             parent_name = provinces.get(region.parent_region_code or "")
             if province_name and parent_name and parent_name != province_name:
                 continue
-            if region.region_code == "36110":
+            if region.region_code == SEJONG_ALL_CODE:
                 if province_name == "세종특별자치시" or "세종" in addr:
                     candidates.append(region)
                 continue

@@ -26,6 +26,7 @@ from app.public_data import fetch_pages, synchronize
 from app.region_master import read_snapshot, sync_regions
 from app.routers import dogs as dogs_router
 from scripts.seed_dev_data import (
+    KST,
     SEED_ACCOUNTS,
     VIRTUAL_DOGS,
     VIRTUAL_SHELTERS,
@@ -177,15 +178,18 @@ def test_shelter_region_matching_exact_ambiguous_and_unmatched():
         s_exact = Shelter(name="단일일치보호소", address="서울특별시 강남구 역삼로 10")
         s_ambiguous = Shelter(name="모호보호소", address="중구 중앙대로 55")
         s_unmatched = Shelter(name="불일치보호소", address="알수없는시 존재하지않는구 99")
-        db.add_all([s_exact, s_ambiguous, s_unmatched])
+        s_province_filtered = Shelter(name="시도필터보호소", address="부산광역시 중구 중앙대로 55")
+        s_sejong = Shelter(name="세종보호소", address="세종특별자치시 세종로 1")
+        db.add_all([s_exact, s_ambiguous, s_unmatched, s_province_filtered, s_sejong])
 
     with Session() as db:
         report = match_shelter_regions(db)
 
-    assert report["evaluated_count"] == 3
-    assert len(report["matched_candidates"]) == 1
-    assert report["matched_candidates"][0]["shelter_name"] == "단일일치보호소"
-    assert report["matched_candidates"][0]["candidate_region_code"] == "11680"
+    assert report["evaluated_count"] == 5
+    matched = {entry["shelter_name"]: entry for entry in report["matched_candidates"]}
+    assert matched["단일일치보호소"]["candidate_region_code"] == "11680"
+    assert matched["시도필터보호소"]["candidate_region_code"] == "26110"
+    assert matched["세종보호소"]["candidate_region_code"] == "36_SPECIAL_ALL"
     assert len(report["ambiguous"]) == 1
     assert report["ambiguous"][0]["shelter_name"] == "모호보호소"
     assert len(report["ambiguous"][0]["candidates"]) >= 2
@@ -254,7 +258,7 @@ def test_virtual_seed_end_to_end_walk_smoke(monkeypatch):
 
     with Session.begin() as db:
         sync_regions(db, read_snapshot(REGION_ZIP), apply=True)
-        seed_dev_data(db, apply=True, base_date_kst=date(2026, 12, 1))
+        seed_dev_data(db, apply=True, base_date_kst=datetime.now(KST).date())
         volunteer = db.query(User).filter(User.login_id == "test_user_completed").first()
         shelter_staff = db.query(User).filter(User.login_id == "test_shelter_seed").first()
         dog = db.query(Dog).filter(Dog.desertion_no == "TEST-DOG-01").first()
