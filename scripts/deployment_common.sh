@@ -444,8 +444,7 @@ ensure_volume() {
 
 assert_db() {
     [[ $(service_id db) == "$db_container" ]] &&
-        [[ $(docker_run 12 inspect --format '{{.Config.Image}} {{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}} {{len .HostConfig.PortBindings}} {{len .NetworkSettings.Networks}} {{if index .NetworkSettings.Networks "toi-be_default"}}true{{end}}' "$db_container" 2>/dev/null) == 'postgres:16.16 true healthy 0 1 true' ]] &&
-        [[ $(docker_run 12 inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Type}} {{.Name}}{{end}}{{end}}' "$db_container" 2>/dev/null) == "volume $DB_VOLUME" ]]
+        [[ $(docker_run 12 inspect --format '{{.Config.Image}} {{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}} {{len .HostConfig.PortBindings}} {{len .NetworkSettings.Networks}} {{if index .NetworkSettings.Networks "toi-be_default"}}true{{end}} {{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Type}} {{.Name}}{{end}}{{end}}' "$db_container" 2>/dev/null) == "postgres:16.16 true healthy 0 1 true volume $DB_VOLUME" ]]
 }
 
 pull_image() {
@@ -638,11 +637,14 @@ main() {
     fi
     original_failure=$failure_reason
     log "$operation: failed at $original_failure"
-    if [[ $operation == deploy && $current != - ]] && assert_db &&
-        catalog=$(catalog_snapshot 2>/dev/null) && verify_proof "$current" 2>/dev/null &&
-        apply_image "$current" "$expected_current"; then
-        write_state ready "$current" "$previous" deploy "$requested" "$started" failed rolled_back "$original_failure"
-        die 8 'deploy: failed; previous healthy service restored'
+    if [[ $operation == deploy && $current != - ]]; then
+        failure_reason=rollback-db-evidence
+        if assert_db && catalog=$(catalog_snapshot 2>/dev/null) && verify_proof "$current" 2>/dev/null &&
+            apply_image "$current" "$expected_current"; then
+            write_state ready "$current" "$previous" deploy "$requested" "$started" failed rolled_back "$original_failure"
+            die 8 'deploy: failed; previous healthy service restored'
+        fi
+        log "rollback: failed at $failure_reason"
     fi
     local recovery=failed
     if [[ $operation == deploy && $current == - ]]; then recovery=not_available; fi

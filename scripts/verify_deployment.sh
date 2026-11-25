@@ -102,9 +102,12 @@ cat >"$evidence/build/server.py" <<'PY'
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import signal
 import socket
+import sys
 import time
 
+signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 variant = os.environ["FIXTURE_VARIANT"]
 if variant == "slow":
     time.sleep(12)
@@ -215,7 +218,10 @@ expect() {
         cat "$evidence/last.out" >&2
         printf 'Expected exit %s, got %s\n' "$expected" "$status" >&2
         d ps -a --format '{{.Names}} {{.Image}} {{.Status}}' >&2
-        if [[ -n $(api_id) ]]; then d logs --tail 12 "$(api_id)" >&2 || true; fi
+        if [[ -n $(api_id) ]]; then
+            d inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$(api_id)" >&2 || true
+            d logs --tail 12 "$(api_id)" >&2 || true
+        fi
         return 1
     fi
 }
@@ -387,6 +393,7 @@ expect 0 "$rollback"
 assert_state ready "$first" "$second" success none
 preserved
 d image inspect "$registry/toi-be@$first" "$registry/toi-be@$second" >/dev/null
+printf '%s\n' 'PASS normal image switch and explicit rollback'
 expect 8 "$deploy" "$broken"
 assert_state ready "$first" "$second" failed rolled_back
 preserved
@@ -411,6 +418,7 @@ wait "$operation_pid" || result=$?
 [[ $result == 9 ]]
 assert_state blocked "$first" "$second" failed failed
 mv "$evidence/held-proof" "$proof"
+printf '%s\n' 'PASS failed recovery remains blocked'
 expect 5 "$deploy" "$second"
 
 
