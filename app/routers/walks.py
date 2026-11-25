@@ -26,10 +26,12 @@ router = APIRouter(prefix="/walks", tags=["walks"])
 require_volunteer = require_role(UserRole.USER)
 
 
-def persist(db, operation, response_model, actor, *, start_request_id=None):
+def persist(db, operation, response_model, actor, *, start_request_id=None, account_nowait=True):
     try:
         date_start = start_request_id is not None and owns_date_request(db, start_request_id, actor)
-        require_active_writer(db, actor, for_update=date_start, nowait=date_start)
+        # Match the business-row NOWAIT contract at the earlier account lock.
+        # The active-account recheck and transaction-scoped lock remain mandatory.
+        require_active_writer(db, actor, for_update=date_start, nowait=account_nowait)
         result = response_model.model_validate(operation())
         db.commit()
         return result
@@ -138,7 +140,8 @@ def handover(walk_id: int, payload: WalkHandoverCreate, response: Response,
             response.status_code = 200
         return stored
 
-    return persist(db, operation, WalkHandoverReceipt, actor)
+    # Issue #93: wait for the end transaction before evaluating the handover.
+    return persist(db, operation, WalkHandoverReceipt, actor, account_nowait=False)
 
 
 @router.get("/active", response_model=ActiveWalkResponse)
@@ -146,7 +149,8 @@ def active(actor: User = Depends(require_volunteer), db: Session = Depends(get_d
     """현재 로그인한 봉사자의 진행 중인 산책을 복원 조회합니다. 무수신 자동 종료 정산은 먼저 커밋되므로
     404여도 AUTO_TIMEOUT 결과가 남습니다(#89). auto_end_at이 지나면 자동 종료됩니다."""
     settle_expired(db, actor)
-    return persist(db, lambda: get_active_walk(db, actor), ActiveWalkResponse, actor)
+    # Preserve the existing account-lock wait behavior for this read endpoint.
+    return persist(db, lambda: get_active_walk(db, actor), ActiveWalkResponse, actor, account_nowait=False)
 
 
 @router.get("/history", response_model=WalkHistoryResponse)

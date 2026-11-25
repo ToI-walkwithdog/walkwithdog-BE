@@ -139,12 +139,28 @@ class WalkMapPostgresTests(MapIntegrationAssertions, WalkMapFixture, unittest.Te
         self.assertEqual(before, (1, 2, Decimal('100.00'), 720, 1))
 
     def test_two_distinct_walk_ends_for_same_user_are_serialized(self):
-        first = self.seed_walk(day=1, dog=1, status='IN_PROGRESS')
-        second = self.seed_walk(day=2, dog=9, status='IN_PROGRESS')
+        from app.models import Walk
+
+        # Adjacent [start, end) bookings must not overlap for the same user.
+        first = self.seed_walk(day=1 / 24, dog=1, status='IN_PROGRESS')
+        with self.Session.begin() as db:
+            # The first walk started one minute before the second booking.
+            db.get(Walk, first).started_at += timedelta(minutes=59)
+        second = self.seed_walk(day=0, dog=9, status='IN_PROGRESS')
+        self.advance(60)
         winner, loser = self.recording_race(lambda: self.end(first), lambda: self.end(second))
         self.assertEqual((winner.status_code, loser.status_code), (200, 409))
-        self.assertEqual(self.end(second).status_code, 200)
-        self.assertEqual(self.profile_row(1), (1, 2, Decimal('0.00'), 3 * 86400, 2))
+        self.assertEqual(winner.json()['end_reason'], 'USER')
+        self.assertEqual(winner.json()['duration_seconds'], 120)
+        self.assertEqual(self.detail(second).json()['walk']['status'], 'IN_PROGRESS')
+        self.assertEqual(self.profile_row(1), (1, 1, Decimal('0.00'), 120, 1))
+
+        self.advance(180)
+        retried = self.end(second)
+        self.assertEqual(retried.status_code, 200)
+        self.assertEqual(retried.json()['end_reason'], 'USER')
+        self.assertEqual(retried.json()['duration_seconds'], 180)
+        self.assertEqual(self.profile_row(1), (1, 2, Decimal('0.00'), 300, 2))
 
 
 if __name__ == "__main__":

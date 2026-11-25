@@ -42,7 +42,9 @@ class WalkRecordingPostgresTests(MotionRecordingAssertions, WalkFixture, unittes
 
     def test_concurrent_start_creates_exactly_one_walk(self):
         identifier = self.seed_request(status="APPROVED")
-        winner, loser = self.recording_race(lambda: self.start(identifier), lambda: self.start(identifier),
+        # Commit code setup before either HTTP transaction competes for locks.
+        seed_start_code(self.Session, identifier)
+        winner, loser = self.recording_race(lambda: self.start(identifier, code=False), lambda: self.start(identifier, code=False),
                                             hook="app.walk_service.validate_walk_start")
         self.assertEqual((winner.status_code, loser.status_code), (201, 409))
         self.assertEqual(self.start(identifier).status_code, 409)
@@ -101,16 +103,50 @@ class WalkRecordingPostgresTests(MotionRecordingAssertions, WalkFixture, unittes
         self.assertEqual(len(self.rows(WalkMarker)), 1)
 
     def test_end_wins_incident_race_and_freezes_all_events(self):
+        # Keep the existing test ID. Issue #89 permits late safety reports, not
+        # changes to finalized walk metrics or to the outcome of a lock conflict.
+        self.enterContext(patch.dict(os.environ, {"INCIDENT_LATE_REPORT_HOURS": "24"}))
         walk = self.begin()
         self.advance(120)
-        winner, loser = self.recording_race(lambda: self.end(walk["id"]), lambda: self.incident(walk["id"], user=3))
+        report_id = str(uuid4())
+
+        def report():
+            return self.incident(walk["id"], user=3, seconds=60, client_report_id=report_id)
+
+        winner, loser = self.recording_race(lambda: self.end(walk["id"]), report)
         self.assertEqual((winner.status_code, loser.status_code), (200, 409))
-        self.assertEqual(self.incident(walk["id"], user=3).status_code, 409)
         self.assertEqual(self.rows(WalkIncident), [])
+        completed = self.detail(walk["id"]).json()["walk"]
+        self.assertEqual(completed["status"], "COMPLETED")
+
+        # The same report succeeds after the winning transaction commits.
+        self.advance(120 + 3600)
+        retry = report()
+        self.assertEqual(retry.status_code, 201, retry.text)
+        self.assertEqual(len(self.rows(WalkIncident)), 1)
+        replay = report()
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["id"], retry.json()["id"])
+
+        # An occurrence after the walk's end is invalid even within the window.
+        after_end = self.incident(walk["id"], user=3, seconds=121, incident_type="LOST_DOG")
+        self.assertEqual(after_end.status_code, 409, after_end.text)
+
+        # A new report after the 24-hour limit is refused, but replay remains valid.
+        self.advance(120 + 25 * 3600)
+        too_late = self.incident(walk["id"], user=3, seconds=60, incident_type="LOST_DOG")
+        self.assertEqual(too_late.status_code, 409, too_late.text)
+        self.assertEqual(too_late.json()["detail"], "종료된 산책의 신고 가능 시간이 초과되었습니다.")
+        replay = report()
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["id"], retry.json()["id"])
+        self.assertEqual(len(self.rows(WalkIncident)), 1)
+        self.assertEqual(self.detail(walk["id"]).json()["walk"], completed)
 
     def test_start_wins_cancellation_race_request_never_becomes_cancelled(self):
         identifier = self.seed_request(status="APPROVED")
-        winner, loser = self.recording_race(lambda: self.start(identifier), lambda: self.act(identifier, "CANCEL", user=1),
+        seed_start_code(self.Session, identifier)
+        winner, loser = self.recording_race(lambda: self.start(identifier, code=False), lambda: self.act(identifier, "CANCEL", user=1),
                                             hook="app.walk_service.validate_walk_start")
         self.assertEqual((winner.status_code, loser.status_code), (201, 409))
         self.assertEqual(self.act(identifier, "CANCEL", user=1).status_code, 409)
@@ -123,7 +159,7 @@ class WalkRecordingPostgresTests(MotionRecordingAssertions, WalkFixture, unittes
         # Cancellation is checked just before the boundary; start arrives at it.
         from datetime import timedelta
         self.request_clock.return_value = START - timedelta(seconds=1)
-        winner, loser = self.recording_race(lambda: self.act(identifier, "CANCEL", user=1), lambda: self.start(identifier),
+        winner, loser = self.recording_race(lambda: self.act(identifier, "CANCEL", user=1), lambda: self.start(identifier, code=False),
                                             hook="app.routers.walk_requests.transition_request")
         self.assertEqual((winner.status_code, loser.status_code), (200, 409))
         self.assertEqual(self.start(identifier).status_code, 409)
@@ -131,16 +167,18 @@ class WalkRecordingPostgresTests(MotionRecordingAssertions, WalkFixture, unittes
 
     def test_settings_off_wins_start_race_and_prevents_start_after_retry(self):
         identifier = self.seed_request(status="APPROVED")
+        seed_start_code(self.Session, identifier)
         off = lambda: self.client.patch("/dogs/1/walk-settings", headers=self.auth(3), json={"walkable": False})
-        winner, loser = self.recording_race(off, lambda: self.start(identifier), hook="app.routers.dogs.apply_walk_settings")
+        winner, loser = self.recording_race(off, lambda: self.start(identifier, code=False), hook="app.routers.dogs.apply_walk_settings")
         self.assertEqual((winner.status_code, loser.status_code), (200, 409))
         self.assertEqual(self.start(identifier).status_code, 409)
         self.assertEqual(self.rows(Walk), [])
 
     def test_start_wins_settings_race_later_setting_change_does_not_lose_recording(self):
         identifier = self.seed_request(status="APPROVED")
+        seed_start_code(self.Session, identifier)
         off = lambda: self.client.patch("/dogs/1/walk-settings", headers=self.auth(3), json={"walkable": False})
-        winner, loser = self.recording_race(lambda: self.start(identifier), off, hook="app.walk_service.validate_walk_start")
+        winner, loser = self.recording_race(lambda: self.start(identifier, code=False), off, hook="app.walk_service.validate_walk_start")
         self.assertEqual((winner.status_code, loser.status_code), (201, 409))
         self.assertEqual(off().status_code, 200)
         self.advance(120)
