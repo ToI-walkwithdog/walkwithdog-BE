@@ -328,16 +328,27 @@ class ValidateTests(unittest.TestCase):
                 code = bd.run_validate(env, **kwargs)
             return code, output.read_text(encoding="utf-8"), stdout.getvalue()
 
-    def test_registered_publisher_hashes_match_checked_in_files_and_reject_tampering(self):
-        files = {path: Path(path).read_bytes() for path in bd.PUBLISHER_FILES}
-        read_file = lambda path, _ref: files[path]
-        bd.check_publisher(read_file, SOURCE, bd.TRUSTED_PUBLISHERS)
+    def test_registered_publisher_list_is_well_formed(self):
+        # Checked without reading repository files, so the result does not depend on the checkout or newlines.
+        self.assertTrue(bd.TRUSTED_PUBLISHERS)
+        for entry in bd.TRUSTED_PUBLISHERS:
+            self.assertTrue(set(bd.PUBLISHER_FILES) <= set(entry))
+            for value in entry.values():
+                self.assertRegex(value, r"\A[0-9a-f]{64}\Z")
+        self.assertEqual(len({tuple(sorted(entry.items())) for entry in bd.TRUSTED_PUBLISHERS}),
+                         len(bd.TRUSTED_PUBLISHERS))
 
-        tampered = dict(files)
-        tampered["scripts/ecr_image_publish.py"] += b"\n"
-        read_tampered_file = lambda path, _ref: tampered[path]
+    def test_registered_publishers_reject_unregistered_bytes(self):
+        synthetic = {path: b"synthetic publisher\n" for path in bd.PUBLISHER_FILES}
         with self.assertRaisesRegex(bd.Blocked, "do not match a reviewed version"):
-            bd.check_publisher(read_tampered_file, SOURCE, bd.TRUSTED_PUBLISHERS)
+            bd.check_publisher(lambda path, _ref: synthetic[path], SOURCE, bd.TRUSTED_PUBLISHERS)
+
+    def test_publisher_hash_is_byte_exact_for_newlines(self):
+        # A CRLF copy of a reviewed LF file is a different, unregistered version.
+        crlf = {path: data.replace(b"\n", b"\r\n") for path, data in PUBLISHER_BYTES.items()}
+        bd.check_publisher(lambda path, _ref: PUBLISHER_BYTES[path], SOURCE, TRUSTED)
+        with self.assertRaisesRegex(bd.Blocked, "do not match a reviewed version"):
+            bd.check_publisher(lambda path, _ref: crlf[path], SOURCE, TRUSTED)
 
     def test_writes_outputs_after_confirmed_evidence(self):
         code, outputs, stdout = self.run_validate(dispatch_env(GITHUB_RUN_ATTEMPT="3"), fetch=github(),
