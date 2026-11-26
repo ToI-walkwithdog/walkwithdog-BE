@@ -21,6 +21,13 @@ from app.walk_request_schemas import ManagedWalkRequestResponse
 
 SEOUL = ZoneInfo("Asia/Seoul")
 
+WALK_FREQUENCY_LABELS = {
+    "DAILY": "거의 매일",
+    "WEEKLY_3_4": "주 3~4회",
+    "WEEKLY_1_2": "주 1~2회",
+    "RARELY": "거의 없음",
+}
+
 
 def utc_now():
     return datetime.now(timezone.utc)
@@ -330,10 +337,10 @@ def get_request_detail(db, request_id, actor):
             "nickname": applicant_user.nickname if applicant_user else "",
             "name": None,
             "age": None,
-            "dog_experience": None,
+            "dog_experience": has_experience,
             "has_experience": has_experience,
             "experienced_breed": experience.experienced_breeds_text if has_experience else None,
-            "walk_frequency": experience.walking_frequency if has_experience else None,
+            "walk_frequency": WALK_FREQUENCY_LABELS.get(experience.walking_frequency) if has_experience else None,
         },
         "dog_difficulty": dog_difficulty,
     }
