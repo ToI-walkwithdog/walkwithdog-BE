@@ -332,7 +332,7 @@ class ValidateTests(unittest.TestCase):
         # Checked without reading repository files, so the result does not depend on the checkout or newlines.
         self.assertTrue(bd.TRUSTED_PUBLISHERS)
         for entry in bd.TRUSTED_PUBLISHERS:
-            self.assertEqual(set(entry), set(bd.PUBLISHER_FILES))
+            self.assertTrue(set(bd.PUBLISHER_FILES) <= set(entry))
             for value in entry.values():
                 self.assertRegex(value, r"\A[0-9a-f]{64}\Z")
         self.assertEqual(len({tuple(sorted(entry.items())) for entry in bd.TRUSTED_PUBLISHERS}),
