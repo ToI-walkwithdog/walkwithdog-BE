@@ -5,7 +5,10 @@ import unittest
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
-from app.models import DogWalkSetting, Shelter, Walk, WalkRequest
+from app.models import (
+    DogWalkSetting, Shelter, Survey, VolunteerExperienceChallenge, VolunteerOnboardingBasic,
+    VolunteerOnboardingExperience, Walk, WalkRequest,
+)
 from walk_record_test_support import WalkFixture
 from walk_request_test_support import END, NOW, START
 
@@ -60,28 +63,53 @@ class ReservationManagementTests(WalkFixture, unittest.TestCase):
 
     def test_common_detail_applies_visit_privacy_and_preserves_rejection(self):
         approved = self.seed_request(status="APPROVED", dog=1)
-        pending = self.seed_request(dog=2)
+        pending = self.seed_request(user=2, dog=2)
         rejected = self.seed_request(dog=8)
         self.assertEqual(self.act(rejected, "REJECT", rejection_reason_code="SCHEDULE_CONFLICT").status_code, 200)
         with self.Session.begin() as db:
             shelter = db.get(Shelter, 1)
             shelter.address, shelter.phone = "Synthetic address", "010-0000-0000"
             db.query(DogWalkSetting).filter_by(dog_id=1).one().max_walk_minutes = 40
+            db.delete(db.get(VolunteerOnboardingExperience, 2))
+            db.add(Survey(user_id=2, dog_experience="current_owner", walk_frequency="daily"))
+        before = {
+            model: self.rows(model)
+            for model in (VolunteerOnboardingBasic, VolunteerOnboardingExperience,
+                          VolunteerExperienceChallenge, Survey, WalkRequest)
+        }
+        expected_applicant = {
+            "id": 1,
+            "nickname": "사용자1",
+            "name": None,
+            "age": None,
+            "dog_experience": None,
+            "has_experience": False,
+            "experienced_breed": None,
+            "walk_frequency": None,
+        }
+
         owner = self.booking(approved).json()
+        self.assertEqual(owner["applicant"], expected_applicant)
         self.assertEqual(owner["shelter"], {"id": 1, "name": owner["shelter_name"]})
         self.assertEqual(owner["confirmed_visit"], {"address": "Synthetic address", "phone": "010-0000-0000"})
         self.assertEqual(owner["max_walk_minutes"], 40)
         self.assertEqual(owner["actions"], {"can_cancel": True, "can_enter_shelter_code": True})
         for staff in (3, 5):
             review = self.booking(approved, user=staff).json()
+            self.assertEqual(review["applicant"], expected_applicant)
             self.assertIsNone(review["confirmed_visit"])
             self.assertTrue(review["can_cancel"])
             self.assertEqual(review["actions"], {"can_cancel": False, "can_enter_shelter_code": False})
         for other in (2, 4):
             self.assertEqual(self.booking(approved, user=other).status_code, 403)
         self.assertEqual(self.booking(999999).status_code, 404)
-        self.assertNotIn("confirmed_visit", self.reservations().json()[0])
-        waiting = self.booking(pending).json()
+        listed = self.reservations().json()[0]
+        self.assertNotIn("confirmed_visit", listed)
+        self.assertNotIn("applicant", listed)
+        waiting = self.booking(pending, user=2).json()
+        self.assertEqual(waiting["applicant"], {
+            **expected_applicant, "id": 2, "nickname": "사용자2", "has_experience": None,
+        })
         self.assertIsNone(waiting["confirmed_visit"])
         self.assertIsNone(waiting["max_walk_minutes"])
         self.assertEqual(waiting["actions"], {"can_cancel": True, "can_enter_shelter_code": False})
@@ -95,6 +123,7 @@ class ReservationManagementTests(WalkFixture, unittest.TestCase):
         expired = self.booking(approved).json()
         self.assertIsNone(expired["confirmed_visit"])
         self.assertEqual(expired["actions"], {"can_cancel": False, "can_enter_shelter_code": False})
+        self.assertEqual({model: self.rows(model) for model in before}, before)
 
     def test_cancel_saves_role_reason_and_time_without_rewriting_review(self):
         for actor, role, extra in (

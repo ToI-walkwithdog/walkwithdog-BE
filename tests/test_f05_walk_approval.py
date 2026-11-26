@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.pool import StaticPool
 
 from walk_request_test_support import END, NOW, RequestFixture, START
-from app.models import DogWalkSetting, Survey, User, UserRole
+from app.models import DogWalkSetting, Survey, User, UserRole, VolunteerOnboardingExperience
 
 
 class WalkApprovalF05Tests(RequestFixture, unittest.TestCase):
@@ -18,7 +18,7 @@ class WalkApprovalF05Tests(RequestFixture, unittest.TestCase):
         event.listen(engine, "connect", lambda conn, _: conn.execute("PRAGMA foreign_keys=ON"))
         self.setup_api(engine)
 
-        # Seed survey data for user 1 and user 2
+        # Keep a legacy survey for the same applicant to verify it is ignored.
         with self.Session.begin() as db:
             db.add(
                 Survey(
@@ -54,25 +54,33 @@ class WalkApprovalF05Tests(RequestFixture, unittest.TestCase):
     def test_walk_request_detail_with_applicant_and_dog_difficulty(self):
         created = self.create(user=1, dog=1)
 
-        # Shelter staff viewing request detail
-        resp = self.client.get(f"/walk-requests/{created['id']}", headers=self.auth(3))
-        self.assertEqual(resp.status_code, 200)
-        detail = resp.json()
+        for frequency in ("DAILY", "WEEKLY_3_4", "WEEKLY_1_2", "RARELY"):
+            with self.subTest(frequency=frequency):
+                with self.Session.begin() as db:
+                    experience = db.get(VolunteerOnboardingExperience, 1)
+                    experience.has_experience = True
+                    experience.experienced_breeds_text = "말티즈, 푸들"
+                    experience.dog_size_code = "SMALL"
+                    experience.walking_frequency = frequency
+                    experience.perceived_difficulty = "NORMAL"
 
-        self.assertEqual(detail["id"], created["id"])
-        self.assertEqual(detail["status"], "PENDING")
-        self.assertEqual(detail["dog_difficulty"], "BEGINNER")
-        self.assertFalse(detail["cancelled_after_approval"])
-
-        # Applicant details check
-        applicant = detail["applicant"]
-        self.assertEqual(applicant["id"], 1)
-        self.assertEqual(applicant["nickname"], "사용자1")
-        self.assertEqual(applicant["dog_experience"], "previous_owner")
-        self.assertEqual(applicant["walk_frequency"], "3_to_4_per_week")
-        self.assertIsNone(applicant["name"])
-        self.assertIsNone(applicant["age"])
-        self.assertIsNone(applicant["experienced_breed"])
+                resp = self.client.get(f"/walk-requests/{created['id']}", headers=self.auth(3))
+                self.assertEqual(resp.status_code, 200)
+                detail = resp.json()
+                self.assertEqual(detail["id"], created["id"])
+                self.assertEqual(detail["status"], "PENDING")
+                self.assertEqual(detail["dog_difficulty"], "BEGINNER")
+                self.assertFalse(detail["cancelled_after_approval"])
+                self.assertEqual(detail["applicant"], {
+                    "id": 1,
+                    "nickname": "사용자1",
+                    "name": None,
+                    "age": None,
+                    "dog_experience": None,
+                    "has_experience": True,
+                    "experienced_breed": "말티즈, 푸들",
+                    "walk_frequency": frequency,
+                })
 
         # Applicant本人 조회 가능
         resp_self = self.client.get(f"/walk-requests/{created['id']}", headers=self.auth(1))
