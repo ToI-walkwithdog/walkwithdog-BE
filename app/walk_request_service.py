@@ -14,7 +14,7 @@ from sqlalchemy.orm import joinedload
 
 from app.api_contract import ContractError
 from app.dependencies import require_shelter_access
-from app.models import Dog, DogWalkSetting, Survey, User, UserRole, VolunteerProfile, Walk, WalkRequest
+from app.models import Dog, DogWalkSetting, User, UserRole, VolunteerOnboardingExperience, VolunteerProfile, Walk, WalkRequest
 from app.onboarding_common import require_walk_onboarding
 from app.walk_date_slots import (ACTIVE, check_booking_slot, dog_not_available, occupied, utc_string)
 from app.walk_request_schemas import ManagedWalkRequestResponse
@@ -307,12 +307,8 @@ def get_request_detail(db, request_id, actor):
         require_shelter_access(actor, request.shelter_id)
 
     applicant_user = db.get(User, request.user_id)
-    latest_survey = (
-        db.query(Survey)
-        .filter_by(user_id=request.user_id)
-        .order_by(Survey.created_at.desc(), Survey.id.desc())
-        .first()
-    )
+    experience = db.get(VolunteerOnboardingExperience, request.user_id)
+    has_experience = experience.has_experience if experience is not None else None
     setting = db.query(DogWalkSetting).filter_by(dog_id=request.dog_id).first()
     dog_difficulty = setting.difficulty if setting and setting.difficulty else "BEGINNER"
     now = utc_now()
@@ -334,9 +330,10 @@ def get_request_detail(db, request_id, actor):
             "nickname": applicant_user.nickname if applicant_user else "",
             "name": None,
             "age": None,
-            "dog_experience": latest_survey.dog_experience if latest_survey else None,
-            "experienced_breed": None,
-            "walk_frequency": latest_survey.walk_frequency if latest_survey else None,
+            "dog_experience": None,
+            "has_experience": has_experience,
+            "experienced_breed": experience.experienced_breeds_text if has_experience else None,
+            "walk_frequency": experience.walking_frequency if has_experience else None,
         },
         "dog_difficulty": dog_difficulty,
     }

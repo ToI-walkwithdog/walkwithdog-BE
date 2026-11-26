@@ -205,6 +205,7 @@ class ApplicantDetailResponse(BaseModel):
     name: str | None = None
     age: int | None = None
     dog_experience: str | None = None
+    has_experience: bool | None = None
     experienced_breed: str | None = None
     walk_frequency: str | None = None
 
