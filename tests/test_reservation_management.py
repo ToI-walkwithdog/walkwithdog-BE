@@ -82,13 +82,15 @@ class ReservationManagementTests(WalkFixture, unittest.TestCase):
             "nickname": "사용자1",
             "name": None,
             "age": None,
-            "dog_experience": None,
+            "dog_experience": False,
             "has_experience": False,
             "experienced_breed": None,
             "walk_frequency": None,
         }
 
         owner = self.booking(approved).json()
+        self.assertIs(owner["applicant"]["dog_experience"], False)
+        self.assertIs(owner["applicant"]["has_experience"], False)
         self.assertEqual(owner["applicant"], expected_applicant)
         self.assertEqual(owner["shelter"], {"id": 1, "name": owner["shelter_name"]})
         self.assertEqual(owner["confirmed_visit"], {"address": "Synthetic address", "phone": "010-0000-0000"})
@@ -108,7 +110,8 @@ class ReservationManagementTests(WalkFixture, unittest.TestCase):
         self.assertNotIn("applicant", listed)
         waiting = self.booking(pending, user=2).json()
         self.assertEqual(waiting["applicant"], {
-            **expected_applicant, "id": 2, "nickname": "사용자2", "has_experience": None,
+            **expected_applicant, "id": 2, "nickname": "사용자2",
+            "dog_experience": None, "has_experience": None,
         })
         self.assertIsNone(waiting["confirmed_visit"])
         self.assertIsNone(waiting["max_walk_minutes"])

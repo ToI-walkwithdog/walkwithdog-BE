@@ -54,7 +54,12 @@ class WalkApprovalF05Tests(RequestFixture, unittest.TestCase):
     def test_walk_request_detail_with_applicant_and_dog_difficulty(self):
         created = self.create(user=1, dog=1)
 
-        for frequency in ("DAILY", "WEEKLY_3_4", "WEEKLY_1_2", "RARELY"):
+        for frequency, label in (
+            ("DAILY", "거의 매일"),
+            ("WEEKLY_3_4", "주 3~4회"),
+            ("WEEKLY_1_2", "주 1~2회"),
+            ("RARELY", "거의 없음"),
+        ):
             with self.subTest(frequency=frequency):
                 with self.Session.begin() as db:
                     experience = db.get(VolunteerOnboardingExperience, 1)
@@ -71,15 +76,18 @@ class WalkApprovalF05Tests(RequestFixture, unittest.TestCase):
                 self.assertEqual(detail["status"], "PENDING")
                 self.assertEqual(detail["dog_difficulty"], "BEGINNER")
                 self.assertFalse(detail["cancelled_after_approval"])
-                self.assertEqual(detail["applicant"], {
+                applicant = detail["applicant"]
+                self.assertIs(applicant["dog_experience"], True)
+                self.assertIs(applicant["has_experience"], True)
+                self.assertEqual(applicant, {
                     "id": 1,
                     "nickname": "사용자1",
                     "name": None,
                     "age": None,
-                    "dog_experience": None,
+                    "dog_experience": True,
                     "has_experience": True,
                     "experienced_breed": "말티즈, 푸들",
-                    "walk_frequency": frequency,
+                    "walk_frequency": label,
                 })
 
         # Applicant本人 조회 가능
