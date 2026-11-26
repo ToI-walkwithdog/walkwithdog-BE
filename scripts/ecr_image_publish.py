@@ -39,6 +39,16 @@ RELEASE_VERIFIER_FILES = (
     "scripts/release_ci.py",
     ".github/tests/test_release_ci.py",
 )
+# Reviewed Release CI verifier versions: {path: SHA-256 of the Git blob bytes}.
+# Hash `git cat-file blob <commit>:<path>` output, never a checked-out file, so line
+# ending conversion cannot change the value. Every entry must cover RELEASE_VERIFIER_FILES.
+# The entry below is the #141 verifier confirmed by official Release CI run 45674035403.
+TRUSTED_VERIFIER_FILES = ({
+    ".github/workflows/release-ci.yml": "03c6b23149803c88031f8db2dbd69200175457a1f92a1e92fa1c5585105faf5e",
+    ".github/release-ci-trust.json": "6eaf0f96f94fe362e2bfc8c12453276fac82bb82b2eb7f8e8de17d3ca53f9293",
+    "scripts/release_ci.py": "fc6e455742195818643c6f067f5eb97c20cb2ca95fca5efcd81ff9c1dbb69d38",
+    ".github/tests/test_release_ci.py": "72b452ad4045476607be61be94c1dcba24150c3be2e60068018f17e89ef5e5f6",
+},)
 APPROVAL_FIELDS = {"pr", "base", "head", "merge_tree", "changes", "review"}
 APPROVAL_BLOCK = re.compile(r"^```toi-release-approval[ \t]*\n(.*?)\n```[ \t]*$", re.M | re.S)
 LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
@@ -274,19 +284,17 @@ def same_repo(data):
             and data.get("full_name") == REPOSITORY)
 
 
-def verify_github_metadata(evidence, *, run, artifacts, pr, commit, source_sha,
-                           trusted_workflow_shas, now=None):
+def verify_github_metadata(evidence, *, run, artifacts, pr, commit, source_sha, now=None):
     """Compare API-shaped records; never accept them as authorization by themselves.
 
     Caller must obtain these from authenticated GitHub endpoints, not from an
-    artifact. The reviewed workflow SHA list must come from outside the candidate.
-    Only ordinary two-parent merge commits are supported by this initial contract.
-    No network calls or AWS credentials are used here.
+    artifact. The caller separately checks the verifier files of the run commit
+    against TRUSTED_VERIFIER_FILES. Only ordinary two-parent merge commits are
+    supported by this initial contract. No network calls or AWS credentials are used here.
     """
     validate_evidence(evidence)
     release, workflow = evidence["release"], evidence["workflow"]
     require(isinstance(source_sha, str) and SHA.fullmatch(source_sha), "Invalid source SHA")
-    require(workflow["workflow_sha"] in trusted_workflow_shas, "Untrusted release workflow SHA")
     require(run.get("id") == workflow["run_id"] and
             run.get("run_attempt") == workflow["run_attempt"], "Run or attempt mismatch")
     require(run.get("event") == "workflow_dispatch" and run.get("head_branch") == "main" and
@@ -484,17 +492,38 @@ def release_change_digest(base_sha, tree_sha):
     return hashlib.sha256(payload).hexdigest()
 
 
-def verifier_file_hashes(source_sha):
-    require(SHA.fullmatch(source_sha), "Invalid Release verifier source SHA")
-    hashes = {}
-    for path in RELEASE_VERIFIER_FILES:
-        try:
-            content = subprocess.check_output(
-                ["git", "show", f"{source_sha}:{path}"], stderr=subprocess.PIPE)
-        except (OSError, subprocess.CalledProcessError):
-            raise Blocked(f"Missing Release verifier file: {path}") from None
-        hashes[path] = hashlib.sha256(content).hexdigest()
-    return hashes
+def git_blob(commit, path, repository=None):
+    """Return the raw Git blob bytes; plumbing output is not changed by checkout filters."""
+    command = ["git"] + (["-C", str(repository)] if repository is not None else [])
+    try:
+        return subprocess.check_output(
+            command + ["-c", "core.autocrlf=false", "cat-file", "blob", f"{commit}:{path}"],
+            stderr=subprocess.PIPE)
+    except (OSError, subprocess.CalledProcessError):
+        raise Blocked(f"Missing Release verifier file: {path}") from None
+
+
+def verifier_file_hashes(commit, read_blob=git_blob):
+    require(isinstance(commit, str) and SHA.fullmatch(commit), "Invalid Release verifier commit SHA")
+    return {path: hashlib.sha256(read_blob(commit, path)).hexdigest() for path in RELEASE_VERIFIER_FILES}
+
+
+def check_trusted_verifier(files, trusted=None):
+    """Accept only verifier hashes that equal one reviewed version as a whole."""
+    trusted = TRUSTED_VERIFIER_FILES if trusted is None else trusted
+    require(trusted, "No reviewed Release CI verifier hashes are registered; publication stays blocked")
+    for entry in trusted:
+        require(isinstance(entry, dict) and set(entry) == set(RELEASE_VERIFIER_FILES)
+                and all(isinstance(value, str) and HEX.fullmatch(value) for value in entry.values()),
+                "Invalid reviewed Release CI verifier entry")
+    require(isinstance(files, dict) and any(files == entry for entry in trusted),
+            "Release CI verifier files at the run commit do not match a reviewed version")
+    return dict(files)
+
+
+def trusted_verifier_files(commit, trusted=None, read_blob=git_blob):
+    """Hash the verifier files of the commit the Release CI run executed and require a reviewed match."""
+    return check_trusted_verifier(verifier_file_hashes(commit, read_blob), trusted)
 
 
 def official_release_job_id(jobs):
@@ -588,40 +617,9 @@ def collect_github_records(api, run_id, attempt, pr_number, source_sha):
     commit = api_object(api, f"/commits/{source_sha}")
     jobs = api_pages(api, f"/actions/runs/{run_id}/attempts/{attempt}/jobs", key="jobs")
     verify_current_main(api, source_sha)
-    reviews = api_pages(api, f"/pulls/{pr_number}/reviews")
     # Recheck latest attempt after pagination, before accepting the inventory.
     verify_current_run(api, run)
-    return run, artifacts, pr, commit, reviews, jobs
-
-
-def observe_independent_reviews(pr, reviews, head_sha, run):
-    """Provisional observation only; current API reviews cannot prove the full #125 approval contract."""
-    author = positive_int(object_field(pr, "user"), "id")
-    finish = timestamp(pr, "merged_at")
-    run_start = timestamp(run, "run_started_at")
-    decisive = {}
-    for review in reviews:
-        user = object_field(review, "user")
-        identifier = positive_int(user, "id")
-        state = review.get("state")
-        if state not in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
-            continue
-        when = timestamp(review, "submitted_at")
-        # Later reviews (including dismissals) supersede earlier decisive records.
-        rank = (when, positive_int(review, "id"))
-        if identifier not in decisive or rank > decisive[identifier][0]:
-            decisive[identifier] = (rank, review)
-    approved_reviews = [(review["id"], review) for identifier, (rank, review) in decisive.items()
-                        if identifier != author and review.get("state") == "APPROVED"
-                        and review.get("commit_id") == head_sha and rank[0] <= min(finish, run_start)
-                        and review.get("author_association") in {"OWNER", "MEMBER", "COLLABORATOR"}]
-    approved = sorted(identifier for identifier, _ in approved_reviews)
-    require(approved, "No independent exact-head approval observed before release run")
-    return {"independent_review_ids_observed": approved,
-            "independent_review_records": [review.get("html_url") for _, review in approved_reviews],
-            "approval_contract_verified": False}
-
-
+    return run, artifacts, pr, commit, jobs
 
 
 def persist_verified_bundle(output_directory, archive, evidence_raw, context):
@@ -645,13 +643,15 @@ def persist_verified_bundle(output_directory, archive, evidence_raw, context):
 
 
 def verify_github_zip(api, zip_path, *, run_id, attempt, pr_number, source_sha,
-                      trusted_workflow_shas, now=None, output_directory=None):
+                      now=None, output_directory=None, trusted_verifiers=None):
     """Bind the official Release CI run, approval, artifact and image bytes to main."""
     if output_directory is not None:
         output = Path(output_directory)
         require(not output.exists() and not output.is_symlink(), "Verified artifact output already exists")
-    run, artifacts, pr, commit, reviews, jobs = collect_github_records(
+    run, artifacts, pr, commit, jobs = collect_github_records(
         api, run_id, attempt, pr_number, source_sha)
+    # Trust comes from the reviewed verifier bytes at the commit the run executed.
+    verifier_files = trusted_verifier_files(run.get("head_sha"), trusted_verifiers)
     matches = [a for a in artifacts if a.get("name") == artifact_name(run_id, attempt)]
     require(len(matches) == 1, "Expected exactly one attempt-specific artifact")
     artifact = matches[0]
@@ -684,8 +684,7 @@ def verify_github_zip(api, zip_path, *, run_id, attempt, pr_number, source_sha,
                 require(evidence["workflow"]["run_id"] == run_id and evidence["workflow"]["run_attempt"] == attempt
                         and evidence["release"]["pr_number"] == pr_number, "Requested release identifiers mismatch")
                 result = verify_github_metadata(evidence, run=run, artifacts=artifacts, pr=pr, commit=commit,
-                                                source_sha=source_sha, trusted_workflow_shas=trusted_workflow_shas, now=now)
-                result.update(observe_independent_reviews(pr, reviews, evidence["release"]["head_sha"], run))
+                                                source_sha=source_sha, now=now)
                 release = evidence["release"]
                 changes = release_change_digest(release["base_sha"], release["merge_tree_sha"])
                 run_approval = release_job_approval(api, jobs, run)
@@ -697,8 +696,6 @@ def verify_github_zip(api, zip_path, *, run_id, attempt, pr_number, source_sha,
                 require(approval["comment_id"] == run_approval["comment_id"]
                         and approval["approver"] == run_approval["approver"],
                         "Approval comment or author differs from the successful Release CI run")
-                require(approval["review"]["record"] in result["independent_review_records"],
-                        "Approval record does not cite the observed independent PR review")
                 actor = object_field(run, "actor")
                 dispatcher = actor.get("login", "")
                 require(isinstance(dispatcher, str) and LOGIN.fullmatch(dispatcher),
@@ -720,7 +717,7 @@ def verify_github_zip(api, zip_path, *, run_id, attempt, pr_number, source_sha,
                         "dispatcher": dispatcher, "official_job_id": run_approval["official_job_id"],
                     },
                     "approval": approval,
-                    "verifier": {"files": verifier_file_hashes(source_sha)},
+                    "verifier": {"files": verifier_files},
                     "release_artifact": {
                         "id": result["artifact_id"], "digest": result["artifact_digest"],
                         "name": artifact_name(run_id, attempt),
@@ -1131,11 +1128,19 @@ def verify_context_current(api, context):
     verify_current_run(api, run)
 
 
-def validate_verified_bundle(bundle_directory, api=None):
+def verify_context_verifier(context, trusted=None):
+    """Recompute the verifier blob hashes at the Release CI run commit before AWS use or publication."""
+    files = trusted_verifier_files(context["release_workflow"]["workflow_sha"], trusted)
+    require(check_trusted_verifier(context["verifier"]["files"], trusted) == files,
+            "Verified bundle verifier hashes differ from the Release CI run commit")
+
+
+def validate_verified_bundle(bundle_directory, api=None, trusted_verifiers=None):
     bundle = Path(bundle_directory)
     evidence = load_evidence(bundle / "release-evidence.json")
     context = load_evidence(bundle / VERIFIED_CONTEXT_FILE)
     validate_publish_context(context, evidence)
+    verify_context_verifier(context, trusted_verifiers)
     if api is not None:
         verify_context_current(api, context)
     result = verify_archive(bundle / "image.oci.tar", evidence)
@@ -1146,11 +1151,12 @@ def validate_verified_bundle(bundle_directory, api=None):
 
 def publish_with_evidence(bundle_directory, output_directory, *, runner, publish_run_id,
                           publish_run_attempt, publish_workflow_sha, dispatcher,
-                          api=None, clock=lambda: datetime.now(timezone.utc), pause=lambda _: None):
+                          api=None, clock=lambda: datetime.now(timezone.utc), pause=lambda _: None,
+                          trusted_verifiers=None):
     """Publish the transferred verified image and persist its production evidence once."""
     bundle = Path(bundle_directory)
     output = Path(output_directory)
-    evidence, context = validate_verified_bundle(bundle, api=api)
+    evidence, context = validate_verified_bundle(bundle, api=api, trusted_verifiers=trusted_verifiers)
     publish = {"run_id": publish_run_id, "run_attempt": publish_run_attempt,
                "workflow_sha": publish_workflow_sha}
     positive_int(publish, "run_id")
@@ -1187,8 +1193,8 @@ def publish_with_evidence(bundle_directory, output_directory, *, runner, publish
     return record
 
 
-def download_release_zip(api, path, *, token, run_id, attempt, trusted_workflow_shas,
-                         runner=subprocess.run, now=None):
+def download_release_zip(api, path, *, token, run_id, attempt, runner=subprocess.run, now=None,
+                         trusted_verifiers=None):
     """Download the exact attempt-specific ZIP before the full read-only validation.
 
     curl follows GitHub's signed HTTPS redirect without forwarding Authorization
@@ -1203,8 +1209,9 @@ def download_release_zip(api, path, *, token, run_id, attempt, trusted_workflow_
             run.get("event") == "workflow_dispatch" and run.get("head_branch") == "main" and
             run.get("path") == RELEASE_WORKFLOW and run.get("status") == "completed" and
             run.get("conclusion") == "success" and same_repo(run.get("repository")) and
-            same_repo(run.get("head_repository")) and run.get("head_sha") in trusted_workflow_shas,
+            same_repo(run.get("head_repository")),
             "Requested run is not a trusted successful release attempt")
+    trusted_verifier_files(run.get("head_sha"), trusted_verifiers)
     rows = api_pages(api, f"/actions/runs/{run_id}/artifacts", key="artifacts")
     matches = [a for a in rows if a.get("name") == artifact_name(run_id, attempt)]
     require(len(matches) == 1, "Expected exactly one attempt-specific artifact")
@@ -1284,15 +1291,13 @@ def main():
     parser.add_argument("--run-attempt", type=int)
     parser.add_argument("--pr-number", type=int)
     parser.add_argument("--source-sha")
-    parser.add_argument("--trusted-workflow-sha", action="append", default=[])
     args = parser.parse_args()
     try:
         if args.check_bundle:
             require(args.bundle_directory is not None
                     and not any((args.publish, args.evidence, args.archive, args.artifact_zip,
                                  args.download_artifact, args.verified_output_dir, args.output_directory,
-                                 args.run_id, args.run_attempt, args.pr_number, args.source_sha,
-                                 args.trusted_workflow_sha)),
+                                 args.run_id, args.run_attempt, args.pr_number, args.source_sha)),
                     "Bundle check accepts only --bundle-directory")
             api = GitHubAPI(os.environ.get("GITHUB_TOKEN")) if args.check_current else None
             evidence, context = validate_verified_bundle(args.bundle_directory, api=api)
@@ -1303,7 +1308,7 @@ def main():
             require(not (args.evidence or args.archive or args.artifact_zip or args.download_artifact
                          or args.check_bundle or args.check_current or args.verified_output_dir
                          or args.run_id or args.run_attempt
-                         or args.pr_number or args.source_sha or args.trusted_workflow_sha),
+                         or args.pr_number or args.source_sha),
                     "Publish mode cannot be combined with Release CI verification options")
             require(args.bundle_directory is not None and args.output_directory is not None,
                     "Publish mode requires verified bundle and output directories")
@@ -1334,8 +1339,6 @@ def main():
             require(args.evidence is None and args.archive is None, "Choose one verification mode")
             require(not (args.check_bundle or args.check_current),
                     "Bundle recheck options cannot be combined with artifact verification")
-            require(args.trusted_workflow_sha and all(SHA.fullmatch(s) for s in args.trusted_workflow_sha),
-                    "Independently reviewed workflow SHA required")
             require(not (args.download_artifact and args.artifact_zip is not None), "Choose one artifact source")
             for key, value in (("run_id", args.run_id), ("run_attempt", args.run_attempt), ("pr_number", args.pr_number)):
                 positive_int({key: value}, key)
@@ -1343,13 +1346,12 @@ def main():
             token = os.environ.get("GITHUB_TOKEN")
             api = GitHubAPI(token)
             options = dict(run_id=args.run_id, attempt=args.run_attempt, pr_number=args.pr_number,
-                           source_sha=args.source_sha, trusted_workflow_shas=set(args.trusted_workflow_sha))
+                           source_sha=args.source_sha)
             if args.download_artifact:
                 require(args.verified_output_dir is not None, "Verified output directory is required")
                 with tempfile.TemporaryDirectory() as folder:
                     path = Path(folder) / "artifact.zip"
-                    download_release_zip(api, path, token=token, run_id=args.run_id, attempt=args.run_attempt,
-                                         trusted_workflow_shas=options["trusted_workflow_shas"])
+                    download_release_zip(api, path, token=token, run_id=args.run_id, attempt=args.run_attempt)
                     result = verify_github_zip(api, path, output_directory=args.verified_output_dir, **options)
             else:
                 require(args.verified_output_dir is None, "Verified output requires a downloaded artifact")
@@ -1360,7 +1362,7 @@ def main():
             require(args.verified_output_dir is None and args.bundle_directory is None
                     and args.output_directory is None and not args.check_bundle and not args.check_current,
                     "Unexpected workflow output option")
-            require(not any((args.run_id, args.run_attempt, args.pr_number, args.source_sha, args.trusted_workflow_sha)),
+            require(not any((args.run_id, args.run_attempt, args.pr_number, args.source_sha)),
                     "GitHub options require --artifact-zip")
             result = verify_archive(args.archive, load_evidence(args.evidence))
     except (Blocked, OSError) as exc:

@@ -206,7 +206,7 @@ class MetadataTests(unittest.TestCase):
 
     def verify(self, **changes):
         args = dict(run=self.run, artifacts=[self.artifact], pr=self.pr, commit=self.commit,
-                    source_sha=self.source, trusted_workflow_shas={"a" * 40}, now=self.now)
+                    source_sha=self.source, now=self.now)
         args.update(changes)
         return ci.verify_github_metadata(self.evidence, **args)
 
@@ -216,9 +216,10 @@ class MetadataTests(unittest.TestCase):
         self.assertFalse(result["publication_authorized"])
         self.assertEqual(result["artifact_id"], 55)
 
-    def test_untrusted_workflow(self):
-        with self.assertRaisesRegex(ci.Blocked, "Untrusted"):
-            self.verify(trusted_workflow_shas=set())
+    def test_workflow_sha_allowlist_is_not_accepted(self):
+        # Trust is the reviewed verifier blob hashes, not a configured commit SHA.
+        with self.assertRaises(TypeError):
+            self.verify(trusted_workflow_shas={"a" * 40})
 
     def test_wrong_run_or_attempt(self):
         for changes in ({"id": 124}, {"run_attempt": 3}):
@@ -305,6 +306,107 @@ class ReleaseContractTests(unittest.TestCase):
                 ci.release_change_digest("a" * 40, "b" * 40)
 
 
+@unittest.skipUnless(__import__("shutil").which("git"), "Requires git")
+class TrustedVerifierTests(unittest.TestCase):
+    """Synthetic repositories only; nothing depends on the files checked into main."""
+
+    def setUp(self):
+        import os
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        # Isolate from user and system Git settings (signing, hooks, line ending filters).
+        self.env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                    "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+        self.git("init", "-q")
+        self.git("config", "core.autocrlf", "false")
+        self.files = {path: f"synthetic verifier {index}\nsecond line\n".encode()
+                      for index, path in enumerate(ci.RELEASE_VERIFIER_FILES)}
+        self.first = self.commit(self.files)
+        self.lf = {path: hashlib.sha256(data).hexdigest() for path, data in self.files.items()}
+
+    def git(self, *args):
+        import subprocess
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True, env=self.env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip()
+
+    def commit(self, files):
+        for path, data in files.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        self.git("add", "--", *files)
+        self.git("commit", "-q", "--allow-empty", "-m", "fixture")
+        return self.git("rev-parse", "HEAD")
+
+    def read_blob(self, commit, path):
+        return ci.git_blob(commit, path, repository=self.repo)
+
+    def trusted(self, commit, trusted):
+        return ci.trusted_verifier_files(commit, trusted, read_blob=self.read_blob)
+
+    def test_registered_entry_covers_exact_verifier_paths(self):
+        self.assertIsInstance(ci.TRUSTED_VERIFIER_FILES, tuple)
+        self.assertGreaterEqual(len(ci.TRUSTED_VERIFIER_FILES), 1)
+        for entry in ci.TRUSTED_VERIFIER_FILES:
+            self.assertEqual(set(entry), set(ci.RELEASE_VERIFIER_FILES))
+            self.assertTrue(all(ci.HEX.fullmatch(value) for value in entry.values()))
+            self.assertEqual(ci.check_trusted_verifier(entry), entry)
+
+    def test_git_blob_reads_raw_plumbing_bytes(self):
+        from unittest.mock import patch
+        with patch.object(ci.subprocess, "check_output", return_value=b"raw") as command:
+            self.assertEqual(ci.git_blob("a" * 40, "scripts/release_ci.py"), b"raw")
+        self.assertEqual(command.call_args.args[0],
+                         ["git", "-c", "core.autocrlf=false", "cat-file", "blob", "a" * 40 + ":scripts/release_ci.py"])
+
+    def test_matching_blob_hashes_are_trusted(self):
+        self.assertEqual(self.trusted(self.first, (self.lf,)), self.lf)
+
+    def test_crlf_working_tree_does_not_change_blob_hashes(self):
+        crlf = {path: data.replace(b"\n", b"\r\n") for path, data in self.files.items()}
+        for path, data in crlf.items():
+            (self.repo / path).write_bytes(data)
+        self.git("config", "core.autocrlf", "true")
+        self.assertEqual(self.trusted(self.first, (self.lf,)), self.lf)
+        crlf_hashes = {path: hashlib.sha256(data).hexdigest() for path, data in crlf.items()}
+        with self.assertRaisesRegex(ci.Blocked, "do not match"):
+            self.trusted(self.first, (crlf_hashes,))
+
+    def test_one_changed_file_is_blocked_unless_that_version_is_reviewed(self):
+        changed = {**self.files, "scripts/release_ci.py": b"modified verifier\n"}
+        second = self.commit(changed)
+        with self.assertRaisesRegex(ci.Blocked, "do not match"):
+            self.trusted(second, (self.lf,))
+        reviewed = {**self.lf, "scripts/release_ci.py": hashlib.sha256(b"modified verifier\n").hexdigest()}
+        self.assertEqual(self.trusted(second, (self.lf, reviewed)), reviewed)
+        self.assertEqual(self.trusted(self.first, (self.lf, reviewed)), self.lf)
+
+    def test_missing_file_or_unknown_commit_is_blocked(self):
+        self.git("rm", "-q", "--", ".github/release-ci-trust.json")
+        self.git("commit", "-q", "-m", "fixture")
+        missing = self.git("rev-parse", "HEAD")
+        with self.assertRaisesRegex(ci.Blocked, "Missing Release verifier file"):
+            self.trusted(missing, (self.lf,))
+        with self.assertRaisesRegex(ci.Blocked, "Missing Release verifier file"):
+            self.trusted("f" * 40, (self.lf,))
+        for commit in (None, "HEAD", "A" * 40):
+            with self.subTest(commit=commit), self.assertRaisesRegex(ci.Blocked, "Invalid Release verifier"):
+                self.trusted(commit, (self.lf,))
+
+    def test_empty_or_malformed_registry_is_blocked(self):
+        path = ".github/workflows/release-ci.yml"
+        partial = {key: value for key, value in self.lf.items() if key != path}
+        for trusted, message in (((), "No reviewed"), ((partial,), "Invalid reviewed"),
+                                 (({**self.lf, "extra.py": "0" * 64},), "Invalid reviewed"),
+                                 (({**self.lf, path: self.lf[path].upper()},), "Invalid reviewed"),
+                                 (([self.lf],), "Invalid reviewed")):
+            with self.subTest(trusted=trusted), self.assertRaisesRegex(ci.Blocked, message):
+                self.trusted(self.first, trusted)
+
+
 class GitHubJobLogDownloadTests(unittest.TestCase):
     class Response:
         status = 200
@@ -376,18 +478,17 @@ class GitHubIntegrationTests(unittest.TestCase):
         f.run["actor"] = {"id": 11, "login": "release-dispatcher"}
         self.change_digest = "f" * 64
         self.verifier_hashes = {path: "e" * 64 for path in ci.RELEASE_VERIFIER_FILES}
-        approval = {"pr": 1, "base": "a" * 40, "head": "b" * 40, "merge_tree": "c" * 40,
-                    "changes": self.change_digest,
-                    "review": {"head": "b" * 40,
-                               "record": f"https://github.com/{ci.REPOSITORY}/pull/1#pullrequestreview-1",
-                               "blocking": 0}}
+        # #125 approval record: the independent review is cited by a repository URL,
+        # not by a GitHub APPROVED review.
+        self.approval = {"pr": 1, "base": "a" * 40, "head": "b" * 40, "merge_tree": "c" * 40,
+                         "changes": self.change_digest,
+                         "review": {"head": "b" * 40,
+                                    "record": f"https://github.com/{ci.REPOSITORY}/pull/134",
+                                    "blocking": 0}}
         self.comment = {"id": 77, "issue_url": f"https://api.github.com/repos/{ci.REPOSITORY}/issues/1",
                         "user": {"type": "User", "login": "release-admin"},
                         "created_at": "2026-11-25T09:30:00Z", "updated_at": "2026-11-25T09:30:00Z",
-                        "body": "Approval\n```toi-release-approval\n" + json.dumps(approval) + "\n```"}
-        self.review = {"id": 1, "user": {"id": 10}, "state": "APPROVED", "commit_id": "b" * 40,
-                       "submitted_at": "2026-11-25T09:00:00Z", "author_association": "MEMBER",
-                       "html_url": f"https://github.com/{ci.REPOSITORY}/pull/1#pullrequestreview-1"}
+                        "body": self.approval_body(self.approval)}
         self.records = {"/actions/runs/123": f.run, "/actions/runs/123/attempts/2": copy.deepcopy(f.run),
                         "/actions/runs/123/artifacts?per_page=100&page=1": {"total_count": 1, "artifacts": [f.artifact]},
                         "/actions/runs/123/attempts/2/jobs?per_page=100&page=1": {
@@ -397,8 +498,7 @@ class GitHubIntegrationTests(unittest.TestCase):
                                                         "head_sha": f.run["head_sha"]}]},
                         "/issues/comments/77": self.comment,
                         "/pulls/1": f.pr, "/commits/" + f.source: f.commit,
-                        "/branches/main": {"name": "main", "protected": True, "commit": {"sha": f.source}},
-                        "/pulls/1/reviews?per_page=100&page=1": [self.review]}
+                        "/branches/main": {"name": "main", "protected": True, "commit": {"sha": f.source}}}
         self.api = Mock()
         self.api.get.side_effect = lambda endpoint: self.records[endpoint]
         self.api.get_job_log.return_value = (
@@ -407,34 +507,47 @@ class GitHubIntegrationTests(unittest.TestCase):
             b"| approval comment | `77` |\n"
             b"| approver | `release-admin` |\n")
 
+    @staticmethod
+    def approval_body(approval):
+        return "Approval\n```toi-release-approval\n" + json.dumps(approval) + "\n```"
+
     def verify(self, **changes):
         from unittest.mock import patch
         args = dict(run_id=123, attempt=2, pr_number=1, source_sha=self.fixture.source,
-                    trusted_workflow_shas={"a" * 40}, now=self.fixture.now)
+                    now=self.fixture.now, trusted_verifiers=(dict(self.verifier_hashes),))
         args.update(changes)
         with patch.object(ci, "release_change_digest", return_value=self.change_digest), \
-                patch.object(ci, "verifier_file_hashes", return_value=self.verifier_hashes):
-            return ci.verify_github_zip(self.api, self.path, **args)
+                patch.object(ci, "verifier_file_hashes", return_value=self.verifier_hashes) as hashes:
+            result = ci.verify_github_zip(self.api, self.path, **args)
+        hashes.assert_called_once()
+        self.assertEqual(hashes.call_args.args[0], self.fixture.run["head_sha"])
+        return result
 
     def test_good_zip_authorizes_only_after_release_approval_and_integrity_checks(self):
         result = self.verify()
         self.assertTrue(result["metadata_verified"])
         self.assertTrue(result["integrity_verified"])
-        self.assertEqual(result["independent_review_ids_observed"], [1])
         self.assertTrue(result["approval_contract_verified"])
         self.assertTrue(result["publication_authorized"])
         context = result["release_context"]
         self.assertEqual(context["release_workflow"]["official_job_id"], 90)
         self.assertEqual(context["approval"]["comment_id"], 77)
+        self.assertEqual(context["approval"]["review"], self.approval["review"])
         self.assertEqual(context["release"]["change_digest"], self.change_digest)
-        self.assertEqual(set(context["verifier"]["files"]), set(ci.RELEASE_VERIFIER_FILES))
+        self.assertEqual(context["verifier"]["files"], self.verifier_hashes)
 
     def test_release_approval_requires_unique_unchanged_admin_record(self):
         original = copy.deepcopy(self.comment)
+        review = self.approval["review"]
         for update in (
             {"updated_at": "2026-11-25T09:31:00Z"},
             {"body": original["body"].replace(self.change_digest, "0" * 64)},
-            {"body": original["body"].replace("pullrequestreview-1", "pullrequestreview-2")},
+            {"body": self.approval_body({**self.approval, "review": {
+                **review, "record": "https://example.invalid/ToI-walkwithdog/walkwithdog-BE/pull/134"}})},
+            {"body": self.approval_body({**self.approval, "review": {**review, "head": "e" * 40}})},
+            {"body": self.approval_body({**self.approval, "review": {**review, "blocking": 1}})},
+            {"body": self.approval_body({**self.approval, "review": {**review, "blocking": True}})},
+            {"body": original["body"] + "\n" + original["body"]},
             {"user": {"type": "Bot", "login": "release-admin"}},
             {"id": 78},
         ):
@@ -509,21 +622,24 @@ class GitHubIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ci.Blocked, "ZIP members"):
             self.verify()
 
-    def test_self_approval_stale_head_late_and_outsider(self):
-        original = self.review.copy()
-        for changes in ({"user": {"id": 9}}, {"commit_id": "e" * 40},
-                        {"submitted_at": "2026-11-25T10:30:00Z"}, {"author_association": "NONE"}):
-            self.review.clear()
-            self.review.update(original, **changes)
-            with self.subTest(changes=changes), self.assertRaisesRegex(ci.Blocked, "independent"):
-                self.verify()
+    def test_no_separate_github_approved_review_is_required_or_read(self):
+        # The #125 approval comment and its cited independent review are the contract;
+        # GitHub review votes stay at zero and are never consulted.
+        result = self.verify()
+        self.assertTrue(result["publication_authorized"])
+        endpoints = [call.args[0] for call in self.api.get.call_args_list]
+        self.assertFalse(any("/reviews" in endpoint for endpoint in endpoints))
+        self.assertNotIn("independent_review_ids_observed", result)
 
-    def test_dismissed_or_changes_requested_review(self):
-        for state in ("DISMISSED", "CHANGES_REQUESTED"):
-            self.records["/pulls/1/reviews?per_page=100&page=1"] = [self.review, {**self.review, "id": 2,
-                "state": state, "submitted_at": "2026-11-25T09:30:00Z"}]
-            with self.subTest(state=state), self.assertRaisesRegex(ci.Blocked, "independent"):
-                self.verify()
+    def test_unreviewed_verifier_blocks_before_artifact_use(self):
+        other = {path: "f" * 64 for path in ci.RELEASE_VERIFIER_FILES}
+        one_changed = {**self.verifier_hashes, "scripts/release_ci.py": "f" * 64}
+        for trusted, message in (((other,), "do not match"), ((one_changed,), "do not match"),
+                                 ((), "No reviewed")):
+            self.api.get_job_log.reset_mock()
+            with self.subTest(trusted=trusted), self.assertRaisesRegex(ci.Blocked, message):
+                self.verify(trusted_verifiers=trusted)
+            self.api.get_job_log.assert_not_called()
 
     def test_pagination_and_duplicate_ids(self):
         from unittest.mock import Mock
@@ -885,13 +1001,72 @@ class ProductionEvidenceTests(unittest.TestCase):
         self.output.mkdir()
         self.aws = MockECR(self.integration.fixture.evidence["image"]["manifest_digest"])
         self.now = datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc)
+        self.hashes = dict(self.integration.verifier_hashes)
+        self.run_commit_hashes = dict(self.hashes)
+        self.trusted = (dict(self.hashes),)
+        self.hash_calls = []
 
-    def publish(self):
+        def rehash(commit, *args):
+            # Record when the publish recheck reads Git blobs relative to any transport call.
+            self.hash_calls.append((commit, len(self.aws.calls)))
+            return dict(self.run_commit_hashes)
+
+        from unittest.mock import patch
+        patcher = patch.object(ci, "verifier_file_hashes", side_effect=rehash)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def publish(self, **changes):
+        options = dict(trusted_verifiers=self.trusted)
+        options.update(changes)
         return ci.publish_with_evidence(
             self.bundle, self.output, runner=self.aws,
             publish_run_id=456, publish_run_attempt=1,
             publish_workflow_sha=self.integration.fixture.source, dispatcher="publish-admin",
-            clock=lambda: self.now)
+            clock=lambda: self.now, **options)
+
+    def assert_blocked_before_transport(self, message, **changes):
+        with self.assertRaisesRegex(ci.Blocked, message):
+            self.publish(**changes)
+        self.assertEqual(self.aws.calls, [])
+        self.assertFalse((self.output / ci.EVIDENCE_FILE).exists())
+
+    def test_publish_rehashes_verifier_at_release_run_commit_before_transport(self):
+        record = self.publish()
+        workflow_sha = self.integration.fixture.run["head_sha"]
+        self.assertEqual(self.hash_calls, [(workflow_sha, 0)])
+        self.assertEqual(record["verifier"]["files"], self.hashes)
+
+    def test_check_bundle_rehashes_verifier_without_aws(self):
+        ci.validate_verified_bundle(self.bundle, trusted_verifiers=self.trusted)
+        self.run_commit_hashes["scripts/release_ci.py"] = "f" * 64
+        with self.assertRaisesRegex(ci.Blocked, "do not match"):
+            ci.validate_verified_bundle(self.bundle, trusted_verifiers=self.trusted)
+        self.assertEqual(self.aws.calls, [])
+
+    def test_unreviewed_verifier_at_release_run_commit_blocks_publication(self):
+        self.run_commit_hashes["scripts/release_ci.py"] = "f" * 64
+        self.assert_blocked_before_transport("do not match")
+
+    def test_empty_verifier_registry_blocks_publication(self):
+        self.assert_blocked_before_transport("No reviewed", trusted_verifiers=())
+
+    def test_bundle_verifier_hashes_must_equal_release_run_commit(self):
+        # Both versions are reviewed, but the bundle claims a different one than the run commit holds.
+        other = {**self.hashes, "scripts/release_ci.py": "f" * 64}
+        path = self.bundle / ci.VERIFIED_CONTEXT_FILE
+        context = json.loads(path.read_text())
+        context["verifier"]["files"] = other
+        path.write_text(json.dumps(context))
+        self.assert_blocked_before_transport("differ from the Release CI run commit",
+                                             trusted_verifiers=(dict(self.hashes), other))
+
+    def test_unreviewed_bundle_verifier_hashes_block_publication(self):
+        path = self.bundle / ci.VERIFIED_CONTEXT_FILE
+        context = json.loads(path.read_text())
+        context["verifier"]["files"] = {path_: "f" * 64 for path_ in ci.RELEASE_VERIFIER_FILES}
+        path.write_text(json.dumps(context))
+        self.assert_blocked_before_transport("do not match")
 
     def test_production_record_matches_backend_contract_v1(self):
         record = self.publish()
@@ -949,7 +1124,7 @@ class ProductionEvidenceTests(unittest.TestCase):
 
 class WorkflowDownloadTests(unittest.TestCase):
     def setUp(self):
-        from unittest.mock import Mock
+        from unittest.mock import Mock, patch
         self.integration = GitHubIntegrationTests()
         self.integration.setUp()
         self.addCleanup(self.integration.doCleanups)
@@ -957,8 +1132,12 @@ class WorkflowDownloadTests(unittest.TestCase):
         self.payload = self.integration.path.read_bytes()
         self.api = self.integration.api
         self.artifact = self.integration.fixture.artifact
+        hashes = self.integration.verifier_hashes
         self.options = dict(token="synthetic-token", run_id=123, attempt=2,
-                            trusted_workflow_shas={"a" * 40}, now=self.integration.fixture.now)
+                            now=self.integration.fixture.now, trusted_verifiers=(dict(hashes),))
+        patcher = patch.object(ci, "verifier_file_hashes", return_value=hashes)
+        self.verifier_hashes = patcher.start()
+        self.addCleanup(patcher.stop)
         self.runner = Mock(side_effect=self.copy_payload)
 
     def copy_payload(self, argv, **kwargs):
@@ -980,10 +1159,16 @@ class WorkflowDownloadTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--proto-redir") + 1], "=https")
 
     def test_wrong_attempt_or_untrusted_run_never_downloads(self):
-        for changes in ({"attempt": 1}, {"trusted_workflow_shas": {"f" * 40}}):
+        unreviewed = ({path: "f" * 64 for path in ci.RELEASE_VERIFIER_FILES},)
+        for changes in ({"attempt": 1}, {"trusted_verifiers": unreviewed}, {"trusted_verifiers": ()}):
             with self.subTest(changes=changes), self.assertRaises(ci.Blocked):
                 self.download(**changes)
         self.runner.assert_not_called()
+
+    def test_verifier_is_hashed_at_the_release_run_commit(self):
+        self.download()
+        self.verifier_hashes.assert_called_once()
+        self.assertEqual(self.verifier_hashes.call_args.args[0], self.integration.fixture.run["head_sha"])
 
     def test_missing_duplicate_or_expired_artifact_never_downloads(self):
         endpoint = "/actions/runs/123/artifacts?per_page=100&page=1"
@@ -1040,6 +1225,17 @@ class WorkflowActivationTests(unittest.TestCase):
         self.assertIn("github.ref_protected", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
+        # Validate and Publish both need the Release CI run commit for verifier blob hashes.
+        self.assertEqual(workflow.count("fetch-depth: 0"), 2)
+
+    def test_release_trust_uses_no_variable_cli_pin_or_review_votes(self):
+        workflow = (MODULE.parents[1] / ".github/workflows/ecr-image-publish.yml").read_text(encoding="utf-8")
+        source = MODULE.read_text(encoding="utf-8")
+        for text in (workflow, source):
+            self.assertNotIn("TRUSTED_RELEASE_WORKFLOW_SHA", text)
+            self.assertNotIn("--trusted-workflow-sha", text)
+        self.assertNotIn("/reviews", source)
+        self.assertNotIn('"APPROVED"', source)
 
 
 class PublicationPolicyTests(unittest.TestCase):
@@ -1086,9 +1282,10 @@ class PublicationPolicyTests(unittest.TestCase):
         path = MODULE.parents[1] / "docs/deployment/ECR_PUBLISH.md"
         text = path.read_text(encoding="utf-8")
         for expected in ("image-publish-evidence.json", "TRUSTED_PUBLISHERS",
-                         "TRUSTED_RELEASE_WORKFLOW_SHA", "ECR_PUBLISH_ROLE_ARN",
+                         "TRUSTED_VERIFIER_FILES", "git cat-file blob", "ECR_PUBLISH_ROLE_ARN",
                          "repo:ToI-walkwithdog@339425868/walkwithdog-BE@1409697696:ref:refs/heads/main"):
             self.assertIn(expected, text)
+        self.assertNotIn("TRUSTED_RELEASE_WORKFLOW_SHA", text)
         self.assertNotIn("aws iam create-role", text)
         self.assertNotIn("aws iam put-role-policy", text)
 
