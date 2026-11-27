@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
+from app.account_status import require_active_writer
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import ChatSession, ChatMessage, Survey, Dog
@@ -68,6 +69,7 @@ def create_session(request: SessionRequest, user=Depends(get_current_user), db: 
     configuration()  # Don't create unusable sessions when provider configuration is absent.
     session = ChatSession(user_id=user.id, dog_id=dog.id, survey_id=survey.id,
                           context_snapshot=context_for(survey, dog), consent_to_external_ai=True)
+    require_active_writer(db, user)  # Issue #41: status re-checked on the locked row
     db.add(session)
     db.commit()
     db.refresh(session)
@@ -92,6 +94,8 @@ def send_message(session_id: int, request: MessageRequest, user=Depends(get_curr
     safe_message, pii_redacted = redact_personal_data(request.message)
     try:
         reply, model = generate_reply(session.context_snapshot, history, safe_message)
+        # Issue #41: checked after the external call so the users row is not locked during it.
+        require_active_writer(db, user)
         db.add(ChatMessage(session_id=session_id, role="user", content=safe_message))
         response = ChatMessage(session_id=session_id, role="assistant", content=reply)
         db.add(response)

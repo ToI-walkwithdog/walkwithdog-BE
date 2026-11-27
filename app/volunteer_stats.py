@@ -1,6 +1,6 @@
-"""Issue #6: volunteer statistics are re-aggregated from COMPLETED walks (idempotent).
+"""Volunteer record totals and read-only owner walk history statistics.
 
-Called inside the end-walk transaction, after the Issue #3/#4 locks
+Volunteer record totals are refreshed inside the end-walk transaction, after the Issue #3/#4 locks
 (Dog -> User -> WalkRequest -> Walk) are held, so the VolunteerProfile lock is last in the
 global lock order. Re-aggregating instead of incrementing means retries, duplicate closes
 and legacy rows can never double count: running it twice yields the same profile.
@@ -11,6 +11,31 @@ from sqlalchemy import distinct, func
 
 from app.models import User, Walk, WalkRequest
 from app.walk_request_service import lock_row, locked_profile
+
+FINISHED_WALK_STATUSES = ("COMPLETED", "INTERRUPTED")
+
+
+def history_totals(db, user_id):
+    """Use the same owner and status scope as the unfiltered walk history."""
+    count, distance, dogs, distance_missing = (
+        db.query(
+            func.count(Walk.id),
+            func.coalesce(func.sum(Walk.total_distance_m), 0),
+            func.count(distinct(WalkRequest.dog_id)),
+            func.count().filter(Walk.total_distance_m.is_(None)),
+        )
+        .select_from(Walk)
+        .join(WalkRequest, Walk.walk_request_id == WalkRequest.id)
+        .filter(WalkRequest.user_id == user_id, Walk.status.in_(FINISHED_WALK_STATUSES))
+        .one()
+    )
+    return {
+        "history_walk_count": count,
+        "history_distance_m": Decimal(str(distance)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+        "history_unique_dog_count": dogs,
+        "history_distance_missing_count": distance_missing,
+        "history_distance_is_complete": distance_missing == 0,
+    }
 
 
 def completed_totals(db, user_id):

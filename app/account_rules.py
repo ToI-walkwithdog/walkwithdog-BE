@@ -1,0 +1,115 @@
+"""Account field rules shared by sign-up and the availability checks.
+
+Each function returns the stored form of a value or raises a 422 ContractError.
+The database compares lower() of the stored form, so these rules and the
+unique indexes on users decide duplicates the same way.
+"""
+import re
+import string
+import unicodedata
+
+from app.api_contract import REQUIRED_FIELD_MESSAGE, ContractError
+
+LOGIN_ID_MIN_LENGTH, LOGIN_ID_MAX_LENGTH = 4, 20
+NICKNAME_MIN_LENGTH, NICKNAME_MAX_LENGTH = 3, 20
+LOGIN_IDENTIFIER_MAX_LENGTH = 100
+PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH = 15, 128
+
+# Checked after ASCII lowercasing, so this equals the client rule ^[A-Za-z0-9]{4,20}$.
+LOGIN_ID_PATTERN = re.compile(r"[a-z0-9]+")
+NICKNAME_PATTERN = re.compile(r"[가-힣A-Za-z0-9_]+")
+PASSWORD_SPECIAL_CHARACTERS = frozenset(string.punctuation)
+
+
+def invalid(code, message, data):
+    return ContractError(422, code, message, data)
+
+
+# Availability checks and login use their own *_REQUIRED codes; sign-up uses REQUIRED_FIELD.
+REQUIRED_MESSAGES = {"LOGIN_ID_REQUIRED": "아이디를 입력해 주세요.",
+                     "NICKNAME_REQUIRED": "닉네임을 입력해 주세요.",
+                     "IDENTIFIER_REQUIRED": "아이디를 입력해 주세요.",
+                     "PASSWORD_REQUIRED": "비밀번호를 입력해 주세요."}
+
+# Same rule, different wording: sign-up explains the allowed characters, while the
+# availability check only says the value contains a disallowed one.
+SIGNUP_LOGIN_ID_FORMAT_MESSAGE = "아이디에는 영문과 숫자만 사용할 수 있습니다."
+AVAILABILITY_LOGIN_ID_FORMAT_MESSAGE = "아이디에 사용할 수 없는 문자가 포함되어 있습니다."
+
+
+def required_text(value, field, required_code):
+    if not isinstance(value, str) or not value.strip():
+        message = REQUIRED_MESSAGES.get(required_code, REQUIRED_FIELD_MESSAGE)
+        raise invalid(required_code, message, {"field": field})
+    return value
+
+
+def check_length(value, field, code, message, minimum, maximum):
+    if not minimum <= len(value) <= maximum:
+        raise invalid(code, message, {"field": field, "min_length": minimum, "max_length": maximum})
+
+
+def normalize_login_id(value, required_code="REQUIRED_FIELD", format_message=SIGNUP_LOGIN_ID_FORMAT_MESSAGE):
+    value = required_text(value, "login_id", required_code).strip()
+    # Only ASCII is lowercased; non-ASCII letters must not fold into valid IDs.
+    if value.isascii():
+        value = value.lower()
+    check_length(value, "login_id", "INVALID_LOGIN_ID_LENGTH", "아이디는 4~20자로 입력해 주세요.",
+                 LOGIN_ID_MIN_LENGTH, LOGIN_ID_MAX_LENGTH)
+    if not LOGIN_ID_PATTERN.fullmatch(value):
+        raise invalid("INVALID_LOGIN_ID_FORMAT", format_message, {"field": "login_id"})
+    return value
+
+
+def normalize_login_identifier(value):
+    """Login lookup key: the same trim and ASCII lowercasing as sign-up.
+
+    Sign-up length and character rules are not applied, so accounts whose IDs
+    predate the current rule can still log in. Unknown values fail as 401 later.
+    """
+    value = required_text(value, "identifier", "IDENTIFIER_REQUIRED").strip()
+    if value.isascii():
+        value = value.lower()
+    if len(value) > LOGIN_IDENTIFIER_MAX_LENGTH:
+        raise invalid("INVALID_IDENTIFIER_FORMAT", "아이디 형식을 확인해 주세요.", {"field": "identifier"})
+    return value
+
+
+def require_login_password(value):
+    """Return the password unchanged; login does not re-apply sign-up complexity rules."""
+    return required_text(value, "password", "PASSWORD_REQUIRED")
+
+
+def normalize_nickname(value, required_code="REQUIRED_FIELD"):
+    value = required_text(value, "nickname", required_code)
+    value = unicodedata.normalize("NFC", value).strip()
+    check_length(value, "nickname", "INVALID_NICKNAME_LENGTH", "닉네임은 3~20자로 입력해 주세요.",
+                 NICKNAME_MIN_LENGTH, NICKNAME_MAX_LENGTH)
+    if not NICKNAME_PATTERN.fullmatch(value):
+        raise invalid("INVALID_NICKNAME_FORMAT", "닉네임에 사용할 수 없는 문자가 포함되어 있습니다.",
+                      {"field": "nickname"})
+    return value
+
+
+PASSWORD_RULES = (
+    ("uppercase", "PASSWORD_UPPERCASE_REQUIRED", "비밀번호에 영문 대문자를 1개 이상 포함해 주세요.",
+     lambda c: "A" <= c <= "Z"),
+    ("lowercase", "PASSWORD_LOWERCASE_REQUIRED", "비밀번호에 영문 소문자를 1개 이상 포함해 주세요.",
+     lambda c: "a" <= c <= "z"),
+    ("number", "PASSWORD_NUMBER_REQUIRED", "비밀번호에 숫자를 1개 이상 포함해 주세요.",
+     lambda c: "0" <= c <= "9"),
+    ("special", "PASSWORD_SPECIAL_REQUIRED", "비밀번호에 특수문자를 1개 이상 포함해 주세요.",
+     lambda c: c in PASSWORD_SPECIAL_CHARACTERS),
+)
+
+
+def validate_password(value):
+    """Return the password unchanged: no trimming or normalization before hashing."""
+    if not isinstance(value, str) or value == "":
+        raise invalid("REQUIRED_FIELD", REQUIRED_FIELD_MESSAGE, {"field": "password"})
+    check_length(value, "password", "INVALID_PASSWORD_LENGTH", "비밀번호는 15~128자로 입력해 주세요.",
+                 PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH)
+    for rule, code, message, matches in PASSWORD_RULES:
+        if not any(matches(character) for character in value):
+            raise invalid(code, message, {"field": "password", "rule": rule})
+    return value

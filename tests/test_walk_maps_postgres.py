@@ -10,6 +10,10 @@ from walk_map_test_support import WalkMapFixture
 from app.models import VolunteerProfile
 from app.volunteer_stats import refresh_volunteer_profile
 from app.walk_map_service import OWNER_MAX_ROUTE_POINTS
+
+# Issue #99: owner-only statistics on /volunteers/me; /users/{id}/profile must not expose them.
+HISTORY_STATISTICS = {"history_walk_count", "history_distance_m", "history_unique_dog_count",
+                      "history_distance_missing_count", "history_distance_is_complete"}
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.exc import DBAPIError
 from scripts.backfill_volunteer_stats import rebuild_profiles
@@ -64,7 +68,15 @@ class WalkMapPostgresTests(MapIntegrationAssertions, WalkMapFixture, unittest.Te
         self.complete_via_api()
         profile, me = self.get("/users/1/profile").json(), self.get("/volunteers/me").json()
         profile.pop("nickname")
-        self.assertEqual(profile, me)
+        self.assertFalse(HISTORY_STATISTICS & set(profile), "profile must not expose owner statistics")
+        self.assertEqual(me, {
+            **profile,
+            "history_walk_count": 1,
+            "history_distance_m": "22.24",
+            "history_unique_dog_count": 1,
+            "history_distance_missing_count": 0,
+            "history_distance_is_complete": True,
+        })
         self.assertEqual((me["total_walk_count"], me["total_distance_m"], me["unique_dog_count"]), (1, "22.24", 1))
         history = self.get("/users/1/walks").json()
         self.assertEqual([(w["status"], w["counted_as_volunteer_record"]) for w in history["walks"]], [("COMPLETED", True)])
@@ -127,12 +139,28 @@ class WalkMapPostgresTests(MapIntegrationAssertions, WalkMapFixture, unittest.Te
         self.assertEqual(before, (1, 2, Decimal('100.00'), 720, 1))
 
     def test_two_distinct_walk_ends_for_same_user_are_serialized(self):
-        first = self.seed_walk(day=1, dog=1, status='IN_PROGRESS')
-        second = self.seed_walk(day=2, dog=9, status='IN_PROGRESS')
+        from app.models import Walk
+
+        # Adjacent [start, end) bookings must not overlap for the same user.
+        first = self.seed_walk(day=1 / 24, dog=1, status='IN_PROGRESS')
+        with self.Session.begin() as db:
+            # The first walk started one minute before the second booking.
+            db.get(Walk, first).started_at += timedelta(minutes=59)
+        second = self.seed_walk(day=0, dog=9, status='IN_PROGRESS')
+        self.advance(60)
         winner, loser = self.recording_race(lambda: self.end(first), lambda: self.end(second))
         self.assertEqual((winner.status_code, loser.status_code), (200, 409))
-        self.assertEqual(self.end(second).status_code, 200)
-        self.assertEqual(self.profile_row(1), (1, 2, Decimal('0.00'), 3 * 86400, 2))
+        self.assertEqual(winner.json()['end_reason'], 'USER')
+        self.assertEqual(winner.json()['duration_seconds'], 120)
+        self.assertEqual(self.detail(second).json()['walk']['status'], 'IN_PROGRESS')
+        self.assertEqual(self.profile_row(1), (1, 1, Decimal('0.00'), 120, 1))
+
+        self.advance(180)
+        retried = self.end(second)
+        self.assertEqual(retried.status_code, 200)
+        self.assertEqual(retried.json()['end_reason'], 'USER')
+        self.assertEqual(retried.json()['duration_seconds'], 180)
+        self.assertEqual(self.profile_row(1), (1, 2, Decimal('0.00'), 300, 2))
 
 
 if __name__ == "__main__":

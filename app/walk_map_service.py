@@ -1,4 +1,4 @@
-"""Issue #6 read models: owner map, public dog map, walk history.
+"""Issue #6 & F-12 read models: owner map, public dog map, walk history.
 
 Routes are derived from the Issue #4 raw GPS points but never returned raw.
 Performance: walks are paginated, and each page fetches only a sampled subset of every
@@ -8,17 +8,30 @@ uses the (walk_id, sequence_no) unique index).
 from decimal import Decimal, ROUND_HALF_UP
 from typing import NamedTuple
 
-from sqlalchemy import and_, distinct, func, or_
-from sqlalchemy.orm import contains_eager
+from fastapi import HTTPException
+from sqlalchemy import and_, distinct, func, or_, true
+from sqlalchemy.orm import contains_eager, joinedload
 
-from app.models import Walk, WalkPoint, WalkRequest
+from app.models import (
+    Dog, ShelterVolunteerReview, User, UserRole, Walk, WalkIncident,
+    WalkMarker, WalkPoint, WalkRequest, WalkReview,
+)
+from app.shelter_volunteer_review_service import serialize_shelter_volunteer_review
 from app.gps_geometry import distance_m
+from app.volunteer_stats import FINISHED_WALK_STATUSES
+from app.walk_record_schemas import WalkIncidentResponse, WalkMarkerResponse
+from app.walk_review_schemas import WalkReviewResponse
 
 OWNER_MAX_ROUTE_POINTS = 200   # route holds at most this +1 (the final point is always kept)
 PUBLIC_MAX_ROUTE_POINTS = 100
 # PROVISIONAL public-exposure policy (needs privacy review):
 PUBLIC_TRIM_M = 150            # drop this much of the route at the start and at the end
 PUBLIC_COORD_DECIMALS = 3      # ~110 m grid
+WALK_REVIEW_LOADERS = (
+    joinedload(Walk.review),
+    joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.tags),
+    joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.shelter),
+)
 
 
 class Point(NamedTuple):
@@ -35,11 +48,15 @@ def completed_filter(**keys):
     return conditions
 
 
-def walk_page(db, conditions, limit, offset, order=(Walk.started_at.desc(), Walk.id.desc())):
+def walk_page(db, conditions, limit, offset, order=(Walk.started_at.desc(), Walk.id.desc()), *, extra_options=()):
     total = (db.query(func.count(Walk.id)).select_from(Walk)
              .join(WalkRequest, Walk.walk_request_id == WalkRequest.id).filter(*conditions).scalar())
     walks = (db.query(Walk).join(WalkRequest, Walk.walk_request_id == WalkRequest.id)
-             .options(contains_eager(Walk.walk_request).joinedload(WalkRequest.dog))
+             .options(
+                 contains_eager(Walk.walk_request).joinedload(WalkRequest.dog),
+                 *WALK_REVIEW_LOADERS,
+                 *extra_options,
+             )
              .filter(*conditions).order_by(*order).limit(limit).offset(offset).all())
     return total, walks
 
@@ -162,6 +179,19 @@ def dog_map(db, dog_id, limit, offset):
     }
 
 
+def _serialize_user_walk_item(walk):
+    return {
+        "walk_id": walk.id, "walk_request_id": walk.walk_request_id, "dog": walk.walk_request.dog,
+        "status": walk.status, "end_reason": walk.end_reason,
+        "started_at": walk.started_at, "ended_at": walk.ended_at,
+        "total_distance_m": walk.total_distance_m, "duration_seconds": walk.duration_seconds,
+        **motion_metrics(walk), "counted_as_volunteer_record": walk.status == "COMPLETED",
+        "rating": walk.review.rating if walk.review is not None else None,
+        "has_review": walk.review is not None,
+        "shelter_review": serialize_shelter_volunteer_review(walk.volunteer_review),
+    }
+
+
 def user_walks(db, user_id, status, limit, offset):
     conditions = [WalkRequest.user_id == user_id]
     if status is not None:
@@ -169,10 +199,244 @@ def user_walks(db, user_id, status, limit, offset):
     total, walks = walk_page(db, conditions, limit, offset)
     return {
         "user_id": user_id, "total": total, "limit": limit, "offset": offset,
-        "walks": [{
-            "walk_id": walk.id, "walk_request_id": walk.walk_request_id, "dog": walk.walk_request.dog,
-            "status": walk.status, "started_at": walk.started_at, "ended_at": walk.ended_at,
-            "total_distance_m": walk.total_distance_m, "duration_seconds": walk.duration_seconds,
-            **motion_metrics(walk), "counted_as_volunteer_record": walk.status == "COMPLETED",
-        } for walk in walks],
+        "walks": [_serialize_user_walk_item(walk) for walk in walks],
+    }
+
+
+def pending_handover_page(db, conditions, limit, offset):
+    """Count and page in the same snapshot even when another request submits a handover."""
+    eligible = (
+        db.query(Walk.id, Walk.started_at)
+        .join(WalkRequest)
+        .filter(*conditions, Walk.handover_required.is_(True), ~Walk.handover.has())
+        .cte("pending_handovers")
+    )
+    total = db.query(func.count().label("total")).select_from(eligible).subquery()
+    page_order = (eligible.c.started_at.desc(), eligible.c.id.desc())
+    page = db.query(eligible).order_by(*page_order).limit(limit).offset(offset).subquery()
+    # Begin with the one-row total so an offset past the last page still returns it.
+    rows = (
+        db.query(total.c.total, Walk)
+        .select_from(total)
+        .outerjoin(page, true())
+        .outerjoin(Walk, Walk.id == page.c.id)
+        .options(
+            joinedload(Walk.walk_request).joinedload(WalkRequest.dog),
+            joinedload(Walk.walk_request).joinedload(WalkRequest.shelter),
+            joinedload(Walk.handover),
+            *WALK_REVIEW_LOADERS,
+        )
+        .order_by(page.c.started_at.desc(), page.c.id.desc())
+        .all()
+    )
+    return rows[0].total, [walk for _, walk in rows if walk is not None]
+
+
+def user_walk_history(db, user_id, status, end_reason, limit, offset, *, handover_status=None):
+    """F-12 SC-09: 종료된 산책 이력 목록 (COMPLETED, INTERRUPTED 및 AUTO_TIMEOUT 포함, 시작 시각 최신순)."""
+    conditions = [WalkRequest.user_id == user_id]
+    if status is not None:
+        conditions.append(Walk.status == status)
+    else:
+        conditions.append(Walk.status.in_(FINISHED_WALK_STATUSES))
+    if end_reason is not None:
+        conditions.append(Walk.end_reason == end_reason)
+    if handover_status == "NOT_CONFIRMED":
+        total, walks = pending_handover_page(db, conditions, limit, offset)
+    else:
+        total, walks = walk_page(db, conditions, limit, offset, extra_options=(
+            contains_eager(Walk.walk_request).joinedload(WalkRequest.shelter),
+            joinedload(Walk.handover),
+        ))
+    items = []
+    for walk in walks:
+        shelter = walk.walk_request.shelter
+        items.append(dict(
+            _serialize_user_walk_item(walk),
+            handover_status=walk.handover_status,
+            shelter_name=shelter.name if shelter is not None else None,
+        ))
+    return {
+        "user_id": user_id, "total": total, "limit": limit, "offset": offset,
+        "walks": items,
+    }
+
+
+def _resolve_shelter_id(actor: User, shelter_id: int | None) -> int:
+    if actor.role == UserRole.SHELTER:
+        if not actor.shelter_id:
+            raise HTTPException(403, "소속 보호소가 설정되지 않았습니다.")
+        if shelter_id is not None and shelter_id != actor.shelter_id:
+            raise HTTPException(403, "다른 보호소의 산책 이력은 조회할 수 없습니다.")
+        return actor.shelter_id
+    if actor.role == UserRole.ADMIN:
+        if shelter_id is None:
+            raise HTTPException(422, "관리자는 shelter_id 쿼리 파라미터가 필수입니다.")
+        return shelter_id
+    raise HTTPException(403, "권한이 없습니다.")
+
+
+def shelter_walk_history(db, actor: User, shelter_id: int | None, status: str | None, end_reason: str | None, limit: int, offset: int):
+    """F-12 SC-16: 보호소 산책 이력 목록 (시작 시각 최신순)."""
+    target_shelter_id = _resolve_shelter_id(actor, shelter_id)
+    conditions = [WalkRequest.shelter_id == target_shelter_id]
+    if status is not None:
+        conditions.append(Walk.status == status)
+    else:
+        conditions.append(Walk.status.in_(FINISHED_WALK_STATUSES))
+    if end_reason is not None:
+        conditions.append(Walk.end_reason == end_reason)
+
+    total = (
+        db.query(func.count(Walk.id))
+        .select_from(Walk)
+        .join(WalkRequest, Walk.walk_request_id == WalkRequest.id)
+        .filter(*conditions)
+        .scalar()
+    ) or 0
+
+    rows = (
+        db.query(Walk, Dog.id, Dog.name, User.id, User.nickname)
+        .join(WalkRequest, Walk.walk_request_id == WalkRequest.id)
+        .join(Dog, WalkRequest.dog_id == Dog.id)
+        .join(User, WalkRequest.user_id == User.id)
+        .options(
+            joinedload(Walk.review),
+            joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.tags),
+            joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.shelter),
+        )
+        .filter(*conditions)
+        .order_by(Walk.started_at.desc(), Walk.id.desc())
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
+
+    walk_ids = [walk.id for walk, _, _, _, _ in rows]
+    marker_counts = dict(
+        db.query(WalkMarker.walk_id, func.count(WalkMarker.id))
+        .filter(WalkMarker.walk_id.in_(walk_ids))
+        .group_by(WalkMarker.walk_id)
+        .all()
+    ) if walk_ids else {}
+    incident_counts = dict(
+        db.query(WalkIncident.walk_id, func.count(WalkIncident.id))
+        .filter(WalkIncident.walk_id.in_(walk_ids))
+        .group_by(WalkIncident.walk_id)
+        .all()
+    ) if walk_ids else {}
+
+    items = [{
+        "walk_id": walk.id,
+        "walk_request_id": walk.walk_request_id,
+        "dog": {"id": dog_id, "name": dog_name},
+        "walker": {"id": walker_id, "nickname": walker_nickname},
+        "status": walk.status,
+        "end_reason": walk.end_reason,
+        "started_at": walk.started_at,
+        "ended_at": walk.ended_at,
+        "total_distance_m": walk.total_distance_m,
+        "duration_seconds": walk.duration_seconds,
+        **motion_metrics(walk),
+        "marker_count": marker_counts.get(walk.id, 0),
+        "incident_count": incident_counts.get(walk.id, 0),
+        "rating": walk.review.rating if walk.review is not None else None,
+        "has_review": walk.review is not None,
+        "shelter_review": serialize_shelter_volunteer_review(walk.volunteer_review),
+    } for walk, dog_id, dog_name, walker_id, walker_nickname in rows]
+
+    return {
+        "shelter_id": target_shelter_id,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "walks": items,
+    }
+
+
+def shelter_walk_history_detail(db, walk_id: int, actor: User):
+    """F-12 SC-16: 보호소 산책 이력 단건 상세 (경로 지도, 행동마커, 신고 내역, 평가)."""
+    row = (
+        db.query(Walk, Dog.id, Dog.name, User.id, User.nickname, WalkRequest.shelter_id)
+        .join(WalkRequest, Walk.walk_request_id == WalkRequest.id)
+        .join(Dog, WalkRequest.dog_id == Dog.id)
+        .join(User, WalkRequest.user_id == User.id)
+        .options(
+            joinedload(Walk.review).joinedload(WalkReview.tags),
+            joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.tags),
+            joinedload(Walk.volunteer_review).joinedload(ShelterVolunteerReview.shelter),
+        )
+        .filter(Walk.id == walk_id)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(404, "Walk not found")
+
+    walk, dog_id, dog_name, walker_id, walker_nickname, walk_shelter_id = row
+    if actor.role == UserRole.SHELTER:
+        if not actor.shelter_id or walk_shelter_id != actor.shelter_id:
+            raise HTTPException(403, "다른 보호소의 산책 이력은 조회할 수 없습니다.")
+    elif actor.role != UserRole.ADMIN:
+        raise HTTPException(403, "권한이 없습니다.")
+
+    if walk.status not in FINISHED_WALK_STATUSES:
+        raise HTTPException(409, "종료된 산책만 이력 상세를 조회할 수 있습니다.")
+
+    point_rows = (
+        db.query(WalkPoint.latitude, WalkPoint.longitude)
+        .filter(WalkPoint.walk_id == walk.id)
+        .order_by(WalkPoint.sequence_no.asc())
+        .all()
+    )
+    points = [{"latitude": lat, "longitude": lon} for lat, lon in point_rows]
+
+    raw_markers = (
+        db.query(WalkMarker)
+        .filter(WalkMarker.walk_id == walk.id)
+        .order_by(WalkMarker.recorded_at.asc(), WalkMarker.id.asc())
+        .all()
+    )
+    markers = [WalkMarkerResponse.model_validate(m) for m in raw_markers]
+
+    raw_incidents = (
+        db.query(WalkIncident)
+        .filter(WalkIncident.walk_id == walk.id)
+        .order_by(WalkIncident.occurred_at.asc(), WalkIncident.id.asc())
+        .all()
+    )
+    incidents = [WalkIncidentResponse.model_validate(inc) for inc in raw_incidents]
+
+    review_resp = None
+    if walk.review is not None:
+        review_resp = WalkReviewResponse(
+            id=walk.review.id,
+            walk_id=walk.id,
+            rating=walk.review.rating,
+            condition_tags=[t.tag_code for t in walk.review.tags],
+            comment=walk.review.comment,
+            created_at=walk.review.created_at,
+            updated_at=walk.review.updated_at,
+        )
+
+    return {
+        "walk_id": walk.id,
+        "walk_request_id": walk.walk_request_id,
+        "dog": {"id": dog_id, "name": dog_name},
+        "walker": {"id": walker_id, "nickname": walker_nickname},
+        "status": walk.status,
+        "end_reason": walk.end_reason,
+        "started_at": walk.started_at,
+        "ended_at": walk.ended_at,
+        "total_distance_m": walk.total_distance_m,
+        "duration_seconds": walk.duration_seconds,
+        **motion_metrics(walk),
+        "marker_count": len(markers),
+        "incident_count": len(incidents),
+        "rating": walk.review.rating if walk.review is not None else None,
+        "has_review": walk.review is not None,
+        "shelter_review": serialize_shelter_volunteer_review(walk.volunteer_review),
+        "points": points,
+        "markers": markers,
+        "incidents": incidents,
+        "review": review_resp,
     }

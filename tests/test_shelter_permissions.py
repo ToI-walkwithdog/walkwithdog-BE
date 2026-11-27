@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
-    from app.auth import token_digest
+    from app.auth import UNUSABLE_PASSWORD, token_digest
     from app.database import Base, get_db
     from app.models import AuthSession, Dog, Shelter, User, UserRole
     from app.routers import auth, dogs, personality, shelters, users
@@ -16,9 +16,16 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from privacy_test_support import privacy, use_test_privacy_policy
+
 
 class ShelterPermissionTests(unittest.TestCase):
     def setUp(self):
+        use_test_privacy_policy(self)
+        # GET /users/me reads the server's current pledge version (#45); test-only value.
+        pledge_env = patch.dict(os.environ, {"PLEDGE_CURRENT_VERSION": "pledge-test-v1"})
+        pledge_env.start()
+        self.addCleanup(pledge_env.stop)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         event.listen(self.engine, "connect", lambda connection, _: connection.execute("PRAGMA foreign_keys=ON"))
         Base.metadata.create_all(self.engine)
@@ -33,16 +40,20 @@ class ShelterPermissionTests(unittest.TestCase):
 
         for dependency in (get_db, dogs.get_db, shelters.get_db):
             app.dependency_overrides[dependency] = test_db
+        # The real per-IP limiters stay on; reset so counts never carry over between tests.
+        for limiter in (users.SIGNUP_RATE_LIMITER, users.AVAILABILITY_RATE_LIMITER):
+            limiter.reset()
+            self.addCleanup(limiter.reset)
         self.client = TestClient(app)
         with self.Session.begin() as db:
             db.add_all([Shelter(id=1, name="첫 보호소"), Shelter(id=2, name="다른 보호소")])
             db.flush()
             db.add_all([
-                User(id=1, email="user@example.com", nickname="일반"),
-                User(id=2, email="first@example.com", nickname="담당1", role=UserRole.SHELTER, shelter_id=1),
-                User(id=3, email="second@example.com", nickname="담당2", role=UserRole.SHELTER, shelter_id=2),
-                User(id=4, email="unset@example.com", nickname="미지정", role=UserRole.SHELTER),
-                User(id=5, email="admin@example.com", nickname="관리자", role=UserRole.ADMIN),
+                User(id=1, login_id="user_1", nickname="일반", password=UNUSABLE_PASSWORD),
+                User(id=2, login_id="staff_1", nickname="담당1", password=UNUSABLE_PASSWORD, role=UserRole.SHELTER, shelter_id=1),
+                User(id=3, login_id="staff_2", nickname="담당2", password=UNUSABLE_PASSWORD, role=UserRole.SHELTER, shelter_id=2),
+                User(id=4, login_id="staff_unset", nickname="미지정", password=UNUSABLE_PASSWORD, role=UserRole.SHELTER),
+                User(id=5, login_id="admin_1", nickname="관리자", password=UNUSABLE_PASSWORD, role=UserRole.ADMIN),
                 Dog(id=1, name="첫 강아지", shelter_id=1, description="기존 설명", energy_level=2),
                 Dog(id=2, name="다른 강아지", shelter_id=2, description="기존 설명", energy_level=2),
                 Dog(id=3, name="미지정 강아지", description="기존 설명", energy_level=2),
@@ -66,14 +77,15 @@ class ShelterPermissionTests(unittest.TestCase):
 
     def test_registration_cannot_choose_role_or_shelter(self):
         for role in ("shelter", "admin"):
-            response = self.client.post("/users/", json={"email": f"new-{role}@example.com", "nickname": "새 사용자",
-                                                        "password": "a sufficiently long password", "role": role,
-                                                        "shelter_id": 1})
+            response = self.client.post("/users/", json={"login_id": f"new{role}",
+                                                        "nickname": f"새사용자_{role}",
+                                                        "password": "A sufficiently long password 1!", "role": role,
+                                                        "shelter_id": 1, "privacy": privacy()})
             self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(response.json()["role"], "user")
-            self.assertIsNone(response.json()["shelter_id"])
+            self.assertEqual(response.json()["data"]["role"], "user")
+            self.assertIsNone(response.json()["data"]["shelter_id"])
             with self.Session() as db:
-                user = db.get(User, response.json()["id"])
+                user = db.get(User, response.json()["data"]["id"])
                 self.assertEqual(user.role, UserRole.USER)
                 self.assertIsNone(user.shelter_id)
 
@@ -84,9 +96,10 @@ class ShelterPermissionTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["shelter_id"], shelter_id)
             self.assertEqual(response.json()["role"], "shelter")
+            self.assertEqual(response.json()["login_id"], "staff_unset")
+            self.assertNotIn("email", response.json())
             self.authenticate(4)
-            for path in ("/users/me", "/auth/me"):
-                self.assertEqual(self.client.get(path).json()["shelter_id"], shelter_id)
+            self.assertEqual(self.client.get("/users/me").json()["data"]["shelter_id"], shelter_id)
             self.authenticate(5)
             with self.Session() as db:
                 self.assertEqual(db.get(User, 4).shelter_id, shelter_id)

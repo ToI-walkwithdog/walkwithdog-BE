@@ -1,0 +1,537 @@
+{
+  "version": 1,
+  "migrations": [
+    {
+      "file": "001_matching_snapshot.sql",
+      "sha256": "2e09c343f3c8ec31c36112f74e8961db57800445cf12db3b1619baee614cfe5d",
+      "requires": [],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": [
+        "scripts/prepare_demo_db.py"
+      ]
+    },
+    {
+      "file": "002_auth_sessions.sql",
+      "sha256": "08eeac21665d692f370f4be067adc66b17bdf99c8a96fd7f95658abf17db1299",
+      "requires": [],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": [
+        "scripts/migrate_backend.py"
+      ]
+    },
+    {
+      "file": "003_public_data.sql",
+      "sha256": "6dbc297d738cc1efb864b551b2cbade39103f2cd9fe7634f6e0378c6e94901ec",
+      "requires": [],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": [
+        "scripts/migrate_backend.py"
+      ]
+    },
+    {
+      "file": "004_chat.sql",
+      "sha256": "f04c06c46f31caf28847a51dc317a5d77048808d55ab68f4fe086570f6ef8b80",
+      "requires": [],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": [
+        "scripts/migrate_backend.py"
+      ]
+    },
+    {
+      "file": "005_user_roles.sql",
+      "sha256": "447ddcd31a5dcec3cff94a56c5496bd355e49aeb1e2aa0d96a1bee65f8eeb438",
+      "requires": [],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": [
+        "scripts/migrate_backend.py"
+      ]
+    },
+    {
+      "file": "006_user_shelters.sql",
+      "sha256": "ff822f05e8d274705970d44b1c952d0605518b44488115d7e593766d01e79682",
+      "requires": [
+        "005_user_roles.sql"
+      ],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": [
+        "scripts/migrate_backend.py"
+      ]
+    },
+    {
+      "file": "007_walk_domain.sql",
+      "sha256": "2927f391f91586681a532b216f8de0a1fc8fdabfccada442f16f145739f033c9",
+      "requires": [
+        "006_user_shelters.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": [
+        "scripts/migrate_backend.py"
+      ]
+    },
+    {
+      "file": "008_gps_motion_analysis.sql",
+      "sha256": "dd65a461239c74f364dcd61c407de5e7881aa4fd80a1643db70e1fabd5e59c91",
+      "requires": [
+        "007_walk_domain.sql"
+      ],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": [
+        "scripts/migrate_backend.py"
+      ]
+    },
+    {
+      "file": "009_add_f03_walk_register.sql",
+      "sha256": "4b27981f336de9e46e1c7eb146001842a811cfe42172d3598dedb346c912f325",
+      "requires": [
+        "007_walk_domain.sql"
+      ],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "011_f05_walk_approval.sql",
+      "sha256": "a0e23a82b776a24087129d71d9dd6c1a0e286dbeceadf90cc292c30dc7ad7439",
+      "requires": [
+        "009_add_f03_walk_register.sql"
+      ],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "012_f06_walk_tracking.sql",
+      "sha256": "b3f9f05e2dc41016249a07e81234a55c977fe00fe5c9ea9a2b50b3bba46b8b46",
+      "requires": [
+        "007_walk_domain.sql"
+      ],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "013_f07_incident_report.sql",
+      "sha256": "acc724dcae396e9f3a8c488d6b185036a8ec8554107c59367fa8bc4d194c97ac",
+      "requires": [
+        "007_walk_domain.sql"
+      ],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "014_f08_live_walk.sql",
+      "sha256": "3d933a787a0fc20a228c1354aca79f354aa856222dde335bb171d8ae27c2c8d2",
+      "requires": [],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "015_f09_walk_review.sql",
+      "sha256": "1b7fb7344f4364ea495906a40218f8382a85190d995c2839bc67d0b412b03470",
+      "requires": [
+        "007_walk_domain.sql"
+      ],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "016_onboarding_signup.sql",
+      "sha256": "9236df59410f99c63780e3c33874fb73e29d4785690917f5480416dce207c89c",
+      "requires": [],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": [
+        "scripts/precheck_017_users.sql"
+      ]
+    },
+    {
+      "file": "017_f10_behavior_marker.sql",
+      "sha256": "776f34a0854c424c543d5762b0fb48a29f8c489a72ecfbe8d9bd17b5557f4097",
+      "requires": [
+        "007_walk_domain.sql"
+      ],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "017_remove_user_email.sql",
+      "sha256": "b6915c838cd2c5d7c5e9f20b06c3ea89081e3caed72df5507ef3bf9efe26bb0d",
+      "requires": [
+        "016_onboarding_signup.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": [
+        "scripts/precheck_017_users.sql"
+      ]
+    },
+    {
+      "file": "018_f11_walk_overtime.sql",
+      "sha256": "a7f85bb5db1cc416e3327210cd2fb7b033eb5f943232db9df05ac77fba255710",
+      "requires": [
+        "007_walk_domain.sql"
+      ],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "018_user_consents.sql",
+      "sha256": "a51f03dfa86f1091bd32f25f012580da567518ef456870bf9b2b8aba0a355d2e",
+      "requires": [
+        "017_remove_user_email.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "019_first_walk_guide.sql",
+      "sha256": "477285997f8dda657068f63b17b9628a227da0eca6d80520d4ecb01d2a533f89",
+      "requires": [],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "020_shelter_volunteer_reviews.sql",
+      "sha256": "8d6538544a66130c837d43fefa4504c7dd8221cd5fc9de7f1d7f735a13dba835",
+      "requires": [
+        "007_walk_domain.sql"
+      ],
+      "transaction": "psql-single",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "022_regions.sql",
+      "sha256": "15502297302ef579b5a6b5e1f4faceefd8233a7aba5067cfedebb3e3dbd1d29f",
+      "requires": [],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "023_user_pledge_acknowledgements.sql",
+      "sha256": "0074ee97ec83ed6f1b932b3020e60f860d381d04f55717f3be79b9f76e0f9e00",
+      "requires": [
+        "018_user_consents.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "024_onboarding_basic_info.sql",
+      "sha256": "5834037470b5bd6a3990f7b435db3eea5d9853afc00c36f71759e9ddfd13ec05",
+      "requires": [
+        "023_user_pledge_acknowledgements.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "025_onboarding_dog_experience.sql",
+      "sha256": "127a0e0712b7d9af39c3488e8cc664eda8ff0ce9adb024360c3b07f6b4eb4e52",
+      "requires": [
+        "024_onboarding_basic_info.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "026_onboarding_walking_routine.sql",
+      "sha256": "e1ec41874701a099b6e2d63fd6854fe8fa8a88ffcd55f29b586d8dd78db4e029",
+      "requires": [
+        "022_regions.sql",
+        "025_onboarding_dog_experience.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "027_onboarding_agreements.sql",
+      "sha256": "61938ded8fdfa86e818a82c7053e754d3027141ec946f9096fcc80e02d16573f",
+      "requires": [
+        "018_user_consents.sql",
+        "026_onboarding_walking_routine.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "028_date_slot_booking.sql",
+      "sha256": "6eb1bcfaaf96419f3e3cccb0a9da4eb64dce6181d8db0c68de80e5f52430a0e4",
+      "requires": [
+        "009_add_f03_walk_register.sql",
+        "011_f05_walk_approval.sql",
+        "022_regions.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "029_reservation_cancellation.sql",
+      "sha256": "b35550eda7dc707ab7b59d035aa17052ee8d42f092ed724f3760062b9fcd2b9b",
+      "requires": [
+        "028_date_slot_booking.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "030_shelter_code_verification.sql",
+      "sha256": "fdc7d2818ac1320238e4badd09ff4cd397a64a502ac5daced8db7b5abcab4f48",
+      "requires": [
+        "029_reservation_cancellation.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "031_walk_marker_idempotency.sql",
+      "sha256": "0adfa49cc2aacebcfca7f887ea66785f1e6a7cd2da3c68bfcbf8960dc6d68ab9",
+      "requires": [
+        "030_shelter_code_verification.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "032_walk_handovers.sql",
+      "sha256": "33c58984dabb9ac1b1058e43ac128b27959cf1301142a9b8673b6a3d34711a2d",
+      "requires": [
+        "031_walk_marker_idempotency.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "033_walk_private_memos.sql",
+      "sha256": "fa07a855f95d034703683899c55be6a5f8265e88ef6e59234a2bc55752ff7b6d",
+      "requires": [
+        "032_walk_handovers.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "034_volunteer_level_up.sql",
+      "sha256": "a18d5811587de51afc802525df0f3226f32b0ef05ce37f2ec53eb1b02e799017",
+      "requires": [
+        "033_walk_private_memos.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "035_profile_phone_change.sql",
+      "sha256": "1ce26c1964e50dcca914b9a2c5bad9ff8ef082dbf9754010abc7f8c5d8fb964a",
+      "requires": [
+        "024_onboarding_basic_info.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "036_walk_preferences.sql",
+      "sha256": "57df5749335bccbe7fe379c708aa697f81b4016daf02cdd6bee4b4def2e699d6",
+      "requires": [],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    },
+    {
+      "file": "037_phone_verification_suppressed.sql",
+      "sha256": "13cb7878a3daca395acf28df6f931ebd367995afba376d63521e65ef2f9162c3",
+      "requires": [
+        "024_onboarding_basic_info.sql"
+      ],
+      "transaction": "file",
+      "environments": [
+        "local-test",
+        "dev",
+        "production"
+      ],
+      "prechecks": []
+    }
+  ],
+  "reservations": [
+    {
+      "file": "010_add_f04_walk_booking.sql",
+      "state": "branch-only",
+      "source": "origin/feature/f-04-walk-booking",
+      "requires": [
+        "009_add_f03_walk_register.sql"
+      ]
+    }
+  ]
+}

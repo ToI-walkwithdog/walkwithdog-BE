@@ -127,16 +127,26 @@ class WalkRecordingTests(MotionRecordingAssertions, WalkFixture, unittest.TestCa
                              ("longitude", "Infinity"), ("latitude", True), ("accuracy_m", -1),
                              ("accuracy_m", "NaN"), ("accuracy_m", True)):
             self.assertEqual(self.upload(walk["id"], [{**self.point(), field: value}]).status_code, 422)
-        self.assertEqual(self.upload(walk["id"], [self.point(), self.point(1, 10, accuracy_m=51)]).status_code, 409)
-        self.assertEqual(self.rows(WalkPoint), [])
-        self.assertEqual(self.upload(walk["id"], [self.point(accuracy_m=None), self.point(1, 10, accuracy_m=50)]).status_code, 200)
+        self.assertEqual(self.upload(walk["id"], [self.point(), self.point(1, 10, accuracy_m=51)]).status_code, 200)
+        self.assertEqual(len(self.rows(WalkPoint)), 2)
+        self.assertEqual(self.upload(walk["id"], [self.point(2, 20, accuracy_m=None), self.point(3, 30, accuracy_m=50)]).status_code, 200)
+        self.assertEqual(len(self.rows(WalkPoint)), 4)
 
     def test_teleport_rejected_and_corrected_retry_accepted(self):
+        """Issue #89 changed this contract (the test ID is kept for the baseline inventory): a GPS
+        jump is stored as a raw observation instead of rejecting the batch, later normal batches
+        are accepted, and the jump is still left out of the confirmed distance."""
         walk = self.begin()
         self.advance(120)
-        self.assertEqual(self.upload(walk["id"], [self.point(), self.point(1, 1, longitude=1)]).status_code, 409)
-        self.assertEqual(self.rows(WalkPoint), [])
-        self.assertEqual(self.upload(walk["id"], [self.point(), self.point(1, 10, longitude="0.0001")]).status_code, 200)
+        jump = self.upload(walk["id"], [self.point(), self.point(1, 1, longitude=1)])
+        self.assertEqual(jump.status_code, 200, jump.text)
+        self.assertEqual((jump.json()["accepted_count"], jump.json()["last_sequence_no"]), (2, 1))
+        self.assertEqual(len(self.rows(WalkPoint)), 2)
+        self.assertEqual(self.upload(walk["id"], [self.point(2, 10, longitude=1),
+                                                 self.point(3, 20, longitude="1.0001")]).status_code, 200)
+        ended = self.end(walk["id"])
+        self.assertEqual(ended.status_code, 200, ended.text)
+        self.assertLess(float(ended.json()["total_distance_m"]), 20)  # only the 1.0000 -> 1.0001 step counts
 
     def test_precision_canonicalization_and_equivalent_offset_retry(self):
         walk = self.begin()
@@ -230,17 +240,20 @@ class WalkRecordingTests(MotionRecordingAssertions, WalkFixture, unittest.TestCa
     def test_incident_permissions_nullable_location_and_server_open_status(self):
         walk = self.begin()
         self.advance(120)
-        for user in (1, 3, 5):
-            result = self.incident(walk["id"], user)
+        for user, inc_type in ((1, "INJURY"), (3, "LOST_DOG"), (5, "SAFETY_THREAT")):
+            result = self.incident(walk["id"], user, incident_type=inc_type)
             self.assertEqual(result.status_code, 201, result.text)
             self.assertEqual((result.json()["reported_by"], result.json()["status"]), (user, "OPEN"))
             self.assertIsNone(result.json()["latitude"])
         for user in (None, 2, 4, 7):
             self.assertEqual(self.incident(walk["id"], user).status_code, 401 if user is None else 403)
-        for extra in ({"description": " "}, {"latitude": 0}, {"incident_type": "UNKNOWN"},
+        for extra in ({"latitude": 0}, {"incident_type": "UNKNOWN"},
                       {"reported_by": 5}, {"status": "RESOLVED"}, {"occurred_at": "2030-01-07T00:00"}):
             self.assertEqual(self.incident(walk["id"], **extra).status_code, 422)
-        self.assertEqual(self.incident(walk["id"], latitude=0, longitude=0).status_code, 201)
+        blank_desc_resp = self.incident(walk["id"], description=" ", incident_type="POOP_NO_BAG")
+        self.assertEqual(blank_desc_resp.status_code, 201)
+        self.assertEqual(blank_desc_resp.json()["description"], "똥 쌈(배변봉투 없음)")
+        self.assertEqual(self.incident(walk["id"], latitude=0, longitude=0, incident_type="ATE_FOREIGN_OBJECT").status_code, 201)
         self.assertEqual(self.incident(walk["id"], seconds=121).status_code, 409)
 
     def test_staff_can_interrupt_but_not_claim_normal_completion(self):
@@ -272,7 +285,7 @@ class WalkRecordingTests(MotionRecordingAssertions, WalkFixture, unittest.TestCa
         self.upload(walk["id"], [self.point(), self.point(1, 10), self.point(2, 20)])
         for _ in range(3):
             self.marker(walk["id"])
-            self.incident(walk["id"])
+            self.incident(walk["id"], confirm_duplicate=True)
         statements = []
 
         def record(conn, cursor, statement, params, context, executemany):

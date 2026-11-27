@@ -1,5 +1,12 @@
-from pydantic import AliasChoices, BaseModel, Field, field_validator, EmailStr
-from typing import Optional
+from datetime import datetime
+
+from pydantic import AliasChoices, BaseModel, Field, field_validator
+from typing import ClassVar, Literal, Optional
+from app.account_rules import (REQUIRED_MESSAGES, normalize_login_id, normalize_login_identifier,
+                               normalize_nickname, require_login_password, validate_password)
+from app.privacy_policy import INVALID_PRIVACY_PAYLOAD_MESSAGE, PrivacyInput, parse_privacy
+from app.pledge_service import PLEDGE_VERSION_REQUIRED_MESSAGE, normalize_pledge_version
+from app.api_contract import as_field_error
 from app.models import UserRole
 from app.walk_schemas import WalkSettingsResponse
 from app.survey_codes import (
@@ -8,23 +15,92 @@ from app.survey_codes import (
 )
 
 
-class UserCreate(BaseModel):
-    email: EmailStr = Field(max_length=100)
-    nickname: str = Field(min_length=1, max_length=50)
-    password: str = Field(min_length=15, max_length=128)
+class SignupRequest(BaseModel):
+    """Account fields and the privacy confirmation (Issue #31).
 
-    @field_validator("nickname")
+    Email is not collected. Unknown fields, including a leftover `email`, are ignored.
+    """
+    login_id: str = Field(description="영문 대소문자, 숫자 4~20자. 앞뒤 공백 제거 후 소문자로 저장",
+                          examples=["walker04"])
+    nickname: str = Field(description="한글, 영문, 숫자, 밑줄(_) 3~20자. 앞뒤 공백 제거, NFC 정규화",
+                          examples=["산책왕"])
+    password: str = Field(description="15~128자, 영문 대문자, 소문자, 숫자, 특수문자 각 1개 이상. 변형 없이 해시",
+                          examples=["WalkTogether2026!"])
+    privacy: PrivacyInput = Field(
+        description="개인정보 확인값. document_version은 서버 현재 버전과 같아야 하고 age_14_plus_confirmed는 true. "
+                    "동의 필드는 JSON boolean이며 서버에서 활성화한 항목 중 true인 것만 기록",
+        examples=[{"document_version": "privacy-v1", "collection_use_agreed": True, "age_14_plus_confirmed": True}])
+
+    # A missing field never reaches the validators; ContractRoute uses this for privacy.
+    contract_required_errors: ClassVar[dict] = {"privacy": ("INVALID_PRIVACY_PAYLOAD", INVALID_PRIVACY_PAYLOAD_MESSAGE)}
+
+    @field_validator("login_id", mode="before")
     @classmethod
-    def nonempty_nickname(cls, value):
-        value = value.strip()
-        if not value:
-            raise ValueError("닉네임이 필요합니다.")
-        return value
+    def check_login_id(cls, value):
+        return as_field_error(normalize_login_id, value)
+
+    @field_validator("nickname", mode="before")
+    @classmethod
+    def check_nickname(cls, value):
+        return as_field_error(normalize_nickname, value)
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def check_password(cls, value):
+        return as_field_error(validate_password, value)
+
+    @field_validator("privacy", mode="before")
+    @classmethod
+    def check_privacy(cls, value):
+        return as_field_error(parse_privacy, value)
+
+
+class SignupUserData(BaseModel):
+    id: int
+    login_id: str
+    nickname: str
+    role: UserRole
+    shelter_id: int | None = None
+
+
+class SignupResponse(BaseModel):
+    code: Literal["OK"] = "OK"
+    data: SignupUserData
+    message: str
+
+
+class AvailabilityData(BaseModel):
+    available: bool
+
+
+class AvailabilityResponse(BaseModel):
+    code: Literal["OK"] = "OK"
+    data: AvailabilityData
+    message: str
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr = Field(max_length=100)
-    password: str = Field(min_length=1, max_length=128)
+    """Login ID only; email login was removed with Issue #32."""
+    identifier: str = Field(description="로그인 아이디. 앞뒤 공백 제거 후 영문 소문자로 비교, 최대 100자",
+                            examples=["walker04"])
+    password: str = Field(description="비밀번호. 로그인에서는 가입용 복잡도 규칙을 적용하지 않음",
+                          examples=["WalkTogether2026!"])
+
+    # A missing field never reaches the validators below; ContractRoute uses these.
+    contract_required_errors: ClassVar[dict] = {
+        field: (code, REQUIRED_MESSAGES[code])
+        for field, code in (("identifier", "IDENTIFIER_REQUIRED"), ("password", "PASSWORD_REQUIRED"))
+    }
+
+    @field_validator("identifier", mode="before")
+    @classmethod
+    def check_identifier(cls, value):
+        return as_field_error(normalize_login_identifier, value)
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def check_password(cls, value):
+        return as_field_error(require_login_password, value)
 
 
 class TokenResponse(BaseModel):
@@ -33,15 +109,80 @@ class TokenResponse(BaseModel):
     expires_in: int
 
 
+class LoginResponse(BaseModel):
+    code: Literal["OK"] = "OK"
+    data: TokenResponse
+    message: str
+
+
+class EmptyContractResponse(BaseModel):
+    code: Literal["OK"] = "OK"
+    data: dict = Field(default_factory=dict, examples=[{}])
+    message: str
+
+
 class UserResponse(BaseModel):
     id: int
-    email: str
+    login_id: str
     nickname: str
     role: UserRole = UserRole.USER
     shelter_id: int | None = None
 
     class Config:
         from_attributes = True
+
+
+class MeData(UserResponse):
+    """GET /users/me (#45). Basic fields plus onboarding progress computed from stored records.
+
+    General users always get booleans for the step fields and onboarding_completed. Shelter and
+    admin accounts get null for step1/2/3_completed, onboarding_completed and next_onboarding_step
+    (not onboarding targets; null is not a home-entry signal for them) and keep the pledge fields.
+    """
+    account_status: Literal["ACTIVE", "AGE_REVIEW_REQUIRED"]
+    step1_completed: bool | None = Field(description="volunteer_onboarding_basics 기록 존재")
+    step2_completed: bool | None = Field(description="volunteer_onboarding_experiences 기록 존재(경험 없음 포함)")
+    step3_completed: bool | None = Field(description="volunteer_onboarding_routines 기록 존재")
+    pledge_completed: bool = Field(description="서버 현재 서약 버전의 확인 기록 존재")
+    current_pledge_version: str
+    pledge_acknowledged_at: str | None = Field(description="현재 버전 서약 확인 시각(UTC ISO 8601), 없으면 null")
+    onboarding_completed: bool | None = Field(description="ACTIVE이고 현재 서약과 Step 1~3이 모두 완료")
+    next_onboarding_step: Literal["AGE_REVIEW", "PLEDGE", "BASIC_INFORMATION", "PET_EXPERIENCE",
+                                  "WALKING_ROUTINE"] | None
+
+
+class MeResponse(BaseModel):
+    """GET /users/me."""
+    code: Literal["OK"] = "OK"
+    data: MeData
+    message: str
+
+
+class PledgeRequest(BaseModel):
+    """PUT /users/me/pledge (Issue #33). No user ID, time or agreement flag is accepted."""
+    pledge_version: str = Field(description="화면에 표시한 서약 문서 버전. 서버 현재 버전과 같아야 함, 최대 32자",
+                                examples=["pledge-v1"])
+
+    # A missing field or unreadable body never reaches the validator; ContractRoute uses this.
+    contract_required_errors: ClassVar[dict] = {
+        "pledge_version": ("PLEDGE_VERSION_REQUIRED", PLEDGE_VERSION_REQUIRED_MESSAGE)}
+
+    @field_validator("pledge_version", mode="before")
+    @classmethod
+    def check_pledge_version(cls, value):
+        return as_field_error(normalize_pledge_version, value)
+
+
+class PledgeData(BaseModel):
+    pledge_completed: bool
+    pledge_version: str
+    acknowledged_at: datetime
+
+
+class PledgeResponse(BaseModel):
+    code: Literal["OK"] = "OK"
+    data: PledgeData
+    message: str
 
 
 class UserShelterUpdate(BaseModel):
@@ -56,6 +197,7 @@ class ShelterCreate(BaseModel):
     phone: str | None = None
     address: str | None = None
     website_url: str | None = None
+    region_code: str | None = None
 
 
 class ShelterResponse(ShelterCreate):
@@ -63,6 +205,12 @@ class ShelterResponse(ShelterCreate):
 
     class Config:
         from_attributes = True
+
+
+class ShelterRegionPatch(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    region_code: str
 
 
 class DogCreate(BaseModel):

@@ -7,50 +7,120 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
+    from app.auth import UNUSABLE_PASSWORD
     from app.models import Base, Dog, Shelter, User
     from app.walk_models import (
-        WALK_MODELS, DogWalkSetting, DogWalkSlot, DogTraitSummary, VolunteerProfile,
+        WALK_MODELS, DogWalkSetting, DogWalkSlot, DogTraitSummary,
+        ShelterVolunteerReview, ShelterVolunteerReviewTag, VolunteerProfile,
         Walk, WalkIncident, WalkMarker, WalkPoint, WalkRequest, WalkReview,
     )
+
+CORE_007_MODELS = (
+    DogWalkSetting, DogWalkSlot, WalkRequest, Walk, WalkPoint,
+    WalkMarker, WalkReview, DogTraitSummary, VolunteerProfile, WalkIncident,
+)
+REVIEW_020_MODELS = (
+    ShelterVolunteerReview, ShelterVolunteerReviewTag,
+)
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import configure_mappers, sessionmaker
 from sqlalchemy.schema import CreateIndex, CreateTable
+from sqlalchemy.sql.ddl import sort_tables
 
 from scripts.migrate_backend import check_version, migrate
 from scripts.prepare_demo_db import PreparationError, ROOT
-from scripts.walk_schema import CONTRACT, MOTION_CONTRACT, compare_table
+from scripts.walk_schema import CONTRACT, MOTION_CONTRACT, WALK_007_TABLES, compare_table
 
 
 class WalkMetadataTests(unittest.TestCase):
     def test_all_ten_models_register_with_existing_base_and_relationships(self):
         configure_mappers()
-        self.assertEqual(len(WALK_MODELS), 10)
-        self.assertTrue(all(model.metadata is Base.metadata for model in WALK_MODELS))
-        self.assertEqual(set(json.loads(CONTRACT.read_text())), {m.__tablename__ for m in WALK_MODELS})
-        for model in WALK_MODELS:
+        self.assertEqual(len(CORE_007_MODELS), 10)
+        self.assertEqual(set(WALK_MODELS), set(CORE_007_MODELS) | set(REVIEW_020_MODELS))
+        self.assertTrue(all(model.metadata is Base.metadata for model in CORE_007_MODELS))
+        self.assertEqual(set(json.loads(CONTRACT.read_text())), {m.__tablename__ for m in CORE_007_MODELS})
+        self.assertEqual(set(WALK_007_TABLES), {m.__tablename__ for m in CORE_007_MODELS})
+        for model in CORE_007_MODELS:
             for relationship in model.__mapper__.relationships:
                 self.assertIsNotNone(relationship.back_populates)
             for foreign in model.__table__.foreign_keys:
                 self.assertEqual(foreign.ondelete, "NO ACTION")
 
-    def test_checked_in_sql_exactly_matches_orm_postgresql_ddl(self):
-        names = {m.__tablename__ for m in WALK_MODELS}
-        source = (ROOT / "migrations/007_walk_domain.sql").read_text()
+    @staticmethod
+    def historical_007_ddl():
+        """Compile the current ORM, projected to the immutable 007 schema."""
+        names = {m.__tablename__ for m in CORE_007_MODELS}
         statements = []
         motion = json.loads(MOTION_CONTRACT.read_text())
-        additions = {c["name"] for c in motion["columns"]} | {"CONSTRAINT " + n for n in motion["constraints"]}
-        for table in Base.metadata.sorted_tables:
+        post_007_columns = {c["name"] for c in motion["columns"]} | {
+            "rejection_reason_code", "last_latitude", "last_longitude",
+            "last_accuracy_m", "last_point_recorded_at", "last_point_received_at",
+            "end_reason", "client_report_id", "acknowledged_at", "acknowledged_by",
+            "rating", "comment", "location_source",
+            "planned_duration_minutes", "expected_end_at",
+            "size_code", "difficulty_score", "max_walk_minutes", "date_slot_id", "idempotency_key",
+            "request_fingerprint", "creation_receipt",
+            "cancel_reason_code", "cancelled_at", "cancelled_by", "cancelled_actor_role",
+            "client_marker_id", "position_recorded_at",  # Issue #89 (031); request_fingerprint is above
+            "handover_required",  # Issue #93 (032)
+        }
+        post_007_constraints = {n for n in motion["constraints"]} | {
+            "ck_walk_last_coordinate_pair", "ck_walk_last_latitude", "ck_walk_last_longitude",
+            "ck_walk_last_accuracy", "ck_walk_end_reason", "ck_incident_acknowledgement",
+            "ck_walk_review_rating", "ck_location_source", "ck_marker_other_memo",
+            "ck_walk_planned_duration", "ck_walk_expected_end_order",
+            "ck_size_code", "ck_walk_difficulty_score", "ck_walk_max_minutes",
+            "fk_walk_requests_date_slot", "ck_walk_request_receipt",
+            "fk_walk_requests_cancelled_by", "ck_cancel_reason_code", "ck_cancel_actor_role",
+            "ck_walk_request_cancellation", "ck_marker_client_key",
+        }
+        post_007_indexes = {
+            "uq_walk_incidents_reported_client_report_id", "ix_walk_incidents_unacknowledged",
+            "ix_walk_requests_date_slot", "uq_walk_requests_user_idempotency", "uq_walk_requests_occupied_date_slot",
+            "uq_walk_markers_client_marker_id",
+        }
+        historical_order = sort_tables(sorted(Base.metadata.tables.values(), key=lambda table: table.key),
+                                       skip_fn=lambda fk: fk.constraint.name in
+                                       {"fk_shelters_region_code", "fk_walk_requests_date_slot"})
+        for table in historical_order:
             if table.name in names:
                 ddl = str(CreateTable(table, if_not_exists=True).compile(dialect=postgresql.dialect())).strip()
-                if table.name == "walks":
-                    # Compare the immutable 007 projection, excluding reviewed 008 additions.
-                    ddl = "\n".join(l for l in ddl.splitlines() if not any(l.strip().startswith(n + " ") for n in additions))
+                # Compare the immutable 007 projection, excluding subsequent migration additions.
+                ddl = "\n".join(l for l in ddl.splitlines()
+                                if not any(l.strip().startswith(n + " ") for n in post_007_columns)
+                                and not any(l.strip().startswith(f"CONSTRAINT {c} ") for c in post_007_constraints)
+                                and not any(l.strip().startswith(f"FOREIGN KEY({c})") for c in post_007_columns))
+                if "INTERMEDIATE" in ddl:
+                    ddl = ddl.replace(", 'INTERMEDIATE'", "")
+                for new_type in ("POOP_NO_BAG", "ATE_FOREIGN_OBJECT", "ABNORMAL_BEHAVIOR"):
+                    ddl = ddl.replace(f", '{new_type}'", "")
+                # F-10 (017): marker types CROSSWALK_WAIT/OTHER; OTHER also exists in the 007 incident types
+                ddl = ddl.replace(", 'CROSSWALK_WAIT', 'OTHER'", "")
+                if "rating IS NOT NULL OR " in ddl:
+                    ddl = ddl.replace("rating IS NOT NULL OR ", "")
+                # Clean up any trailing comma before closing parenthesis
+                lines = ddl.splitlines()
+                last_item_idx = None
+                for idx, l in enumerate(lines):
+                    if l.strip().startswith(")"):
+                        break
+                    if l.strip():
+                        last_item_idx = idx
+                if last_item_idx is not None and lines[last_item_idx].rstrip().endswith(","):
+                    lines[last_item_idx] = lines[last_item_idx].rstrip().rstrip(",")
+                ddl = "\n".join(lines)
                 statements.append(ddl + ";")
                 statements.extend(str(CreateIndex(i, if_not_exists=True).compile(dialect=postgresql.dialect())) + ";"
-                                  for i in sorted(table.indexes, key=lambda i: i.name))
+                                  for i in sorted(table.indexes, key=lambda i: i.name)
+                                  if i.name not in post_007_indexes)
+        return statements
+
+    def test_checked_in_sql_exactly_matches_orm_postgresql_ddl(self):
+        source = (ROOT / "migrations/007_walk_domain.sql").read_text()
+        statements = self.historical_007_ddl()
         actual = "\n".join(line for line in source.splitlines() if not line.startswith("--"))
         expected = "BEGIN;\n\n" + "\n\n".join(statements) + "\n\nCOMMIT;"
         self.assertEqual([l.rstrip() for l in actual.strip().splitlines()],
@@ -59,13 +129,84 @@ class WalkMetadataTests(unittest.TestCase):
 
     def test_types_nullability_defaults_and_all_constraint_contracts(self):
         contract = json.loads(CONTRACT.read_text())
-        for model in WALK_MODELS:
+        for model in CORE_007_MODELS:
             table = model.__table__
             snapshot = contract[table.name]
+            if table.name == "dog_walk_settings":
+                snapshot["columns"].extend([
+                    {"name": "size_code", "type": "character varying(10)", "not_null": False, "default": None},
+                    {"name": "difficulty_score", "type": "numeric(2,1)", "not_null": False, "default": None},
+                    {"name": "max_walk_minutes", "type": "integer", "not_null": False, "default": None},
+                ])
+                snapshot["constraints"].update({"ck_size_code": None, "ck_walk_difficulty_score": None,
+                                                "ck_walk_max_minutes": None})
+            if table.name == "walk_requests":
+                snapshot["columns"].extend([
+                    {"name": "rejection_reason_code", "type": "character varying(30)", "not_null": False, "default": None},
+                    {"name": "date_slot_id", "type": "integer", "not_null": False, "default": None},
+                    {"name": "idempotency_key", "type": "uuid", "not_null": False, "default": None},
+                    {"name": "request_fingerprint", "type": "character varying(64)", "not_null": False, "default": None},
+                    {"name": "creation_receipt", "type": "json", "not_null": False, "default": None},
+                    {"name": "cancel_reason_code", "type": "character varying(20)", "not_null": False, "default": None},
+                    {"name": "cancelled_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                    {"name": "cancelled_by", "type": "integer", "not_null": False, "default": None},
+                    {"name": "cancelled_actor_role", "type": "character varying(10)", "not_null": False, "default": None},
+                ])
+                snapshot["constraints"].update({"fk_walk_requests_date_slot": None, "ck_walk_request_receipt": None})
+                snapshot["constraints"].update({
+                    "fk_walk_requests_cancelled_by": None, "ck_cancel_reason_code": None,
+                    "ck_cancel_actor_role": None, "ck_walk_request_cancellation": None,
+                })
+                snapshot["indexes"].update({"ix_walk_requests_date_slot": None, "uq_walk_requests_user_idempotency": None,
+                                            "uq_walk_requests_occupied_date_slot": None})
+            if table.name == "walk_reviews":
+                snapshot["columns"].extend([
+                    {"name": "rating", "type": "integer", "not_null": False, "default": None},
+                    {"name": "comment", "type": "character varying(100)", "not_null": False, "default": None},
+                ])
+                snapshot["constraints"].update({"ck_walk_review_rating": None})
+            if table.name == "walk_markers":
+                snapshot["columns"].append({"name": "location_source", "type": "character varying(12)", "not_null": True, "default": "'CURRENT'::character varying"})
+                snapshot["constraints"].update({"ck_location_source": None, "ck_marker_other_memo": None})
+                snapshot["columns"].extend([  # Issue #89 (031)
+                    {"name": "client_marker_id", "type": "uuid", "not_null": False, "default": None},
+                    {"name": "request_fingerprint", "type": "character varying(64)", "not_null": False, "default": None},
+                    {"name": "position_recorded_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                ])
+                snapshot["constraints"].update({"ck_marker_client_key": None})
+                snapshot["indexes"].update({"uq_walk_markers_client_marker_id": None})
+            if table.name == "walk_incidents":
+                snapshot["columns"].extend([
+                    {"name": "client_report_id", "type": "character varying(36)", "not_null": False, "default": None},
+                    {"name": "acknowledged_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                    {"name": "acknowledged_by", "type": "integer", "not_null": False, "default": None},
+                ])
+                snapshot["constraints"].update({"ck_incident_acknowledgement": None})
+                snapshot["indexes"].update({"uq_walk_incidents_reported_client_report_id": None, "ix_walk_incidents_unacknowledged": None})
             if table.name == "walks":
                 motion = json.loads(MOTION_CONTRACT.read_text())
                 snapshot["columns"].extend(motion["columns"])
                 snapshot["constraints"].update(motion["constraints"])
+                snapshot["columns"].extend([
+                    {"name": "last_latitude", "type": "numeric(9,6)", "not_null": False, "default": None},
+                    {"name": "last_longitude", "type": "numeric(9,6)", "not_null": False, "default": None},
+                    {"name": "last_accuracy_m", "type": "numeric(10,2)", "not_null": False, "default": None},
+                    {"name": "last_point_recorded_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                    {"name": "last_point_received_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                    {"name": "end_reason", "type": "character varying(20)", "not_null": False, "default": None},
+                    {"name": "planned_duration_minutes", "type": "integer", "not_null": False, "default": None},
+                    {"name": "expected_end_at", "type": "timestamp with time zone", "not_null": False, "default": None},
+                    {"name": "handover_required", "type": "boolean", "not_null": True, "default": "false"},
+                ])
+                snapshot["constraints"].update({
+                    "ck_walk_last_coordinate_pair": None,
+                    "ck_walk_last_latitude": None,
+                    "ck_walk_last_longitude": None,
+                    "ck_walk_last_accuracy": None,
+                    "ck_walk_end_reason": None,
+                    "ck_walk_planned_duration": None,
+                    "ck_walk_expected_end_order": None,
+                })
             expected_columns = {c["name"]: c for c in snapshot["columns"]}
             self.assertEqual(set(expected_columns), set(table.columns.keys()))
             for column in table.columns:
@@ -83,6 +224,110 @@ class WalkMetadataTests(unittest.TestCase):
             for index in table.indexes:
                 self.assertIn(index.name, snapshot["indexes"])
 
+    def test_020_shelter_volunteer_review_schema_contract(self):
+        import re
+        configure_mappers()
+        self.assertTrue(all(model.metadata is Base.metadata for model in REVIEW_020_MODELS))
+        sql_text = (ROOT / "migrations/020_shelter_volunteer_reviews.sql").read_text(encoding="utf-8")
+        sql_body = "\n".join(line for line in sql_text.splitlines() if not line.strip().startswith("--"))
+
+        table_blocks = dict(re.findall(
+            r"CREATE TABLE IF NOT EXISTS\s+([a-z0-9_]+)\s*\((.*?)\n\);",
+            sql_body,
+            flags=re.DOTALL,
+        ))
+        self.assertEqual(set(table_blocks), {m.__tablename__ for m in REVIEW_020_MODELS})
+
+        sql_indexes = {
+            name: (tbl, [c.strip() for c in cols.split(",")])
+            for name, tbl, cols in re.findall(
+                r"CREATE INDEX IF NOT EXISTS\s+([a-z0-9_]+)\s+ON\s+([a-z0-9_]+)\s*\(([^)]+)\);",
+                sql_body,
+            )
+        }
+
+        expected_columns = {
+            "shelter_volunteer_reviews": {
+                "id": ("INTEGER", False, False),
+                "walk_id": ("INTEGER", False, False),
+                "shelter_id": ("INTEGER", False, False),
+                "volunteer_user_id": ("INTEGER", False, False),
+                "reviewed_by": ("INTEGER", False, False),
+                "rating": ("NUMERIC(2, 1)", False, False),
+                "comment": ("VARCHAR(500)", True, False),
+                "created_at": ("TIMESTAMP WITH TIME ZONE", False, True),
+                "updated_at": ("TIMESTAMP WITH TIME ZONE", False, True),
+            },
+            "shelter_volunteer_review_tags": {
+                "id": ("INTEGER", False, False),
+                "review_id": ("INTEGER", False, False),
+                "tag_code": ("VARCHAR(30)", False, False),
+            },
+        }
+        expected_fks = {
+            "shelter_volunteer_reviews": {
+                ("walk_id", "walks.id", "NO ACTION"),
+                ("shelter_id", "shelters.id", "NO ACTION"),
+                ("volunteer_user_id", "users.id", "NO ACTION"),
+                ("reviewed_by", "users.id", "NO ACTION"),
+            },
+            "shelter_volunteer_review_tags": {
+                ("review_id", "shelter_volunteer_reviews.id", "CASCADE"),
+            },
+        }
+        expected_uniques = {
+            "shelter_volunteer_reviews": {"uq_shelter_volunteer_reviews_walk": ("walk_id",)},
+            "shelter_volunteer_review_tags": {"uq_shelter_volunteer_review_tags_review_code": ("review_id", "tag_code")},
+        }
+        expected_checks = {
+            "shelter_volunteer_reviews": {
+                "ck_shelter_volunteer_review_rating": "rating >= 0.5 AND rating <= 5.0 AND CAST(ROUND(rating * 10) AS INTEGER) % 5 = 0",
+                "ck_shelter_volunteer_review_comment_len": "comment IS NULL OR length(comment) <= 500",
+            },
+            "shelter_volunteer_review_tags": {
+                "ck_shelter_volunteer_review_tag_code": "tag_code IN ('PUNCTUALITY', 'SAFETY_CARE', 'CONSIDERATE', 'DISAPPOINTING')",
+            },
+        }
+
+        orm_indexes = {}
+        for model in REVIEW_020_MODELS:
+            table = model.__table__
+            ddl = str(CreateTable(table, if_not_exists=True).compile(dialect=postgresql.dialect()))
+            self.assertEqual(set(table.columns.keys()), set(expected_columns[table.name]))
+            for col_name, (col_type, nullable, has_default) in expected_columns[table.name].items():
+                col = table.columns[col_name]
+                self.assertEqual(col.nullable, nullable, f"{table.name}.{col_name} nullable mismatch")
+                self.assertEqual(col.server_default is not None, has_default, f"{table.name}.{col_name} default mismatch")
+                self.assertIn(f"{col_name} {col_type}", ddl)
+                self.assertIn(col_name, table_blocks[table.name])
+
+            actual_fks = {
+                (fk.parent.name, fk.target_fullname, fk.ondelete)
+                for fk in table.foreign_keys
+            }
+            self.assertEqual(actual_fks, expected_fks[table.name])
+
+            actual_uniques = {
+                c.name: tuple(col.name for col in c.columns)
+                for c in table.constraints
+                if c.__class__.__name__ == "UniqueConstraint"
+            }
+            self.assertEqual(actual_uniques, expected_uniques[table.name])
+
+            actual_checks = {
+                c.name: str(c.sqltext)
+                for c in table.constraints
+                if c.__class__.__name__ == "CheckConstraint"
+            }
+            self.assertEqual(actual_checks, expected_checks[table.name])
+            for expr in expected_checks[table.name].values():
+                self.assertIn(expr, table_blocks[table.name])
+
+            for idx in table.indexes:
+                orm_indexes[idx.name] = (table.name, [col.name for col in idx.columns])
+
+        self.assertEqual(orm_indexes, sql_indexes)
+
 
 class WalkConstraintTests(unittest.TestCase):
     def setUp(self):
@@ -95,7 +340,7 @@ class WalkConstraintTests(unittest.TestCase):
         self.addCleanup(self.engine.dispose)
         self.db = sessionmaker(bind=self.engine)()
         self.addCleanup(self.db.close)
-        self.db.add_all([User(id=1, email="walk@example.com", nickname="봉사자"), Shelter(id=1, name="보호소")])
+        self.db.add_all([User(id=1, login_id="walk_user", nickname="봉사자", password=UNUSABLE_PASSWORD), Shelter(id=1, name="보호소")])
         self.db.flush()
         self.db.add(Dog(id=1, name="강아지", shelter_id=1))
         self.db.flush()
@@ -182,6 +427,8 @@ class WalkConstraintTests(unittest.TestCase):
         for changes in ({"latitude": 37}, {"incident_type": "UNKNOWN"}, {"status": "UNKNOWN"}, {"description": ""}):
             self.invalid(WalkIncident(**{**incident, **changes}))
         self.db.add_all([WalkIncident(**incident), WalkIncident(**incident)])
+        for t in ("POOP_NO_BAG", "ATE_FOREIGN_OBJECT", "ABNORMAL_BEHAVIOR", "LOST_DOG", "SAFETY_THREAT", "OTHER"):
+            self.db.add(WalkIncident(**{**incident, "incident_type": t}))
         self.db.flush()
 
     def test_review_observations_and_uniqueness(self):
@@ -236,6 +483,26 @@ class WalkConstraintTests(unittest.TestCase):
                 self.db.delete(self.db.get(User, 1))
                 self.db.flush()
         self.assertEqual(self.request.reviewed_by, 1)
+
+    def test_shelter_volunteer_review_constraints(self):
+        self.walk.status, self.walk.ended_at = "COMPLETED", self.end
+        self.db.flush()
+        for bad_rating in (0.0, 5.5, 4.3):
+            self.invalid(ShelterVolunteerReview(
+                walk_id=self.walk.id, shelter_id=1, volunteer_user_id=1, reviewed_by=1, rating=bad_rating
+            ))
+        review = ShelterVolunteerReview(
+            walk_id=self.walk.id, shelter_id=1, volunteer_user_id=1, reviewed_by=1, rating=4.5, comment="good"
+        )
+        self.db.add(review)
+        self.db.flush()
+        self.invalid(ShelterVolunteerReview(
+            walk_id=self.walk.id, shelter_id=1, volunteer_user_id=1, reviewed_by=1, rating=5.0
+        ))
+        self.invalid(ShelterVolunteerReviewTag(review_id=review.id, tag_code="UNKNOWN"))
+        self.db.add(ShelterVolunteerReviewTag(review_id=review.id, tag_code="PUNCTUALITY"))
+        self.db.flush()
+        self.invalid(ShelterVolunteerReviewTag(review_id=review.id, tag_code="PUNCTUALITY"))
 
 
 class WalkCatalogContractTests(unittest.TestCase):

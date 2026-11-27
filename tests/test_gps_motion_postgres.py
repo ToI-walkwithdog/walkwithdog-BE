@@ -9,15 +9,15 @@ import unittest
 from unittest.mock import patch
 
 with patch.dict(os.environ, {'DATABASE_URL': 'sqlite://'}):
-    from app.models import Base
-    from app.walk_models import WALK_MODELS
+    # Import the models under the original isolated environment before migration helpers.
+    from app.models import Base  # noqa: F401
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from scripts.migrate_backend import migrate
 from scripts.prepare_demo_db import ROOT, PreparationError, table_counts, validate_local_engine
 from scripts.walk_schema import check_motion_schema, check_walk_schema
-from test_walk_postgres import TransactionEngine
+from test_walk_postgres import TransactionEngine, create_pre_007_schema
 
 TEST_URL = os.getenv('GPS_MOTION_TEST_DATABASE_URL')
 
@@ -35,14 +35,13 @@ class MotionMigrationPostgresTests(unittest.TestCase):
             custom = [s for s in inspector.get_schema_names() if s not in ('public', 'information_schema') and not s.startswith('pg_')]
             if inspector.get_table_names() or custom:
                 raise PreparationError('새로운 빈 격리 테스트 DB만 허용합니다.')
-            walk_names = {m.__tablename__ for m in WALK_MODELS}
-            Base.metadata.create_all(c, tables=[t for t in Base.metadata.sorted_tables if t.name not in walk_names])
+            create_pre_007_schema(c)
             for statement in (ROOT / 'migrations/007_walk_domain.sql').read_text().split(';'):
                 statement = '\n'.join(l for l in statement.splitlines() if not l.startswith('--')).strip()
                 if statement and statement.upper() not in ('BEGIN', 'COMMIT'):
                     c.exec_driver_sql(statement)
             c.exec_driver_sql("INSERT INTO shelters(id,name) VALUES (1,'보호소')")
-            c.exec_driver_sql("INSERT INTO users(id,email,nickname) VALUES (1,'motion@example.com','봉사자')")
+            c.exec_driver_sql("INSERT INTO users(id,login_id,nickname,password) VALUES (1,'motion_user','봉사자','!')")
             c.exec_driver_sql("INSERT INTO dogs(id,name,shelter_id) VALUES (1,'강아지',1)")
             c.exec_driver_sql("INSERT INTO walk_requests(id,user_id,dog_id,shelter_id,requested_start_at,requested_end_at) VALUES (1,1,1,1,'2030-01-07 00:00Z','2030-01-07 01:00Z')")
             c.exec_driver_sql("INSERT INTO walks(id,walk_request_id,status,started_at,ended_at,total_distance_m,duration_seconds,average_pace) VALUES (1,1,'COMPLETED','2030-01-07 00:00Z','2030-01-07 00:02Z',200,120,600)")

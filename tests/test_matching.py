@@ -8,7 +8,7 @@ from types import SimpleNamespace
 # Set before app.database imports so .env cannot select the user's real DB.
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.database import Base, get_db
-    from app.models import User, Survey, Dog, Shelter, MatchingResult
+    from app.models import User, Survey, Dog, Shelter, MatchingResult, UserRole
     from app.routers import surveys, matching, simulation
 
 from fastapi import FastAPI
@@ -22,7 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from app.schemas import SurveyCreate
 from app.survey_codes import SURVEY_FIELDS, parse_walk_hours
 from app.matching_service import build_analysis, calculate_score, get_score_label
-from app.auth import get_current_user
+from app.auth import UNUSABLE_PASSWORD, get_current_user
 
 
 def survey_values(**changes):
@@ -146,10 +146,10 @@ class MatchingAPITests(unittest.TestCase):
 
         app.dependency_overrides[get_db] = test_db
         # These regression tests exercise scoring, not authentication.
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1)
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1, role=UserRole.USER)
         self.client = TestClient(app)
         with self.Session() as db:
-            db.add(User(id=1, email="test@example.com", nickname="테스트"))
+            db.add(User(id=1, login_id="test_user", nickname="테스트", password=UNUSABLE_PASSWORD))
             db.add(Shelter(id=1, name="테스트 보호소", phone="02-123-4567", address="서울"))
             db.commit()
             for index in range(1, 8):

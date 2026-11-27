@@ -4,8 +4,8 @@ from unittest.mock import Mock, patch
 
 with patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}):
     from app.database import Base, get_db
-    from app.models import User, Dog, Survey, ChatSession, ChatMessage
-    from app.auth import get_current_user
+    from app.models import User, Dog, Survey, ChatSession, ChatMessage, UserRole
+    from app.auth import UNUSABLE_PASSWORD, get_current_user
     from app.routers import chat, simulation
     from app.ai_chat import generate_reply, redact_personal_data
     from app.eligibility import recommendation_candidate
@@ -39,14 +39,14 @@ class ChatSimulationTests(unittest.TestCase):
             with self.Session() as db:
                 yield db
         app.dependency_overrides[get_db] = test_db
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=self.current_id)
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=self.current_id, role=UserRole.USER)
         self.client = TestClient(app)
         self.settings = patch.dict(os.environ, {"GEMINI_API_KEY": "never-echo", "GEMINI_MODEL": "test-model"})
         self.settings.start()
         self.addCleanup(self.settings.stop)
         with self.Session.begin() as db:
-            db.add_all([User(id=1, email="private@example.com", nickname="private"),
-                        User(id=2, email="other@example.com", nickname="other"),
+            db.add_all([User(id=1, login_id="private_user", nickname="private", password=UNUSABLE_PASSWORD),
+                        User(id=2, login_id="other_user", nickname="other", password=UNUSABLE_PASSWORD),
                         Dog(id=1, name="강아지", energy_level=5, separation_anxiety_level=5, trait_source="shelter_text_parsed"),
                         Survey(id=1, user_id=1, housing_type="studio", outing_frequency="daily", daily_walk_time="0.5", walk_duration="under_20_minutes"),
                         Survey(id=2, user_id=2), Survey(id=3, user_id=1, outing_frequency="mostly_home", daily_walk_time="2")])
